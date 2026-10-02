@@ -23,6 +23,8 @@ const (
 	analysisGenerationPruneKeep  = 2
 )
 
+const analysisGenerationPruneMaxIdlePasses = 3
+
 // viewGenerationScoped is the store-side generation axis, narrowed to the one
 // method this package needs. Declared here rather than imported so a graph
 // that is not a SQLite store (the in-memory fixtures) simply fails the type
@@ -435,13 +437,11 @@ func (s *Server) scheduleAnalysisGenerationPrune(writer graph.AnalysisGeneration
 		defer s.backgroundMaintenance.Done()
 		defer s.analysisPruneScheduled.Store(false)
 		defer cancelMaintenance()
-		// One owner retains the slot through backoff. A timed-out pass
-		// may have committed useful chunks; continue without another RunAnalysis.
-		//
-		// Maintenance stands down while an edit cycle holds the build lane:
-		// each pass waits (bounded) for the lane, skips the round when the
-		// lane stays busy (the next scheduled prune resumes), and stops
-		// between chunks when an edit cycle starts under it.
+		// One owner retains the slot through backoff. Retry timed-out passes
+		// while they make progress; after consecutive idle passes, stop until
+		// another RunAnalysis schedules a new prune.
+		idlePasses := 0
+		// Each pass waits for the edit lane and stops if an edit cycle starts.
 		for backoff := 30 * time.Second; maintenanceCtx.Err() == nil; backoff = min(backoff*2, 5*time.Minute) {
 			if !s.waitForQuietEditLane(analysisPruneLaneWait) {
 				analysisPruneStoodDown.Add(1)
@@ -450,7 +450,7 @@ func (s *Server) scheduleAnalysisGenerationPrune(writer graph.AnalysisGeneration
 			ctx, cancel := context.WithTimeout(maintenanceCtx, 30*time.Second)
 			stop := s.cancelWhenEditCycleStarts(cancel)
 			runtimeactivity.Begin("analysis_generation_gc")
-			err := writer.PruneAnalysisGenerations(ctx, analysisGenerationPruneKeep, analysisGenerationPruneBatch)
+			removed, err := writer.PruneAnalysisGenerations(ctx, analysisGenerationPruneKeep, analysisGenerationPruneBatch)
 			runtimeactivity.End("analysis_generation_gc")
 			stop()
 			timedOut := ctx.Err() == context.DeadlineExceeded
@@ -460,6 +460,17 @@ func (s *Server) scheduleAnalysisGenerationPrune(writer graph.AnalysisGeneration
 				s.logger.Warn("mcp: analysis generation prune failed", zap.Error(err))
 			}
 			if !timedOut || !errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+			if removed > 0 {
+				idlePasses = 0
+			} else {
+				idlePasses++
+			}
+			if idlePasses >= analysisGenerationPruneMaxIdlePasses {
+				if s.logger != nil {
+					s.logger.Warn("mcp: analysis generation prune made no progress; stopping until the next analysis run", zap.Int("idle_passes", idlePasses))
+				}
 				return
 			}
 			timer := time.NewTimer(backoff)
