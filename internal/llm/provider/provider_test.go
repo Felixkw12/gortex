@@ -176,6 +176,25 @@ func TestNew_RequestyOK(t *testing.T) {
 	}
 }
 
+func TestNew_OpperMissingKey(t *testing.T) {
+	t.Setenv("OPPER_API_KEY", "")
+	if _, err := New(llm.Config{Provider: "opper"}.ApplyDefaults()); err == nil {
+		t.Fatal("expected error when OPPER_API_KEY is unset")
+	}
+}
+
+func TestNew_OpperOK(t *testing.T) {
+	t.Setenv("OPPER_API_KEY", "k")
+	p, err := New(llm.Config{Provider: "opper"}.ApplyDefaults())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer p.Close()
+	if p.Name() != "opper" {
+		t.Errorf("Name()=%q want opper", p.Name())
+	}
+}
+
 func TestNew_ClaudeCLIOK(t *testing.T) {
 	// Use a real binary that exists on every Unix to satisfy the
 	// PATH lookup — the factory only verifies presence, it doesn't

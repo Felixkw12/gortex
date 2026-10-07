@@ -41,6 +41,8 @@ func TestConfig_IsEnabled(t *testing.T) {
 		{"deepseek no model", Config{Provider: "deepseek"}, false},
 		{"requesty with model", Config{Provider: "requesty", Requesty: RemoteConfig{Model: "openai/gpt-4o-mini"}}, true},
 		{"requesty no model", Config{Provider: "requesty"}, false},
+		{"opper with model", Config{Provider: "opper", Opper: RemoteConfig{Model: "gpt-5.4-mini"}}, true},
+		{"opper no model", Config{Provider: "opper"}, false},
 		{"codex no model", Config{Provider: "codex"}, true},
 		{"codex with model", Config{Provider: "codex", Codex: CodexConfig{Model: "gpt-5-codex"}}, true},
 		{"copilot no model", Config{Provider: "copilot"}, true},
@@ -103,6 +105,9 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 	if c.Requesty.Model != defaultRequestyModel || c.Requesty.APIKeyEnv != defaultRequestyKeyEnv || c.Requesty.BaseURL != defaultRequestyBaseURL {
 		t.Errorf("requesty defaults wrong: %+v", c.Requesty)
 	}
+	if c.Opper.Model != defaultOpperModel || c.Opper.APIKeyEnv != defaultOpperKeyEnv || c.Opper.BaseURL != defaultOpperBaseURL {
+		t.Errorf("opper defaults wrong: %+v", c.Opper)
+	}
 }
 
 func TestConfig_MergeEnv_GeminiModel(t *testing.T) {
@@ -146,6 +151,19 @@ func TestConfig_MergeEnv_RequestyModelAndEffort(t *testing.T) {
 	}
 	if c.Requesty.Effort != "high" {
 		t.Errorf("requesty effort=%q want high", c.Requesty.Effort)
+	}
+}
+
+func TestConfig_MergeEnv_OpperModelAndEffort(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "opper")
+	t.Setenv("GORTEX_LLM_MODEL", "claude-sonnet-4-6")
+	t.Setenv("GORTEX_LLM_EFFORT", "high")
+	c := Config{}.MergeEnv()
+	if c.Opper.Model != "claude-sonnet-4-6" {
+		t.Errorf("opper model=%q", c.Opper.Model)
+	}
+	if c.Opper.Effort != "high" {
+		t.Errorf("opper effort=%q want high", c.Opper.Effort)
 	}
 }
 
@@ -348,6 +366,7 @@ func TestConfig_MergedWith_NewProviders(t *testing.T) {
 		Gemini:   RemoteConfig{APIKeyEnv: "GEMINI_API_KEY", Model: "gemini-2.5-pro"},
 		DeepSeek: RemoteConfig{APIKeyEnv: "DEEPSEEK_API_KEY"},
 		Requesty: RemoteConfig{APIKeyEnv: "REQUESTY_API_KEY"},
+		Opper:    RemoteConfig{APIKeyEnv: "OPPER_API_KEY"},
 	}
 	local := Config{Bedrock: BedrockConfig{Region: "eu-west-1"}}
 	got := local.MergedWith(global)
@@ -365,6 +384,9 @@ func TestConfig_MergedWith_NewProviders(t *testing.T) {
 	}
 	if got.Requesty.APIKeyEnv != "REQUESTY_API_KEY" {
 		t.Errorf("requesty api_key_env=%q, global should fill", got.Requesty.APIKeyEnv)
+	}
+	if got.Opper.APIKeyEnv != "OPPER_API_KEY" {
+		t.Errorf("opper api_key_env=%q, global should fill", got.Opper.APIKeyEnv)
 	}
 }
 
@@ -436,6 +458,7 @@ func TestConfig_ActiveModelAndWithModel(t *testing.T) {
 		{"bedrock", Config{Provider: "bedrock"}},
 		{"deepseek", Config{Provider: "deepseek"}},
 		{"requesty", Config{Provider: "requesty"}},
+		{"opper", Config{Provider: "opper"}},
 		{"local", Config{Provider: "local"}},
 	}
 	for _, c := range cases {

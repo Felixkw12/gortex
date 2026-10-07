@@ -11,6 +11,7 @@ func TestProfileForProvider(t *testing.T) {
 		"bedrock":   ProfileFrontier,
 		"deepseek":  ProfileFrontier,
 		"requesty":  ProfileFrontier,
+		"opper":     ProfileFrontier,
 		"local":     ProfileSmall,
 		"ollama":    ProfileSmall,
 		"":          ProfileSmall,

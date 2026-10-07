@@ -30,8 +30,9 @@ type Config struct {
 	// user's `claude` binary), "codex" (subprocess against the
 	// user's OpenAI `codex` binary), "gemini" (Google Gemini REST
 	// API), "bedrock" (AWS Bedrock Converse API, SigV4-signed),
-	// "deepseek" (DeepSeek Chat Completions, OpenAI-compatible) or
-	// "requesty" (Requesty gateway, OpenAI-compatible).
+	// "deepseek" (DeepSeek Chat Completions, OpenAI-compatible),
+	// "requesty" (Requesty gateway, OpenAI-compatible) or "opper"
+	// (Opper gateway, OpenAI-compatible).
 	// Empty defaults to "local".
 	Provider string `mapstructure:"provider" yaml:"provider,omitempty"`
 
@@ -68,6 +69,10 @@ type Config struct {
 	// (router.requesty.ai, OpenAI-compatible wire format). Model ids
 	// carry a vendor prefix, e.g. "openai/gpt-4o-mini".
 	Requesty RemoteConfig `mapstructure:"requesty" yaml:"requesty,omitempty"`
+	// Opper configures the hosted Opper gateway provider
+	// (api.opper.ai, OpenAI-compatible wire format). Model ids are
+	// bare pool names, e.g. "gpt-5.4-mini" or "claude-sonnet-4-6".
+	Opper RemoteConfig `mapstructure:"opper" yaml:"opper,omitempty"`
 	// Codex configures the OpenAI Codex CLI subprocess provider.
 	Codex CodexConfig `mapstructure:"codex" yaml:"codex,omitempty"`
 	// Copilot configures the GitHub Copilot CLI subprocess provider
@@ -407,6 +412,10 @@ const (
 	defaultRequestyModel   = "openai/gpt-4o-mini"
 	defaultRequestyBaseURL = "https://router.requesty.ai/v1"
 	defaultRequestyKeyEnv  = "REQUESTY_API_KEY"
+
+	defaultOpperModel   = "gpt-5.4-mini"
+	defaultOpperBaseURL = "https://api.opper.ai/v3/compat"
+	defaultOpperKeyEnv  = "OPPER_API_KEY"
 )
 
 // builtinProviders is the set of reserved provider names — the ones
@@ -416,7 +425,7 @@ var builtinProviders = map[string]bool{
 	"local": true, "anthropic": true, "openai": true, "azure": true,
 	"ollama": true, "claudecli": true, "codex": true, "copilot": true,
 	"cursor": true, "opencode": true, "gemini": true, "bedrock": true,
-	"deepseek": true, "requesty": true,
+	"deepseek": true, "requesty": true, "opper": true,
 }
 
 // IsBuiltinProvider reports whether name is a reserved built-in provider
@@ -466,6 +475,8 @@ func (c Config) ActiveModel() string {
 		return c.DeepSeek.Model
 	case "requesty":
 		return c.Requesty.Model
+	case "opper":
+		return c.Opper.Model
 	default:
 		if cp, ok := c.Custom[c.ProviderName()]; ok {
 			return cp.Model
@@ -509,6 +520,8 @@ func (c Config) WithModel(model string) Config {
 		c.DeepSeek.Model = model
 	case "requesty":
 		c.Requesty.Model = model
+	case "opper":
+		c.Opper.Model = model
 	default:
 		// For a custom provider, copy-on-write the Custom map so routing
 		// (which derives per-request configs via WithModel) never
@@ -555,6 +568,8 @@ func (c Config) IsEnabled() bool {
 		return strings.TrimSpace(c.DeepSeek.Model) != ""
 	case "requesty":
 		return strings.TrimSpace(c.Requesty.Model) != ""
+	case "opper":
+		return strings.TrimSpace(c.Opper.Model) != ""
 	default:
 		// A registered custom OpenAI-compatible provider is enabled
 		// once it carries a model; the API key (if any) is validated at
@@ -607,6 +622,8 @@ func (c Config) MergeEnv() Config {
 			c.DeepSeek.Model = v
 		case "requesty":
 			c.Requesty.Model = v
+		case "opper":
+			c.Opper.Model = v
 		default:
 			c.Local.Model = v
 		}
@@ -656,6 +673,8 @@ func (c Config) MergeEnv() Config {
 			c.DeepSeek.Effort = v
 		case "requesty":
 			c.Requesty.Effort = v
+		case "opper":
+			c.Opper.Effort = v
 		}
 	}
 	if v := os.Getenv("GORTEX_LLM_CTX"); v != "" {
@@ -806,6 +825,17 @@ func (c Config) ApplyDefaults() Config {
 		c.Requesty.BaseURL = defaultRequestyBaseURL
 	}
 
+	// opper
+	if c.Opper.Model == "" {
+		c.Opper.Model = defaultOpperModel
+	}
+	if c.Opper.APIKeyEnv == "" {
+		c.Opper.APIKeyEnv = defaultOpperKeyEnv
+	}
+	if c.Opper.BaseURL == "" {
+		c.Opper.BaseURL = defaultOpperBaseURL
+	}
+
 	return c
 }
 
@@ -831,6 +861,7 @@ func (c Config) MergedWith(fb Config) Config {
 	c.Bedrock = c.Bedrock.mergedWith(fb.Bedrock)
 	c.DeepSeek = c.DeepSeek.mergedWith(fb.DeepSeek)
 	c.Requesty = c.Requesty.mergedWith(fb.Requesty)
+	c.Opper = c.Opper.mergedWith(fb.Opper)
 	c.Codex = c.Codex.mergedWith(fb.Codex)
 	c.Copilot = c.Copilot.mergedWith(fb.Copilot)
 	c.Cursor = c.Cursor.mergedWith(fb.Cursor)
