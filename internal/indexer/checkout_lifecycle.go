@@ -278,8 +278,11 @@ type CheckoutLifecycle struct {
 	deferredRetirementActiveSince time.Time
 	deferredRetirementPicks       int
 	// retirementIdleBurst replaces deferredRetirementIdleBurstDuration when
-	// positive (test seam: a drain of many bursts at fixture scale).
+	// positive (test seam: a drain of many bursts at fixture scale), and
+	// retirementBurst replaces deferredRetirementBurstDuration (test seam: the
+	// race detector's slower quanta).
 	retirementIdleBurst time.Duration
+	retirementBurst     time.Duration
 	// deferredRetirementProgress is the last time (unix nanos) a deferred
 	// slice made progress; preemption by interactive writers is suspended
 	// once it is older than retirementStarvationLimit

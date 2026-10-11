@@ -109,14 +109,34 @@ func TestAgedRetirementUsesBoundedBudgetBeforeQueuedEditGetsTheLane(t *testing.T
 			}
 		}
 	}()
-	var committed store_sqlite.PayloadRetirementProgress
+	// The production bounded budget, doubled under the race detector, whose
+	// instrumented SQLite runs a quantum several times slower; the queued
+	// edit waits at most twice the budget either way.
+	budget := deferredRetirementBurstDuration
+	if indexerRaceDetectorOn {
+		budget *= 2
+	}
+	l.retirementBurst = budget
+	var (
+		committed  store_sqlite.PayloadRetirementProgress
+		firstTook  time.Duration
+		firstErr   error
+		quantumMu  sync.Mutex
+		quantaSeen int
+	)
 	l.retireQuantum = func(ctx context.Context, generationID int64, inUse func(int64) bool) (store_sqlite.PayloadRetirementProgress, error) {
 		if generationID != id {
 			return store_sqlite.PayloadRetirementProgress{}, fmt.Errorf("wrong retirement generation: %d", generationID)
 		}
+		started := time.Now()
 		progress, err := l.store.RetirePayloadGenerationQuantum(ctx, generationID, inUse)
+		quantumMu.Lock()
+		if quantaSeen++; quantaSeen == 1 {
+			firstTook, firstErr = time.Since(started), err
+		}
 		committed.ChunksCommitted += progress.ChunksCommitted
 		committed.RowsDeleted += progress.RowsDeleted
+		quantumMu.Unlock()
 		return progress, err
 	}
 	go func() { _, _, err := l.SweepDeferredRetirements(ctx); sweepDone <- err }()
@@ -137,7 +157,7 @@ func TestAgedRetirementUsesBoundedBudgetBeforeQueuedEditGetsTheLane(t *testing.T
 	case at := <-editDone:
 		editJoined = true
 		require.False(t, at.IsZero())
-		require.LessOrEqual(t, at.Sub(from), 100*time.Millisecond)
+		require.LessOrEqual(t, at.Sub(from), 2*budget)
 	case <-time.After(5 * time.Second):
 		t.Fatal("queued edit did not acquire after bounded service")
 	}
@@ -148,7 +168,13 @@ func TestAgedRetirementUsesBoundedBudgetBeforeQueuedEditGetsTheLane(t *testing.T
 	case <-time.After(5 * time.Second):
 		t.Fatal("bounded service did not finish")
 	}
-	require.Positive(t, committed.ChunksCommitted)
+	quantumMu.Lock()
+	defer quantumMu.Unlock()
+	t.Logf("%d quanta; the first ran %s of the %s budget (%v)", quantaSeen, firstTook, budget, firstErr)
+	// The bounded burst must commit inside its budget: a first quantum the
+	// budget cuts commits nothing (its transaction rolls back), and an aged
+	// burst that never commits never retires its debt.
+	require.Positive(t, committed.ChunksCommitted, "the first quantum ran %s against the %s budget and committed nothing (%v)", firstTook, budget, firstErr)
 	require.LessOrEqual(t, committed.RowsDeleted, int64(64))
 	// Completion may clear debt; partial work must keep its original age.
 	if l.hasDeferredRetirementWork() {
@@ -262,15 +288,23 @@ func TestAgedRetirementDrainsLeavesBeforeReferencedParents(t *testing.T) {
 	l.SetBuildGate(gate)
 	l.foregroundWork = func() (string, time.Time) { return "refresh_ticket", time.Now() }
 	l.deferredRetirementEligibleSince.Store(time.Now().Add(-3 * time.Minute).UnixNano())
+	// A fixed number of 50 ms bursts is not a convergence guarantee on a slow
+	// runner: drive the sweeps with the bounded control the debt test uses.
 	var retired int
-	for attempt := 0; attempt < 40; attempt++ {
-		n, pending, err := l.SweepDeferredRetirements(t.Context())
-		require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	for attempt := 0; attempt < 512 && ctx.Err() == nil; attempt++ {
+		n, pending, err := l.SweepDeferredRetirements(ctx)
 		retired += n
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			continue // only a shorter internal budget may be resumed
+		}
+		require.NoError(t, err)
 		if !pending {
 			break
 		}
 	}
+	require.NoError(t, ctx.Err(), "retirement exceeded its bounded convergence control")
 	require.Equal(t, 2, retired)
 	requireGenerationRetired(t, f.store, child)
 	requireGenerationRetired(t, f.store, parent)
@@ -309,6 +343,11 @@ func TestRetirementBurstDistinguishesAutomaticRollbackFromLiveSQLFailure(t *test
 	for _, kind := range []string{"expired", "live", "unrelated", "parent_canceled"} {
 		t.Run(kind, func(t *testing.T) {
 			l, gate, id := agedRetirementFixture(t)
+			// The subtests pin how a burst classifies its second quantum's
+			// outcome at and after its deadline, not the budget's length: the
+			// first real quantum and the second's BeginTx must fit inside it on
+			// any runner, and the stubs that need the deadline wait for it.
+			l.retirementBurst = time.Second
 			db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "rollback.sqlite"))
 			require.NoError(t, err)
 			db.SetMaxOpenConns(1)

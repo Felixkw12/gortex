@@ -120,7 +120,11 @@ func (l *CheckoutLifecycle) serveDeferredRetirementBurst(
 	_, lastForeground := l.retirementForegroundWork()
 	quiet := lastForeground.IsZero() || admittedAt.Sub(lastForeground) >= deferredRetirementStarvedIdle
 	extended := quiet && nobodyWaits()
-	budget, maxAttempts := deferredRetirementBurstDuration, deferredRetirementBurstChunks
+	bounded := deferredRetirementBurstDuration
+	if l.retirementBurst > 0 {
+		bounded = l.retirementBurst
+	}
+	budget, maxAttempts := bounded, deferredRetirementBurstChunks
 	if extended {
 		budget, maxAttempts = deferredRetirementIdleBurstDuration, deferredRetirementIdleBurstChunks
 		if l.retirementIdleBurst > 0 {
@@ -187,7 +191,7 @@ func (l *CheckoutLifecycle) serveDeferredRetirementBurst(
 			break
 		}
 		wide := extended && nobodyWaits()
-		if extended && !wide && time.Since(admittedAt) >= deferredRetirementBurstDuration {
+		if extended && !wide && time.Since(admittedAt) >= bounded {
 			break
 		}
 		if l.editCycleHoldsBuildLane() {

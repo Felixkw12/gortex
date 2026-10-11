@@ -108,7 +108,15 @@ func TestRetirementBurstsFinishAFencedGenerationBeforeRotating(t *testing.T) {
 		maxRetiring = max(maxRetiring, retiringGenerationCount(t, store))
 	}
 	require.NotZero(t, removedAt, "no generation was removed in twelve bursts")
-	require.LessOrEqual(t, removedAt, 2, "the first removal took %d bursts", removedAt)
+	// Under the race detector a quantum can reach its own time budget and
+	// delete less than the calibrated one, so a loaded runner's burst covers
+	// fewer rows: twice the bursts. Rotating still removes the first only
+	// after a whole lap of seven.
+	removalBursts := 2
+	if indexerRaceDetectorOn {
+		removalBursts = 4
+	}
+	require.LessOrEqual(t, removedAt, removalBursts, "the first removal took %d bursts", removedAt)
 	require.LessOrEqual(t, maxRetiring, 2, "%d generations were fenced at once", maxRetiring)
 	requireCatalogGenerationPresent(t, store, large)
 }

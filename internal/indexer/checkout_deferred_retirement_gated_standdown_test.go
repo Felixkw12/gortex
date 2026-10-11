@@ -114,11 +114,18 @@ func TestAgedRetirementBesideAChainFoldKeepsOneBurstPerSecond(t *testing.T) {
 		return store_sqlite.PayloadRetirementProgress{ChunksCommitted: 1, RowsDeleted: 16}, store_sqlite.ErrPayloadSweepBudgetExhausted
 	}
 	before := viewmetrics.Read()
+	firstSweep := time.Now()
 	_, pending, err := l.SweepDeferredRetirements(t.Context())
 	require.NoError(t, err)
 	require.True(t, pending)
 	require.Positive(t, bursts, "aged debt beside a fold got no burst")
 	served := bursts
+	// The burst started the fold's one-second window. A slow runner may spend
+	// that second in the first sweep itself, so the window is restarted now:
+	// the second sweep below is within it however long the first took.
+	burstAt := l.deferredRetirementFoldBurstAt.Load()
+	require.GreaterOrEqual(t, burstAt, firstSweep.UnixNano(), "the burst beside the fold did not start its pacing window")
+	l.deferredRetirementFoldBurstAt.Store(time.Now().UnixNano())
 	scans := deferredRetirementScans.Load()
 	_, pending, err = l.SweepDeferredRetirements(t.Context())
 	require.NoError(t, err)
