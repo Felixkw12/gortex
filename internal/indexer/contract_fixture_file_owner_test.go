@@ -16,7 +16,9 @@ import (
 )
 
 func TestContractFollowupPublishesCanonicalColdFixtureFiles(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	// A hang guard over the whole cold index, reconcile and follow-up, not a
+	// latency claim: a slow Windows runner took more than 5 s for the whole.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	idx, store := newSQLiteIndexer(t)
 	t.Cleanup(idx.Close)

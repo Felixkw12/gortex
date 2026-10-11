@@ -2,7 +2,6 @@ package goanalysis
 
 import (
 	"context"
-	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +16,10 @@ func TestWarmupListingDurationPublicationIsRaceFree(t *testing.T) {
 	cached := newTestProvider(t)
 	cached.warm.quiet = time.Millisecond
 	cached.warm.batchSize = 1
+	// A loaded runner can starve the background-priority listings past the
+	// wait below; the production fallback (retry at normal priority) then
+	// fires well inside it.
+	cached.warm.stall = 15 * time.Second
 	t.Cleanup(func() { _ = cached.Close() })
 	st := cached.typecheckState(root, goManifestDigest(root))
 	stop, returned := make(chan struct{}), make(chan struct{})
@@ -33,7 +36,9 @@ func TestWarmupListingDurationPublicationIsRaceFree(t *testing.T) {
 			observed.Store(st.warmList.Load())
 			st.mu.Unlock()
 			samples.Add(1)
-			runtime.Gosched()
+			// Paced, so the reader overlaps the merges without starving them
+			// of the mutex.
+			time.Sleep(100 * time.Microsecond)
 		}
 	}()
 	joined := false

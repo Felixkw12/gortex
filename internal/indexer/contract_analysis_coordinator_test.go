@@ -71,7 +71,11 @@ func TestContractAnalysisCoordinatorCoalescesOwnedCohortAndPublishesBothTargets(
 		t.Fatalf("duplicate handoff not released: %d", released.Load())
 	}
 	close(resume)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// A starvation guard, not a latency bound: a worker the sustained
+	// foreground demand starved never publishes. Both targets publish in
+	// about a second on a Windows runner, once in 10 s while its disk took
+	// 7.8 s for one WAL checkpoint.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	for _, key := range []graph.ContractAttachmentKey{a.Snapshot.Key, b.Snapshot.Key} {
 		for {
