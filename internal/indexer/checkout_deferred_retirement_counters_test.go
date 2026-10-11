@@ -11,6 +11,10 @@ import (
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
+func counterDeltaKey(before, after viewmetrics.Snapshot, key string) int64 {
+	return after.Counters[key] - before.Counters[key]
+}
+
 // A generation is counted owed once, whichever path meets it first —
 // discovery, a coordinator's deferral or a refused offer — and once per
 // Store.

@@ -1,3 +1,5 @@
+//go:build performance
+
 package indexer
 
 import (
@@ -14,6 +16,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
@@ -39,11 +42,11 @@ const (
 	paceIdleBurst  = 200 * time.Millisecond
 	// paceResumeDrain bounds the drain once retirement resumes after the
 	// stream and its seeded debt: back-to-back bursts clear it within the
-	// bound (measured 5-8 s), one burst per one-second pass does not (49 s).
-	// Under the race detector the bound is paceResumeDrainRace (measured
-	// 18 s; one burst per pass took 97 s).
-	paceResumeDrain     = 12 * time.Second
-	paceResumeDrainRace = 3 * paceResumeDrain
+	// bound (measured 5-8 s on an M1, 13 s on a Windows runner), one burst
+	// per one-second pass does not (49 s). Under the race detector the bound
+	// is paceResumeDrainRace (measured 18 s; one burst per pass took 97 s).
+	paceResumeDrain     = 24 * time.Second
+	paceResumeDrainRace = 36 * time.Second
 	// paceExtraGenerations failed generations of paceExtraNodes nodes are
 	// owed at the end of the stream (seedPaceDebt).
 	paceExtraGenerations = 8
@@ -94,6 +97,9 @@ type paceResult struct {
 	bursts               []observer.LoggedEntry
 	cycleErrs            int
 	leaked               []int64
+	// stampsTrusted reports the checkout's filesystem gives trusted change
+	// stamps (trustedChangeStamps).
+	stampsTrusted bool
 }
 
 // paceRun drives one stream. With retire the real worker loop runs beside it.
@@ -109,6 +115,7 @@ func paceRun(t *testing.T, retire bool) paceResult {
 	cycles := &motionFixtureCycles{}
 	c := liveMotionCoordinator(t, f, cycles, CheckoutCoordinatorConfig{Builder: builder, Gate: gate})
 	installDaemonBuildLaneBusy(f, c)
+	stampsTrusted := trustedChangeStamps(t, c.sampler)
 	core, logs := observer.New(zap.InfoLevel)
 	l := &CheckoutLifecycle{catalog: f.catalog, store: f.store, leases: f.leases, logger: zap.New(core),
 		owed: map[int64]struct{}{}, coordinators: map[string]*CheckoutCoordinator{f.checkoutID: c}, cfgWatchCheckouts: true}
@@ -155,7 +162,7 @@ func paceRun(t *testing.T, retire bool) paceResult {
 		}
 	}()
 
-	var res paceResult
+	res := paceResult{stampsTrusted: stampsTrusted}
 	var tmu sync.Mutex
 	var asks sync.WaitGroup
 	// ask is a require_fresh read: a refresh ticket bound to a sample begun
@@ -278,10 +285,6 @@ func p95(durations []time.Duration) time.Duration {
 	return sorted[max(index, 0)]
 }
 
-func counterDeltaKey(before, after viewmetrics.Snapshot, key string) int64 {
-	return after.Counters[key] - before.Counters[key]
-}
-
 // Deferred retirement keeps pace with a sustained linked-worktree edit stream
 // and drains at idle, without costing the stream's reads their latency.
 //
@@ -289,7 +292,10 @@ func counterDeltaKey(before, after viewmetrics.Snapshot, key string) int64 {
 // times slower: most require_fresh reads miss their 10 s answer in both arms,
 // so A7's latency measures nothing there and is skipped; A2's resume bound is
 // widened to paceResumeDrainRace, and everything else runs as it does
-// without the detector.
+// without the detector. A7 is skipped too on a filesystem without trusted
+// change stamps (Windows), where the full-sample fence publishes nothing
+// while the stream runs (build_content_proof.go), so the reads of both arms
+// wait for it to pause.
 func TestDeferredRetirementKeepsPaceWithSustainedLinkedWorktreeEdits(t *testing.T) {
 	if testing.Short() {
 		t.Skip("native file watcher; minutes of wall clock")
@@ -433,6 +439,10 @@ func TestDeferredRetirementKeepsPaceWithSustainedLinkedWorktreeEdits(t *testing.
 		on, off, len(run.tickets), len(twin.tickets), run.ticketErrs, twin.ticketErrs)
 	if indexerRaceDetectorOn {
 		t.Logf("A7: skipped under the race detector")
+		return
+	}
+	if !run.stampsTrusted || !twin.stampsTrusted {
+		t.Logf("A7: skipped: %s, so the stream's reads wait for it to pause in both arms", gitstate.ReadSetNoChangeStamps)
 		return
 	}
 	if run.ticketErrs != 0 || twin.ticketErrs != 0 {
