@@ -446,18 +446,5 @@ func TestImportPreparationWaitDoesNotHoldTheBuildLane(t *testing.T) {
 // platform verdict is a prerequisite skip for physical-detachment fixtures.
 func requireImportReadSetProof(t *testing.T, c *CheckoutCoordinator) {
 	t.Helper()
-	sample, err := c.sampler.Sample(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	proof, err := c.sampler.ConfirmReadSet(t.Context(), sample, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if proof.Reason == "the checkout's filesystem gives no change stamps" {
-		t.Skip(proof.Reason)
-	}
-	if !proof.Confirmed {
-		t.Fatalf("fixture cannot prove its read set: %s", proof.Reason)
-	}
+	requireTrustedChangeStamps(t, c.sampler)
 }

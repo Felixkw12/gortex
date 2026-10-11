@@ -223,10 +223,12 @@ type DirtySampler struct {
 	recent []sampleEvidence
 	// gitDir/commonDir resolve the checkout's .git without running git, and
 	// stampsTrusted whether its filesystem's change stamps are trusted; both
-	// are computed once (read_set_confirm.go).
+	// are computed once (read_set_confirm.go). stampsDistrusted overrides
+	// stampsTrusted for good (DistrustChangeStampsForTest).
 	gitDir, commonDir            string
 	gitDirsResolved              bool
 	stampsChecked, stampsTrusted bool
+	stampsDistrusted             bool
 	// taken counts the samples this sampler has taken (not the ones
 	// SampleSince shared).
 	taken uint64

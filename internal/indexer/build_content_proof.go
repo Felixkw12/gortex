@@ -129,7 +129,10 @@ import (
 //   - A filesystem without trusted change stamps, or a realtime clock that
 //     jumped: nothing held by its stamp can be proven, so the fence keeps
 //     main's full-sample decision (ConfirmReadSetSettled reports unproven);
-//     recorded bytes are still re-hashed (readMoved).
+//     recorded bytes are still re-hashed (readMoved). The proof's liveness
+//     (a build a save outpaced published as its sample) therefore applies
+//     only where change stamps are trusted (APFS; ext4, xfs, btrfs, tmpfs),
+//     while Windows (dirty_identity_other.go) keeps the full-sample fence.
 //   - The move-and-restore guard test moves the fixture's own paths and the
 //     named root files every build reads (ignore files, module manifests,
 //     CODEOWNERS at each location), not arbitrary paths a future reader

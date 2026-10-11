@@ -196,14 +196,37 @@ func TestConfirmReadSetRefusesWithoutEvidence(t *testing.T) {
 func TestConfirmReadSetRefusesWithoutTrustedChangeStamps(t *testing.T) {
 	root := readSetRepo(t, false)
 	s, before := sampleForReadSet(t, root)
-	// Exercise the conservative filesystem fallback on every test platform.
-	s.stampsChecked, s.stampsTrusted = true, false
+	// Exercise the conservative filesystem fallback on every test platform,
+	// after the sampler cached its own verdict: the seam overrides it.
+	_ = s.changeStampsTrusted()
+	s.DistrustChangeStampsForTest()
 	got, err := s.ConfirmReadSet(context.Background(), before, readSetFiles, readSetDirs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Confirmed || !strings.Contains(got.Reason, "no change stamps") || got.Rehashed != 0 || got.Files != 0 || got.Dirs != 0 {
+	if got.Confirmed || got.Reason != ReadSetNoChangeStamps || got.Rehashed != 0 || got.Files != 0 || got.Dirs != 0 {
 		t.Fatalf("unsupported change stamps must refuse without claiming checked paths: %+v", got)
+	}
+	// And before the sampler computed its own verdict, which cannot then
+	// replace the override.
+	fresh, err := NewDirtySampler(root, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh.DistrustChangeStampsForTest()
+	for call := 1; call <= 2; call++ {
+		// The first call computes the filesystem's verdict, the second
+		// answers from the cache.
+		if fresh.changeStampsTrusted() {
+			t.Fatalf("call %d: the sampler's own verdict replaced the override", call)
+		}
+	}
+	freshBefore, err := fresh.Sample(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := fresh.ConfirmReadSet(context.Background(), freshBefore, readSetFiles, readSetDirs); err != nil || got.Confirmed || got.Reason != ReadSetNoChangeStamps {
+		t.Fatalf("a sampler distrusted before its first verdict must refuse: %+v, %v", got, err)
 	}
 }
 

@@ -20,6 +20,13 @@ import (
 // other path sends the caller to a full sample.
 const readSetChangeMargin = 50 * time.Millisecond
 
+// ReadSetNoChangeStamps is the Reason a confirmation gives when the
+// checkout's filesystem has no change stamps the sampler trusts
+// (changeStampsTrusted): every platform but darwin's APFS and linux's
+// ext4/xfs/btrfs/tmpfs, Windows included. Nothing is proven by a stamp there,
+// so the caller always takes a full sample.
+const ReadSetNoChangeStamps = "the checkout's filesystem gives no change stamps"
+
 // ReadSetConfirmation is the verdict of ConfirmReadSet. Confirmed means every
 // path the build read still holds the content the sample fingerprinted; when
 // it is false, Reason says what could not be proven and the caller takes a
@@ -229,7 +236,7 @@ func (s *DirtySampler) confirmReadSet(ctx context.Context, before DirtySnapshot,
 		out.Reason = "the realtime clock moved since the sample"
 		return out, nil
 	case !s.changeStampsTrusted():
-		out.Reason = "the checkout's filesystem gives no change stamps"
+		out.Reason = ReadSetNoChangeStamps
 		return out, nil
 	case !evidence.unchanged():
 		out.Reason = "HEAD, its ref or packed-refs changed since the sample"
@@ -420,7 +427,7 @@ func (s *DirtySampler) ancestorSettled(p string, settled func(dirtyFileVersion) 
 func (s *DirtySampler) changeStampsTrusted() bool {
 	s.mu.Lock()
 	if s.stampsChecked {
-		trusted := s.stampsTrusted
+		trusted := s.stampsTrusted && !s.stampsDistrusted
 		s.mu.Unlock()
 		return trusted
 	}
@@ -432,8 +439,22 @@ func (s *DirtySampler) changeStampsTrusted() bool {
 	}
 	s.mu.Lock()
 	s.stampsChecked, s.stampsTrusted = true, trusted
+	trusted = trusted && !s.stampsDistrusted
 	s.mu.Unlock()
 	return trusted
+}
+
+// DistrustChangeStampsForTest makes the sampler treat its checkout as a
+// filesystem without trusted change stamps from now on, as it does on
+// Windows: every read-set confirmation and stamp proof refuses, and the
+// callers keep the full-sample fence. The digest cache, which asks the
+// filesystem directly, is unaffected. The override is sticky: a verdict
+// of the filesystem's own still being computed cannot replace it. Tests
+// only.
+func (s *DirtySampler) DistrustChangeStampsForTest() {
+	s.mu.Lock()
+	s.stampsDistrusted = true
+	s.mu.Unlock()
 }
 
 // cleanRepoPath normalizes a repository-relative slash path; "" is the root.
