@@ -60,8 +60,9 @@ choices, and the risk is yours once made.
 | Set `mcp.allow_embedded: true` | Each MCP client may create a private one-shot server and index a tree when the shared daemon is unavailable | Off by default to avoid duplicate processes and indexes. An explicit `gortex mcp --index <path>` may also create the repo-local notebook there; an inferred root never does |
 | `--http-addr` (even `127.0.0.1`) | **Every local process, and any page your browser loads**, can reach the MCP surface | The unix socket's permissions do not cover a TCP port. Prefer the socket |
 | Omit `--http-auth-token` on a loopback bind | Unauthenticated access to that port | Permitted by design; a non-loopback bind refuses to start without a token |
-| `--http-allowed-origin <origin>` | That website can drive the full tool surface **with your privileges** | Off by default: cross-origin browser requests to `/mcp` are refused |
-| `--cors-origin '*'` (current default) | Any origin may read `/v1` responses when it can reach the port | Narrow it if you enable `--http-addr` |
+| `--http-allowed-origin <origin>` | That website can drive the full daemon tool surface **with your privileges** | Off by default: browser Origins on both `/mcp` and `/v1` are refused, including preflights |
+| Daemon `--cors-origin <origin>` | CORS response headers for an origin already permitted by `--http-allowed-origin` | Disabled by default; `'*'` never bypasses the Origin guard |
+| Embedded `mcp --server --cors-origin <origin>` | That specific website can drive the REST tool surface **with your privileges** | Off by default; `'*'` does not grant browser access. Set `--auth-token` even on loopback |
 | `gortex eval-server` | An HTTP tool surface for benchmarking | Loopback-only unless you pass a token |
 | `GORTEX_DAEMON_PPROF_ADDR` | Unauthenticated heap dumps (**containing indexed source**) and `/debug/pprof/cmdline` (**containing your auth token**) | Loopback-only; opt-in |
 | Configure a hosted or subprocess **LLM provider** | Prompts derived from your source leave the machine | No provider is configured by default |
@@ -192,8 +193,10 @@ choice hands out. This is the short actionable form:
   writable by every agent session on the machine. Prune the list with
   `gortex untrack`; it is a standing grant, not a per-session one.
 - **Prefer the unix socket.** Only pass `--http-addr` if you need HTTP. If you
-  do: set `--http-auth-token` even on loopback, narrow `--cors-origin` from its
-  `*` default, and add `--http-allowed-origin` only for a web front end you run.
+  do: set `--http-auth-token` even on loopback, and enable `--cors-origin` and
+  `--http-allowed-origin` only for a specific web front end you trust. For the
+  embedded `mcp --server` listener, use `--auth-token` and leave `--cors-origin`
+  unset unless a trusted web front end needs it.
 - **Never bind a non-loopback address without a token.** Gortex refuses to start
   that way; do not work around it. Use an SSH tunnel instead.
 - **Leave `GORTEX_DAEMON_PPROF_ADDR` unset** outside a debugging session — it

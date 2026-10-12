@@ -63,7 +63,7 @@ func init() {
 	mcpCmd.Flags().BoolVar(&mcpServerAPI, "server", false, "start HTTP server API alongside MCP stdio")
 	mcpCmd.Flags().StringVar(&mcpBind, "bind", "127.0.0.1", "bind address for --server; requires --auth-token when not localhost")
 	mcpCmd.Flags().StringVar(&mcpAuthToken, "auth-token", "", "bearer token for --server's /v1/* requests (fallback: $GORTEX_SERVER_TOKEN)")
-	mcpCmd.Flags().StringVar(&mcpCORSOrigin, "cors-origin", "*", "allowed CORS origin for server API")
+	mcpCmd.Flags().StringVar(&mcpCORSOrigin, "cors-origin", "", "trusted web origin allowed to call the server API (default: refuse browser origins; '*' does not grant browser access)")
 	mcpCmd.Flags().StringSliceVar(&mcpTrack, "track", nil, "additional repository paths to track")
 	mcpCmd.Flags().StringVar(&mcpProject, "project", "", "active project name")
 	mcpCmd.Flags().StringVar(&mcpCacheDir, "cache-dir", "", "directory for the side stores — notes, feedback, server id (default ~/.gortex/cache/)")
@@ -463,9 +463,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		serverHandler.SetConversationDir(conversationlog.DirFromEnv())
 		authTokenForGuard := authToken
 		serverHandler.SetConversationGuard(nil, func() string { return authTokenForGuard })
-		handler := server.WithAuth(serverHandler, authToken)
-		corsOpts := server.CORSOptions{AllowOrigins: []string{mcpCORSOrigin}}
-		handler = server.WithCORS(handler, corsOpts)
+		handler := composeMCPServerHandler(serverHandler, authToken, mcpCORSOrigin)
 		go func() {
 			serverAddr := fmt.Sprintf("%s:%d", mcpBind, mcpPort)
 			fmt.Fprintf(os.Stderr, "[gortex] server API at http://%s\n", serverAddr)
