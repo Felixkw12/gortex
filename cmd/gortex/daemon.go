@@ -140,9 +140,9 @@ func init() {
 	daemonStartCmd.Flags().StringVar(&daemonHTTPAuthToken, "http-auth-token", "",
 		"bearer token required on every Streamable HTTP request (default: read $GORTEX_DAEMON_HTTP_TOKEN; empty allows unauthenticated localhost binds)")
 	daemonStartCmd.Flags().StringSliceVar(&daemonHTTPAllowedOrigins, "http-allowed-origin", nil,
-		"web origin permitted to call /mcp cross-origin (e.g. https://ui.example); repeatable. Empty refuses every browser origin — a loopback bind is reachable from any page the user visits")
-	daemonStartCmd.Flags().StringVar(&daemonHTTPCORSOrigin, "cors-origin", "*",
-		"allowed CORS origin for the HTTP surface (use '*' for any); applies to both /mcp and /v1 when --http-addr is set")
+		"web origin permitted to call /mcp and /v1 cross-origin (e.g. https://ui.example); repeatable. Empty refuses every browser origin — a loopback bind is reachable from any page the user visits")
+	daemonStartCmd.Flags().StringVar(&daemonHTTPCORSOrigin, "cors-origin", "",
+		"CORS response origin for /mcp and /v1 (default: disabled); browser access also requires --http-allowed-origin, even with '*'")
 	daemonStartCmd.Flags().StringSliceVar(&daemonHTTPConversationAllow, "conversation-host", nil,
 		"extra Host values (beyond loopback) the conversation-log inspector accepts without a token; repeatable")
 	daemonStartCmd.Flags().StringVar(&daemonBackend, "backend", "sqlite",

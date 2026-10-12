@@ -17,16 +17,17 @@ import (
 // single listener: the MCP Streamable transport (streamH, serving /mcp
 // and /healthz with its own auth) under the catch-all, and the /v1 REST
 // API (v1, the former `gortex server`) under /v1/ behind a bearer-auth
-// wrapper. CORS, when an origin is set, wraps the whole mux so browser
-// clients (the web UI) can reach either surface cross-origin.
+// wrapper. The browser Origin guard wraps the whole mux, outside CORS, so
+// both surfaces and preflight requests enforce the same explicit allowlist.
 func composeDaemonHTTPHandler(streamH, v1 http.Handler, tokenFn func() string, corsOrigin string) http.Handler {
 	top := http.NewServeMux()
 	top.Handle("/", streamH)
 	top.Handle("/v1/", server.WithAuthFunc(v1, tokenFn))
+	var handler http.Handler = top
 	if corsOrigin != "" {
-		return server.WithCORS(top, server.CORSOptions{AllowOrigins: []string{corsOrigin}})
+		handler = server.WithCORS(handler, server.CORSOptions{AllowOrigins: []string{corsOrigin}})
 	}
-	return top
+	return browserOriginGuard(handler, daemonHTTPAllowedOrigins)
 }
 
 // daemonStreamableDispatcher bridges streamable.Transport (which has
@@ -246,7 +247,7 @@ func buildDaemonStreamableHandler(disp daemon.MCPDispatcher, reg *daemon.Session
 func browserOriginGuard(next http.Handler, allowed []string) http.Handler {
 	allowSet := make(map[string]struct{}, len(allowed))
 	for _, o := range allowed {
-		if o = strings.ToLower(strings.TrimSpace(o)); o != "" {
+		if o = strings.ToLower(strings.TrimSpace(o)); o != "" && o != "*" {
 			allowSet[o] = struct{}{}
 		}
 	}
@@ -261,7 +262,7 @@ func browserOriginGuard(next http.Handler, allowed []string) http.Handler {
 			return
 		}
 		http.Error(w, "forbidden: cross-origin requests are not accepted; "+
-			"pass --http-allowed-origin to permit a specific web origin", http.StatusForbidden)
+			"configure an explicit trusted web origin to permit browser access", http.StatusForbidden)
 	})
 }
 
