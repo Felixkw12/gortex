@@ -526,15 +526,16 @@ func (mi *MultiIndexer) withRepositoryOutputGenerationSource(
 		return bodyErr
 	})
 	if bodyDone && err != nil {
+		if errors.Is(err, ErrOutputMutationReceiptSuperseded) {
+			// Overtaken after every core write: never accepted, settled, the
+			// settle closing the windows it settles.
+			mi.settleInstalledContractCoreInputs(repoPrefix)
+		}
 		// As on the Indexer's own lane: a completed body closes the core-write
 		// windows of the files it began, whatever Complete says.
 		mi.endInstalledContractCoreWrites(repoPrefix)
 	}
 	if err != nil {
-		if bodyDone && errors.Is(err, ErrOutputMutationReceiptSuperseded) {
-			// Overtaken after every core write: never accepted, settled.
-			mi.settleInstalledContractCoreInputs(repoPrefix)
-		}
 		return err
 	}
 	// As on the Indexer's own lane, the accept closes the windows of the rows
@@ -1902,32 +1903,35 @@ func (idx *Indexer) withOutputGenerationSource(
 		return bodyErr
 	})
 	if bodyDone && err != nil {
-		// Every core write of the begun files is done, whatever Complete
-		// says: their core-write windows close, so a contract job can read
-		// their rows without waiting for an accept that will not come.
 		if journal := current.contractCoreInputs; journal != nil {
+			if errors.Is(err, ErrOutputMutationReceiptSuperseded) {
+				// The body completed every core write and Complete found
+				// that a newer mutation took the owner over: its receipts
+				// are never accepted, and are settled so a contract job sees
+				// the file's rows are complete. The settle closes the
+				// windows it settles, so a job woken by the close reads each
+				// row's final stamp. A body that failed, or never ran, left
+				// its rows in whatever state it stopped in and settles
+				// nothing.
+				journal.settle()
+			}
+			// Every core write of the begun files is done, whatever Complete
+			// says: their core-write windows close, so a contract job can
+			// read their rows without waiting for an accept that will not
+			// come. After a settle this closes only a window the settle did
+			// not, one whose path a later receipt write moved.
 			journal.written()
 		}
 	}
 	if err != nil {
-		if bodyDone && errors.Is(err, ErrOutputMutationReceiptSuperseded) {
-			// The body completed every core write and Complete found that a
-			// newer mutation took the owner over: its receipts are never
-			// accepted, and are settled so a contract job sees the file's
-			// rows are complete. A body that failed, or never ran, left its
-			// rows in whatever state it stopped in and settles nothing.
-			if journal := current.contractCoreInputs; journal != nil {
-				journal.settle()
-			}
-		}
 		return err
 	}
 	// Complete has validated the existing source/output authority. Contract
 	// eligibility cannot be acknowledged by the inner mutation body earlier.
 	if journal := current.contractCoreInputs; journal != nil {
 		if contractCoreAcceptHeld(current.repoPrefix) {
-			journal.written()
 			journal.settle()
+			journal.written()
 			return nil
 		}
 		// The accept closes the core-write windows of the rows it accepts as

@@ -173,13 +173,28 @@ func TestContractReceiptCoreWriteWindows(t *testing.T) {
 	if state(a.FilePath).Writing {
 		t.Fatal("the accept closes the window")
 	}
-	// A settle closes the window at the seq it settles.
+	// A settle closes the window at the seq it settles, in one event, and
+	// steps the bracket.
 	if !state(b.FilePath).Writing {
 		t.Fatal("b's window is still open")
 	}
+	events, _ = reader.ContractReceiptEvents()
+	begun, done = reader.ContractReceiptWriteSample("repo")
 	writer.SettleContractReceiptWrites("repo", "", writer.ContractReceiptWriteSeqs("repo", "", []string{b.FilePath}))
 	if st := state(b.FilePath); st.Writing || !st.Settled {
 		t.Fatalf("a settle closes the window: %+v", st)
+	}
+	if now, _ := reader.ContractReceiptEvents(); now != events+1 {
+		t.Fatalf("a settle and its close are one event: %d -> %d", events, now)
+	}
+	if nb, nd := reader.ContractReceiptWriteSample("repo"); nb != begun+1 || nd != done+1 {
+		t.Fatalf("a settle steps the bracket: %d/%d -> %d/%d", begun, done, nb, nd)
+	}
+	// The body's ending after the settle closes nothing and announces
+	// nothing.
+	writer.EndContractCoreWrites("repo", "", writer.ContractReceiptWriteSeqs("repo", "", []string{b.FilePath}))
+	if now, _ := reader.ContractReceiptEvents(); now != events+1 {
+		t.Fatalf("an ending after the settle is not an event: %d", now)
 	}
 }
 

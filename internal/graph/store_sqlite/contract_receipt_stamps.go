@@ -282,7 +282,10 @@ func (s *Store) EndContractCoreWrites(repo, checkout string, seqs map[string]uin
 // SettleContractReceiptWrites marks one repository and actor's receipts
 // settled at the given write seqs: the mutation that wrote them completed its
 // core writes without accepting them. A path written again since keeps its
-// newer, unsettled seq.
+// newer, unsettled seq. A settled path's window closes with the settle, in
+// the one event that announces both. Settling moves no row, so the
+// repository's bracket steps as a write would: a full scan taken before the
+// settle is never reused for one after it.
 func (s *Store) SettleContractReceiptWrites(repo, checkout string, seqs map[string]uint64) {
 	w := &s.contractReceiptWrites
 	w.mu.Lock()
@@ -303,9 +306,14 @@ func (s *Store) SettleContractReceiptWrites(repo, checkout string, seqs map[stri
 		}
 		settled = true
 	}
-	if settled {
-		w.notifyLocked()
+	if !settled {
+		return
 	}
+	if bracket := w.repos[repo]; bracket != nil {
+		bracket.begun++
+		bracket.done++
+	}
+	w.notifyLocked()
 }
 
 // ContractReceiptWriteState is one path's write seq, whether the mutation
