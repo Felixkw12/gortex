@@ -2426,8 +2426,11 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 		if err := receipts.Complete(); err != nil {
 			return err
 		}
+		// Every completed repository's journal is accepted, failed files
+		// included: the cold pass staged a failure envelope for each of them
+		// (indexCtxRaw), so the accepted namespace excludes exactly that set.
 		for prefix, result := range finalResults {
-			if result != nil && len(result.FailedFiles) == 0 {
+			if result != nil {
 				if err := mi.acceptInstalledContractCoreInputs(context.Background(), prefix); err != nil {
 					return err
 				}
@@ -2458,12 +2461,17 @@ func (mi *MultiIndexer) IndexRepo(repoPrefix string) (*IndexResult, error) {
 		if receiptErr != nil {
 			return receiptErr
 		}
-		return runUnderOutputReceipt(receipt, func() error {
+		if err := runUnderOutputReceipt(receipt, func() error {
 			finishTopologyMutation := reach.BeginTopologyMutation(mi.graph)
 			defer finishTopologyMutation(true)
 			result, indexErr = mi.indexRepoRaw(repoPrefix)
 			return indexErr
-		})
+		}); err != nil {
+			return err
+		}
+		// The outer receipt has settled: accept the cold namespace's journal
+		// inside the lane, as every other cold door does, and announce it.
+		return mi.acceptInstalledContractCoreInputs(context.Background(), repoPrefix)
 	})
 	if err != nil {
 		return result, err

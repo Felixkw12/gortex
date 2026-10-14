@@ -185,6 +185,7 @@ var editDeltaAbsentCapabilities = map[string]string{
 	"indexer.generationBulkCloserByID":            "whole-repository or administrative operation (full index, repository reset, untrack or cleanup, warm start, vector corpus, bulk load windows, WAL maintenance); not on a file delta's per-save path",
 	"indexer.generationReparseBulkLoader":         "initial dedicated-base reparse cache window on a qualified claimed-generation loader, never a per-save DeltaWriter; loaders without it retain ordinary generation bulk-load admission",
 	"anonymous{GenerationCorrectionEpoch}":        "asserted on the daemon's store to key the per-stack caches of a corrected generation, never on a delta",
+	"indexer.contractCoreFailureEnvelopeReader":   "asserted by the contract core input journal on its receipt backend, never on a store or a delta",
 	"indexer.writeDemandReporter":                 "asserted by the lifecycle's background retirement on the daemon's shared store (write-gate demand), never on a delta",
 	"indexer.mutationFanoutOwningReceiptStore":    "owning-window receipts separate sibling repositories sharing one store; a delta's working graph serves one repository and the plain receipt window is exact",
 	"indexer.refFactsByTargetsContextReader":      "read accelerator: without it the caller takes the Store/Reader form, which DeltaWriter answers through the composed view (a cost, not a different answer)",

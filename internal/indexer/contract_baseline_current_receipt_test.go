@@ -267,8 +267,12 @@ func TestContractBaselineCurrentReceiptFallbackReconstructsAcceptedFacts(t *test
 	}
 }
 
+// The baseline fences on its pending input state, not on a raw-source pin or a
+// whole-inventory comparison: cancellation and a key-moving input write
+// refuse it; a concurrent receipt rewrite of a file it read is skipped and
+// kept as it stands; census metadata and raw-source movement do not refuse it.
 func TestContractBaselineCurrentReceiptRetainsCancellationAndCensusCAS(t *testing.T) {
-	for _, mode := range []string{"canceled", "receipt_changed", "census_changed", "source_changed"} {
+	for _, mode := range []string{"canceled", "receipt_changed", "census_changed", "source_changed", "key_moved"} {
 		t.Run(mode, func(t *testing.T) {
 			options, spy, _, original := currentReceiptBaselineFixture(t, nil)
 			spy.forbid.Store(true)
@@ -312,24 +316,46 @@ func TestContractBaselineCurrentReceiptRetainsCancellationAndCensusCAS(t *testin
 						if err != nil {
 							return err
 						}
+					case "key_moved":
+						current, found, err := options.Store.ContractInputStateContext(ctx, "fixture", "")
+						if err != nil {
+							return err
+						}
+						require.True(t, found)
+						next := current
+						next.InputFingerprint = contractInputHash([]byte("concurrent-boundary-save"))
+						if err := options.Store.BeginContractInputMutationContext(ctx, &current, next, nil); err != nil {
+							return err
+						}
 					}
 				}
 				return ctx.Err()
 			}
 			err := reconcilePrimaryContractBaseline(ctx, options, "fixture")
+			require.True(t, changed)
+			require.Zero(t, spy.reads.Load())
+			baseline, baselineErr := options.Store.ContractBoundaryReceiptBaselineContext(t.Context(), "fixture", "")
+			require.NoError(t, baselineErr)
 			switch mode {
 			case "canceled":
 				require.ErrorIs(t, err, context.Canceled)
-			case "source_changed":
-				require.ErrorIs(t, err, graphview.ErrBaseCorpusChanged)
+				require.Nil(t, baseline, "reuse must never bypass cancellation")
+			case "key_moved":
+				require.ErrorIs(t, err, graph.ErrContractProjectionStale, "a key-moving save supersedes the baseline")
+				require.Nil(t, baseline, "a superseded baseline certifies nothing")
 			default:
-				require.ErrorIs(t, err, graph.ErrContractProjectionStale)
+				require.NoError(t, err)
+				require.NotNil(t, baseline)
+				state, found, err := options.Store.ContractInputStateContext(t.Context(), "fixture", "")
+				require.NoError(t, err)
+				require.True(t, found)
+				require.True(t, state.Accepted)
 			}
-			require.True(t, changed)
-			require.Zero(t, spy.reads.Load())
-			baseline, err := options.Store.ContractBoundaryReceiptBaselineContext(t.Context(), "fixture", "")
-			require.NoError(t, err)
-			require.Nil(t, baseline, "reuse must never bypass cancellation, receipt CAS, or accepted census/source authority")
+			if mode == "receipt_changed" {
+				kept, _, err := options.Store.ContractBoundaryReceiptContext(t.Context(), "fixture", "", original.FilePath)
+				require.NoError(t, err)
+				require.Equal(t, []string{"newer-receipt"}, kept.Scope.Causes, "the concurrently rewritten row is skipped and kept as it stands")
+			}
 		})
 	}
 }

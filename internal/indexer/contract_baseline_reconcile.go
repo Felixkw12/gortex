@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -33,15 +34,11 @@ func NewContractBaselineReconciler(options ContractFollowupCaptureOptions) func(
 		if view != nil || checkout != "" {
 			return false, nil
 		}
-		pin := options.Materializer.Leases.AcquireBaseCorpus(repo)
-		fenceErr := pin.ValidateAcceptedCurrent()
-		pin.Release()
-		if fenceErr != nil {
-			// Applying and interrupted raw authority share this refusal. Do not
-			// claim a producer exists: the consumer must recapture under its
-			// original deadline until accepted source authority is available.
-			return false, graph.ErrContractProjectionStale
-		}
+		// No raw-source pin gates admission: a never-mutated or interrupted
+		// owner has no accepted witness, and refusing on that kept a cold
+		// store's consumers waiting on a producer that never started. The job
+		// runs its census and every write under the repository lanes and
+		// fences on the pending input state instead.
 		baseline, err := options.Store.AtGeneration(0).ContractBoundaryReceiptBaselineContext(ctx, repo, "")
 		if err != nil {
 			return false, err
@@ -82,6 +79,14 @@ func NewContractBaselineReconciler(options ContractFollowupCaptureOptions) func(
 			}()
 			defer lease.Release()
 			defer func() { <-slots; jobsMu.Lock(); delete(jobs, repo); jobsMu.Unlock() }()
+			// A panicking job still releases its slot, lease and waiters above.
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					if options.Logger != nil {
+						options.Logger.Error("contract baseline reconstruction panicked", zap.String("repo", repo), zap.Any("panic", recovered))
+					}
+				}
+			}()
 			err := reconcilePrimaryContractBaseline(options.Context, options, repo)
 			if err != nil && options.Context.Err() == nil && options.Logger != nil {
 				options.Logger.Warn("contract baseline reconstruction refused", zap.String("repo", repo), zap.Error(err))
@@ -92,19 +97,21 @@ func NewContractBaselineReconciler(options ContractFollowupCaptureOptions) func(
 }
 
 func reconcilePrimaryContractBaseline(ctx context.Context, options ContractFollowupCaptureOptions, repo string) error {
-	snapshot, err := captureAcceptedContractFiles(ctx, options, nil, []string{repo})
-	if err != nil {
-		return err
-	}
-	defer snapshot.Release()
-	if snapshot.ValidateAccepted == nil {
-		return fmt.Errorf("contract baseline: accepted census fence unavailable")
-	}
 	store := options.Store.AtGeneration(0)
 	var pending graph.ContractInputState
-	err = options.MultiIndexer.withRepositoryMutationLanes(ctx, []string{repo}, func() error {
+	var snapshot ContractFollowupSnapshot
+	defer func() {
+		if snapshot.Release != nil {
+			snapshot.Release()
+		}
+	}()
+	// The census and the pending marker share one lane interval, so no core
+	// write of this repository lands between the inventory and the marker.
+	err := options.MultiIndexer.withRepositoryMutationLanes(ctx, []string{repo}, func() error {
 		return options.MultiIndexer.withContractBaselineOutput(ctx, options.Store, repo, OutputEntryContractBaseline, func() error {
-			if err := snapshot.ValidateAccepted(ctx); err != nil {
+			var err error
+			snapshot, err = captureAcceptedContractFiles(ctx, options, nil, []string{repo})
+			if err != nil {
 				return err
 			}
 			current, found, err := store.ContractInputStateContext(ctx, repo, "")
@@ -154,11 +161,22 @@ func reconcilePrimaryContractBaseline(ctx context.Context, options ContractFollo
 			return err
 		}
 		rows := make([]graph.ContractBoundaryReceipt, 0, len(files))
+		reconstructed := make(map[string][]byte, len(files))
 		for _, file := range files {
 			if err := yield(ctx); err != nil {
 				return err
 			}
+			if row := prior[file.Path]; row != nil && row.Accepted && contractReceiptIsFailureEnvelope(row) {
+				// An accepted failure envelope stays: the file is excluded, and
+				// its envelope is folded as it stands below.
+				continue
+			}
 			accepted, err := snapshot.ReadAccepted(ctx, file)
+			if errors.Is(err, graph.ErrContractProjectionStale) {
+				// The file moved after the census: its save owns its receipt.
+				// The chunk folds whatever receipt stands for it at write time.
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -194,11 +212,12 @@ func reconcilePrimaryContractBaseline(ctx context.Context, options ContractFollo
 			if err != nil {
 				return err
 			}
-			_, _ = digest.Write(encoded)
-			_, _ = digest.Write([]byte{0})
+			reconstructed[file.Path] = encoded
 		}
 		err = options.MultiIndexer.withRepositoryMutationLanes(ctx, []string{repo}, func() error {
 			return options.MultiIndexer.withContractBaselineOutput(ctx, options.Store, repo, OutputEntryContractBaseline, func() error {
+				// The fence is the pending input state alone: a key-moving save
+				// rewrote it, and only that supersedes the baseline.
 				current, found, err := store.ContractInputStateContext(ctx, repo, "")
 				if err != nil {
 					return err
@@ -210,13 +229,33 @@ func reconcilePrimaryContractBaseline(ctx context.Context, options ContractFollo
 				if err != nil {
 					return err
 				}
-				if !reflect.DeepEqual(actual, prior) {
-					return graph.ErrContractProjectionStale
+				// Per-row CAS: a row a concurrent save rewrote since the chunk
+				// read it is skipped and folded as it stands; the save's own
+				// acceptance settles it. Only unchanged rows are certified.
+				var write []graph.ContractBoundaryReceipt
+				for _, row := range rows {
+					if reflect.DeepEqual(actual[row.FilePath], prior[row.FilePath]) {
+						write = append(write, row)
+					}
 				}
-				if err := store.SetContractBoundaryReceiptsContext(ctx, rows); err != nil {
+				for _, path := range paths {
+					encoded, rebuilt := reconstructed[path]
+					if rebuilt && reflect.DeepEqual(actual[path], prior[path]) {
+						_, _ = digest.Write(encoded)
+					} else if standing := actual[path]; standing != nil {
+						_, _ = digest.Write([]byte("standing:" + standing.Fingerprint + ":" + standing.SourceFingerprint))
+					} else {
+						_, _ = digest.Write([]byte("absent:" + path))
+					}
+					_, _ = digest.Write([]byte{0})
+				}
+				if len(write) == 0 {
+					return nil
+				}
+				if err := store.SetContractBoundaryReceiptsContext(ctx, write); err != nil {
 					return err
 				}
-				return store.AcceptContractBoundaryReceiptsContext(ctx, rows)
+				return store.AcceptContractBoundaryReceiptsContext(ctx, write)
 			})
 		})
 		if err != nil {
@@ -225,8 +264,12 @@ func reconcilePrimaryContractBaseline(ctx context.Context, options ContractFollo
 	}
 	return options.MultiIndexer.withRepositoryMutationLanes(ctx, []string{repo}, func() error {
 		return options.MultiIndexer.withContractBaselineOutput(ctx, options.Store, repo, OutputEntryContractBaseline, func() error {
-			if err := snapshot.ValidateAccepted(ctx); err != nil {
+			current, found, err := store.ContractInputStateContext(ctx, repo, "")
+			if err != nil {
 				return err
+			}
+			if !found || !reflect.DeepEqual(current, pending) {
+				return graph.ErrContractProjectionStale
 			}
 			next := pending
 			next.InputFingerprint = contractInputHash([]byte(pending.InputFingerprint + ":" + hex.EncodeToString(digest.Sum(nil))))

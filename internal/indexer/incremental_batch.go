@@ -362,6 +362,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 		if !probeOK {
 			if probe.readErr != nil {
 				idx.noteFileIndexFailure(filePath, probe.readErr)
+				idx.stageContractFailureEnvelope(filePath, probe.readErr)
 				readFailed = append(readFailed, filePath)
 				continue
 			}
@@ -470,6 +471,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 		}
 		if err := idx.reindexIncrementalFallback(fallback, markerBatch, &plan); err != nil {
 			idx.noteFileIndexFailure(fallback.filePath, err)
+			idx.stageContractFailureEnvelope(fallback.filePath, err)
 			idx.discardPreparedExtraction(fallback.filePath)
 			failed = append(failed, fallback.filePath)
 			if errors.Is(err, errFileVersionChanged) {

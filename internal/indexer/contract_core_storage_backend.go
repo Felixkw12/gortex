@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
@@ -123,9 +124,40 @@ func (b *contractCoreStorageBackend) BoundaryDependents(ctx context.Context, key
 	return b.capture.Dependents(ctx, keys)
 }
 
+// contractCoreBeginFault, when set by a test, refuses the begin of one path the
+// way a failed cold-row flush or a refused receipt write would.
+var contractCoreBeginFault atomic.Pointer[func(path string) error]
+
+// PriorFailureEnvelope reports whether path's selected prior receipt is a
+// failure envelope, which the decoded-receipt API reports only as unknown.
+func (b *contractCoreStorageBackend) PriorFailureEnvelope(ctx context.Context, path string) (bool, error) {
+	row, _, _, err := b.capture.Prior(ctx, path)
+	if err != nil {
+		return false, err
+	}
+	return contractReceiptIsFailureEnvelope(row), nil
+}
+
+// holdNamespacePending keeps a cold namespace's input-state header pending
+// at acceptance: its file receipts are accepted, the header is left for the
+// baseline to certify. A cold door uses it when it could not stage the
+// failure envelopes that exclude its failed files.
+func (b *contractCoreStorageBackend) holdNamespacePending() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.recovering = true
+}
+
 func (b *contractCoreStorageBackend) BeginBoundaryMutation(ctx context.Context, changes []contractCoreInputChange) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if fault := contractCoreBeginFault.Load(); fault != nil {
+		for _, change := range changes {
+			if err := (*fault)(change.FilePath); err != nil {
+				return err
+			}
+		}
+	}
 	if b.cold {
 		for _, change := range changes {
 			row, e := contractCoreStoredReceipt(b.repo, b.checkout, change)

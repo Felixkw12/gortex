@@ -70,6 +70,7 @@ type ContractAnalysisCoordinator struct {
 	jobs             map[string]*contractAnalysisJob
 	keys             map[graph.ContractAttachmentKey]int
 	changed          chan struct{}
+	published        uint64
 	ready            chan struct{}
 	baselines        map[contractBaselineWaiter]*contractBaselineObservation
 	captureAdmission chan struct{}
@@ -385,8 +386,41 @@ func (c *ContractAnalysisCoordinator) WaitChange(ctx context.Context, key graph.
 
 func (c *ContractAnalysisCoordinator) Published(_ context.Context, _, _ string) {
 	c.mu.Lock()
+	c.published++
 	c.notifyLocked()
 	c.mu.Unlock()
+}
+
+// publishedEpoch is the level a running job samples before a round's first
+// scan; waitPublished returns once a Published event passed it, so an accept
+// and its announcement landing between that scan and the wait still wake the
+// job's retry.
+func (c *ContractAnalysisCoordinator) publishedEpoch() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.published
+}
+
+func (c *ContractAnalysisCoordinator) waitPublished(ctx context.Context, since uint64, until time.Time) bool {
+	timer := time.NewTimer(time.Until(until))
+	defer timer.Stop()
+	for {
+		c.mu.Lock()
+		epoch, changed := c.published, c.changed
+		c.mu.Unlock()
+		if epoch > since {
+			return true
+		}
+		select {
+		case <-changed:
+		case <-timer.C:
+			return false
+		case <-ctx.Done():
+			return false
+		case <-c.ctx.Done():
+			return false
+		}
+	}
 }
 func (c *ContractAnalysisCoordinator) notifyLocked() {
 	close(c.changed)

@@ -126,7 +126,7 @@ func (idx *Indexer) prepareFileDeltaWithAdmission(filePath string, tryOnly bool)
 	src, readVersion, err := idx.readFileWithVersion(absPath)
 	probe.read = time.Since(started)
 	if err != nil {
-		probe.readErr = err
+		probe.readErr = contractContentFailure(err)
 		return probe, false, false
 	}
 	if idx.contentProof.active() {

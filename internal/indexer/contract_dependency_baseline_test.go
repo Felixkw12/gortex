@@ -220,7 +220,7 @@ func TestContractDependencyBaselineDoesNotInventAProducer(t *testing.T) {
 	}
 }
 
-func TestContractDependencyBaselineRecapturesAnApplyingPrimarySource(t *testing.T) {
+func TestContractDependencyBaselineAdmitsWhileAPrimarySourceApplies(t *testing.T) {
 	options, _, _ := contractBaselineAuthorityFixture(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -238,19 +238,16 @@ func TestContractDependencyBaselineRecapturesAnApplyingPrimarySource(t *testing.
 	input, err := options.Materializer.CaptureContractInputs(ctx, nil, "fixture", "")
 	require.NoError(t, err)
 	require.False(t, input.State.Accepted)
+	// An applying raw source no longer refuses admission: refusing it kept a
+	// cold store's consumers waiting on a producer that never started. The
+	// job's census and writes serialize with core writes on the repository
+	// lanes and fence on the pending input state instead.
 	admitted, err := coordinator.Request(ctx, nil, input, "fixture", "")
-	require.False(t, admitted, "applying authority does not pretend a baseline worker was admitted")
-	require.ErrorIs(t, err, graph.ErrContractProjectionStale, "the existing bounded recapture path must preserve primary source publication")
+	require.NoError(t, err)
+	require.True(t, admitted, "the baseline is admitted while a raw-source mutation applies")
 	require.NoError(t, mutation.Complete("accepted-after-apply"))
 	mutation.Release()
 	coordinator.Published(ctx, "fixture", "")
-	// This is the same original request context and deadline, with actual core
-	// publication now complete. It can admit the previously refused repair.
-	input, err = options.Materializer.CaptureContractInputs(ctx, nil, "fixture", "")
-	require.NoError(t, err)
-	admitted, err = coordinator.Request(ctx, nil, input, "fixture", "")
-	require.NoError(t, err)
-	require.True(t, admitted)
 	require.NoError(t, coordinator.WaitChange(ctx, graph.ContractAttachmentKey{RepoPrefix: "fixture", InputVersion: input.State.InputVersion, InputFingerprint: input.State.InputFingerprint}))
 	jobs.Wait()
 	input, err = options.Materializer.CaptureContractInputs(ctx, nil, "fixture", "")

@@ -49,7 +49,11 @@ func contractBaselineAuthorityFixture(t *testing.T) (ContractFollowupCaptureOpti
 	return options, pin, authority
 }
 
-func TestContractBaselineAuthorityRefusesClosedAndChangedAcceptedSource(t *testing.T) {
+// A closed output authority still refuses the baseline. A raw-source mutation
+// alone no longer does: the baseline holds no base pin, and the pending input
+// state is its only fence, so it certifies the namespace and leaves the
+// caller's own pin to report the movement it observed.
+func TestContractBaselineAuthorityRefusesClosedAndIgnoresRawSourceMovement(t *testing.T) {
 	for _, mode := range []string{"closed", "source_changed"} {
 		t.Run(mode, func(t *testing.T) {
 			options, pin, authority := contractBaselineAuthorityFixture(t)
@@ -83,25 +87,27 @@ func TestContractBaselineAuthorityRefusesClosedAndChangedAcceptedSource(t *testi
 				require.Zero(t, authority.Stats().Issued)
 				require.NoError(t, pin.ValidateAcceptedCurrent())
 			} else {
-				require.ErrorIs(t, err, graphview.ErrBaseCorpusChanged)
-				require.ErrorIs(t, pin.ValidateAcceptedCurrent(), graphview.ErrBaseCorpusChanged)
+				require.NoError(t, err, "raw-source movement without an input-state move does not refuse the baseline")
+				require.ErrorIs(t, pin.ValidateAcceptedCurrent(), graphview.ErrBaseCorpusChanged, "the caller's own pin still observes the movement")
 				require.Equal(t, authority.Stats().Issued, authority.Stats().Settled)
 				require.Zero(t, authority.Stats().LiveOwners)
 			}
 			baseline, err := options.Store.ContractBoundaryReceiptBaselineContext(t.Context(), "fixture", "")
 			require.NoError(t, err)
-			require.Nil(t, baseline, "refused reconstruction cannot certify a baseline")
 			state, found, err := options.Store.ContractInputStateContext(t.Context(), "fixture", "")
 			require.NoError(t, err)
 			require.True(t, found)
-			if mode == "closed" {
-				require.Equal(t, before, state, "closed authority cannot mutate the input identity")
-			} else {
-				require.False(t, state.Accepted, "changed source cannot certify the pending input")
-			}
 			inputs, err := options.Materializer.CaptureContractInputs(t.Context(), nil, "fixture", "")
 			require.NoError(t, err)
-			require.False(t, inputs.State.Accepted, "refused reconstruction is not contract-ready")
+			if mode == "closed" {
+				require.Nil(t, baseline, "refused reconstruction cannot certify a baseline")
+				require.Equal(t, before, state, "closed authority cannot mutate the input identity")
+				require.False(t, inputs.State.Accepted, "refused reconstruction is not contract-ready")
+			} else {
+				require.NotNil(t, baseline, "the unmoved pending input state certifies the namespace")
+				require.True(t, state.Accepted)
+				require.True(t, inputs.State.Accepted)
+			}
 		})
 	}
 }

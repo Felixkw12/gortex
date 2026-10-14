@@ -2,7 +2,10 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"slices"
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -72,7 +75,18 @@ func (j *contractCoreInputJournal) prepare(ctx context.Context, idx *Indexer, pa
 	if !deleted {
 		change.SourceFingerprint = contractInputHash(source)
 	}
-	if !deleted {
+	if !deleted && silentZeroExtraction(result) {
+		// A parse that minted no symbols is a deterministic content failure:
+		// the file is excluded as a failure envelope instead of certifying an
+		// empty receipt, decided before begin so no second move follows.
+		change.Uncertainty = contractFileIndexFailed
+		if j.priorFailureEnvelope(ctx, path) {
+			// Only a transition moves the key: a file still failing the same
+			// way restates its envelope with no new contract cause.
+			j.stage(change)
+			return nil
+		}
+	} else if !deleted {
 		current, err := idx.collectContractBoundaryReceipt(ctx, path, language, source, result)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -97,10 +111,133 @@ func (j *contractCoreInputJournal) prepare(ctx context.Context, idx *Indexer, pa
 	// Worker rereads are checked against the accepted source fingerprint.
 	// The journal never retains a cold corpus of source bytes. If an older dirty
 	// source has moved before followup, that analysis stays incomplete.
+	j.stage(change)
+	return nil
+}
+
+func (j *contractCoreInputJournal) stage(change contractCoreInputChange) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	j.changes[path] = change
-	return nil
+	j.changes[change.FilePath] = change
+}
+
+// contractFileIndexFailed is the uncertainty a failure envelope carries: the
+// file's accepted state is a deterministic indexing failure, so contract
+// analysis excludes the file instead of reading prior or partial facts.
+const contractFileIndexFailed = "file_index_failed"
+
+// errContractJournalWrite marks a refused journal begin. The core write that
+// needed it was refused too, so the file's prior receipt still describes it
+// and no failure envelope may stand in for it.
+var errContractJournalWrite = errors.New("contract journal write refused")
+
+// contractContentError marks a failure to read or extract a file's own bytes.
+// Its message is the wrapped error's, so failure rows read the same.
+type contractContentError struct{ err error }
+
+func (e *contractContentError) Error() string { return e.err.Error() }
+func (e *contractContentError) Unwrap() error { return e.err }
+
+// contractContentFailure marks err, when set, as a content failure.
+func contractContentFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &contractContentError{err: err}
+}
+
+// contractFailureEnvelopeEligible decides whether a recorded file failure is
+// excluded as a failure envelope. In a cold door every failure qualifies: the
+// namespace reset dropped the file's core, so its prior receipt no longer
+// describes anything. Elsewhere only a deterministic content failure
+// qualifies: a read or extraction failure of the file's own bytes, or a
+// silent-zero parse. Anything else (a version race, a cancellation, a journal
+// failure, a vanished file, an admission or path error) leaves the prior
+// receipt to the retry, the caller or the deletion pass.
+func contractFailureEnvelopeEligible(err error, cold bool) bool {
+	if err == nil {
+		return false
+	}
+	if cold {
+		return true
+	}
+	switch {
+	case errors.Is(err, errFileVersionChanged), errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded), errors.Is(err, errContractJournalWrite),
+		errors.Is(err, fs.ErrNotExist):
+		return false
+	}
+	var content *contractContentError
+	return errors.As(err, &content) || errors.Is(err, errSilentZeroExtraction)
+}
+
+// contractFailureEnvelopeSource is the source identity of an envelope whose
+// bytes could not be read: stable per path, never equal to real bytes.
+func contractFailureEnvelopeSource(path string) string {
+	return contractInputHash([]byte(contractFileIndexFailed + ":" + path))
+}
+
+// contractReceiptIsFailureEnvelope reports whether a stored receipt (or the
+// accepted predecessor of an in-flight one) is a failure envelope.
+func contractReceiptIsFailureEnvelope(row *graph.ContractBoundaryReceipt) bool {
+	if row == nil {
+		return false
+	}
+	if !row.Accepted && row.Previous != nil {
+		row = row.Previous
+	}
+	return !row.Deleted && slices.Contains(row.Scope.Causes, contractFileIndexFailed)
+}
+
+// contractCoreFailureEnvelopeReader is the optional backend capability that
+// lets prepare see a prior failure envelope through the decoded-receipt API.
+type contractCoreFailureEnvelopeReader interface {
+	PriorFailureEnvelope(context.Context, string) (bool, error)
+}
+
+func (j *contractCoreInputJournal) priorFailureEnvelope(ctx context.Context, path string) bool {
+	reader, ok := j.backend.(contractCoreFailureEnvelopeReader)
+	if !ok {
+		return false
+	}
+	failed, err := reader.PriorFailureEnvelope(ctx, path)
+	return err == nil && failed
+}
+
+// stageFailureEnvelopes prepares and begins one failure envelope per path
+// whose prior receipt is not already one. The caller's outer acceptance
+// accepts them with the rest of the pass.
+func (j *contractCoreInputJournal) stageFailureEnvelopes(ctx context.Context, paths []string) error {
+	var staged []string
+	for _, path := range appendUniqueSorted(nil, paths...) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if j.priorFailureEnvelope(ctx, path) && !j.coldNamespace() {
+			continue
+		}
+		change := contractCoreInputChange{FilePath: path, SourceFingerprint: contractFailureEnvelopeSource(path), Uncertainty: contractFileIndexFailed}
+		change.Delta.Scope = graph.ContractWorkScope{Unknown: true, Causes: []string{contractFileIndexFailed}}
+		j.stage(change)
+		staged = append(staged, path)
+	}
+	if len(staged) == 0 {
+		return nil
+	}
+	return j.begin(staged)
+}
+
+func (j *contractCoreInputJournal) coldNamespace() bool {
+	storage, ok := j.backend.(*contractCoreStorageBackend)
+	return ok && storage.hasPendingColdNamespace()
+}
+
+// hasBegun reports whether path's receipt was already rewritten by this pass.
+func (j *contractCoreInputJournal) hasBegun(path string) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	_, begun := j.begun[path]
+	return begun
 }
 
 // begin prepares exact pending work for the new chunks before applying any core
@@ -138,7 +275,10 @@ func (j *contractCoreInputJournal) begin(paths []string) error {
 		return nil
 	}
 	if err := j.backend.BeginBoundaryMutation(j.ctx, pending); err != nil {
-		return err
+		if ctxErr := j.ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("%w: %w", errContractJournalWrite, err)
 	}
 	for _, change := range pending {
 		j.begun[change.FilePath] = struct{}{}

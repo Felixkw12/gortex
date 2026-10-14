@@ -2762,6 +2762,14 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			}
 		}
 	}
+	// Registered before the failed-file report below, so it runs after that
+	// report is complete: every failed file of this cold pass is staged as a
+	// failure envelope before the door accepts the namespace.
+	defer func() {
+		if retErr == nil && result != nil {
+			idx.excludeColdFailedFiles(ctx, result.FailedFiles)
+		}
+	}()
 	priorContractContext := idx.contractProjectionContext
 	idx.contractProjectionContext = ctx
 	idx.clearContractInputError()
@@ -5106,7 +5114,7 @@ func (idx *Indexer) indexFile(
 		}
 		src, readVersion, err = idx.readFileWithVersion(absPath)
 		if err != nil {
-			return err
+			return contractContentFailure(err)
 		}
 
 		var ok bool
