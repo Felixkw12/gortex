@@ -316,6 +316,138 @@ func TestContractCoreWindowGapRing(t *testing.T) {
 	}
 }
 
+// TestContractOpenCoreWindowsListsEveryOpenWindow pins the open-window
+// listing a repair re-checks under the lane: every open window of the
+// repository with the seq that opened it and when, by path, whatever its seq;
+// a closed window is gone, another repository's windows are not listed.
+func TestContractOpenCoreWindowsListsEveryOpenWindow(t *testing.T) {
+	s := openCatalogStore(t)
+	ctx := context.Background()
+	base := time.Unix(1_700_000_000, 0)
+	s.contractReceiptWrites.now = func() time.Time { return base }
+	a, b, c := boundaryStorageReceipt("a.go", "a1"), boundaryStorageReceipt("b.go", "b1"), boundaryStorageReceipt("c.go", "c1")
+	other := boundaryStorageReceipt("o.go", "o1")
+	other.RepoPrefix, other.FilePath = "other", "other/o.go"
+	if err := s.SetContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{c, a, b, other}); err != nil {
+		t.Fatal(err)
+	}
+	// b is staged again: its window is the newer one.
+	if err := s.SetContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{b}); err != nil {
+		t.Fatal(err)
+	}
+	s.EndContractCoreWrites("repo", "", s.ContractReceiptWriteSeqs("repo", "", []string{c.FilePath}))
+	open := s.OpenContractCoreWindows("repo")
+	if len(open) != 2 || open[0].Path != a.FilePath || open[1].Path != b.FilePath ||
+		open[0].OpenerSeq != 1 || open[1].OpenerSeq != 2 || !open[0].OpenedAt.Equal(base) || !open[0].MarkedAt.IsZero() {
+		t.Fatalf("open windows: %+v", open)
+	}
+	if others := s.OpenContractCoreWindows("other"); len(others) != 1 || others[0].Path != other.FilePath {
+		t.Fatalf("another repository's windows: %+v", others)
+	}
+	if none := s.OpenContractCoreWindows("none"); len(none) != 0 {
+		t.Fatalf("a repository without windows: %+v", none)
+	}
+}
+
+// TestContractOrphanMarkClearsAtEveryClose pins the orphan registry: a failed
+// mutation marks the windows it opened at the seqs that opened them, a mark
+// at a seq the window was not opened at marks nothing, and only an open
+// window carrying its own mark is orphaned. The mark is dropped at every close
+// of the path: the body's end, the accept's commit and a settle. A refused
+// accept closes nothing and keeps it; a window opened again over a marked one
+// is a newer window and is not orphaned.
+func TestContractOrphanMarkClearsAtEveryClose(t *testing.T) {
+	ctx := context.Background()
+	stage := func(t *testing.T, s *Store, rows ...graph.ContractBoundaryReceipt) {
+		t.Helper()
+		if err := s.SetContractBoundaryReceiptsContext(ctx, rows); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := boundaryStorageReceipt("a.go", "a1")
+	mark := func(s *Store) map[string]uint64 {
+		seqs := s.ContractReceiptWriteSeqs("repo", "", []string{a.FilePath})
+		s.OrphanContractCoreWrites("repo", "", seqs)
+		return seqs
+	}
+	orphaned := func(s *Store) []ContractCoreWindow { return s.OrphanedContractCoreWindows("repo") }
+	marks := func(s *Store) int {
+		s.contractReceiptWrites.mu.Lock()
+		defer s.contractReceiptWrites.mu.Unlock()
+		return len(s.contractReceiptWrites.orphaned)
+	}
+	for _, close := range []struct {
+		name  string
+		close func(*Store, map[string]uint64) error
+	}{
+		{"body_end", func(s *Store, seqs map[string]uint64) error { s.EndContractCoreWrites("repo", "", seqs); return nil }},
+		{"accept", func(s *Store, _ map[string]uint64) error {
+			return s.AcceptContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{a})
+		}},
+		{"settle", func(s *Store, seqs map[string]uint64) error {
+			s.SettleContractReceiptWrites("repo", "", seqs)
+			return nil
+		}},
+	} {
+		t.Run(close.name, func(t *testing.T) {
+			s := openCatalogStore(t)
+			stage(t, s, a)
+			events, changed := s.ContractCoreOrphanEvents()
+			s.OrphanContractCoreWrites("repo", "", map[string]uint64{a.FilePath: 99})
+			if len(orphaned(s)) != 0 || marks(s) != 0 {
+				t.Fatal("a mark at a seq the window was not opened at marks nothing")
+			}
+			seqs := mark(s)
+			got := orphaned(s)
+			if len(got) != 1 || got[0].Path != a.FilePath || got[0].OpenerSeq != seqs[a.FilePath] || got[0].MarkedAt.IsZero() {
+				t.Fatalf("the failed mutation's window is orphaned: %+v", got)
+			}
+			if now, _ := s.ContractCoreOrphanEvents(); now != events+1 {
+				t.Fatalf("a mark is an orphan event: %d -> %d", events, now)
+			}
+			select {
+			case <-changed:
+			default:
+				t.Fatal("a mark wakes the orphan waiters")
+			}
+			if err := close.close(s, seqs); err != nil {
+				t.Fatal(err)
+			}
+			if state := s.ContractReceiptWriteStates("repo", "", []string{a.FilePath})[a.FilePath]; state.Writing {
+				t.Fatalf("the %s closed the window: %+v", close.name, state)
+			}
+			if len(orphaned(s)) != 0 || marks(s) != 0 {
+				t.Fatalf("the %s dropped the mark: %d", close.name, marks(s))
+			}
+		})
+	}
+	t.Run("refused_accept", func(t *testing.T) {
+		s := openCatalogStore(t)
+		stage(t, s, a)
+		mark(s)
+		stale := a
+		stale.Fingerprint = "other"
+		if err := s.AcceptContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{stale}); !errors.Is(err, ErrCatalogStaleGuard) {
+			t.Fatalf("a stale accept: %v", err)
+		}
+		if len(orphaned(s)) != 1 {
+			t.Fatal("a refused accept closes nothing and keeps the mark")
+		}
+	})
+	t.Run("opened_again", func(t *testing.T) {
+		s := openCatalogStore(t)
+		stage(t, s, a)
+		mark(s)
+		stage(t, s, a)
+		if got := orphaned(s); len(got) != 0 {
+			t.Fatalf("a window opened again over a marked one is not orphaned: %+v", got)
+		}
+		if open := s.OpenContractCoreWindows("repo"); len(open) != 1 || !open[0].MarkedAt.IsZero() {
+			t.Fatalf("the newer window is open and unmarked: %+v", open)
+		}
+	})
+}
+
 // TestContractSeedQueriesSelectOneRepositoryErrorfully pins the enrichment
 // round's seed reads: the repository's provides/consumes owner edges (by
 // source node repository) and its Spring reader and Java method nodes, with

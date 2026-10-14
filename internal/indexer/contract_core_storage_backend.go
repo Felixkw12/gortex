@@ -173,6 +173,18 @@ func (b *contractCoreStorageBackend) EndBoundaryCoreWrites() {
 	b.store.EndContractCoreWrites(b.repo, b.checkout, b.stagedSeqs)
 }
 
+// OrphanBoundaryCoreWrites marks the core-write windows of the receipts this
+// primary mutation staged and its failed body left open: nothing of this
+// mutation will close them.
+func (b *contractCoreStorageBackend) OrphanBoundaryCoreWrites() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.generation != 0 || b.cold || len(b.stagedSeqs) == 0 {
+		return
+	}
+	b.store.OrphanContractCoreWrites(b.repo, b.checkout, b.stagedSeqs)
+}
+
 // PriorFailureEnvelope reports whether path's selected prior receipt is a
 // failure envelope, which the decoded-receipt API reports only as unknown.
 func (b *contractCoreStorageBackend) PriorFailureEnvelope(ctx context.Context, path string) (bool, error) {

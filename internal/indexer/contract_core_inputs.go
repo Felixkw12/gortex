@@ -375,6 +375,28 @@ func (j *contractCoreInputJournal) written() {
 	}
 }
 
+// orphan ends a pass whose body failed after it began receipts: their
+// core-write windows stay open, since the body may have stopped between an
+// evict and its add, and are marked orphaned so a repair can find them.
+func (j *contractCoreInputJournal) orphan() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if len(j.begun) == 0 {
+		return
+	}
+	if orphaner, ok := j.backend.(interface{ OrphanBoundaryCoreWrites() }); ok {
+		orphaner.OrphanBoundaryCoreWrites()
+	}
+	if j.logger != nil {
+		orphaned := make([]string, 0, len(j.begun))
+		for path := range j.begun {
+			orphaned = append(orphaned, path)
+		}
+		sort.Strings(orphaned)
+		j.logger.Info("contract journal orphaned", contractJournalPathFields(orphaned)...)
+	}
+}
+
 // settle ends a pass that completed its core writes without being accepted
 // (a newer mutation took its owner over): its begun receipts stay unaccepted
 // and are marked settled at their write seqs.

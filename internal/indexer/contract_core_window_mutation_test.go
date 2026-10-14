@@ -11,6 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // contractLaneMutation runs one mutation body through the Indexer's own lane
@@ -198,7 +201,52 @@ func TestContractOvertakenApplySettlesInOneEvent(t *testing.T) {
 				reused, err := scanner.scan(t.Context(), nil)
 				require.NoError(t, err)
 				require.Equal(t, stamp, reused.Stamps[owner], "a full scan after the end sees it, not the scan taken during the body")
+				require.Empty(t, f.store.OrphanedContractCoreWindows("fixture"), "a completed body orphans nothing")
 			})
 		}
+	}
+}
+
+// TestContractCoreWindowFailedBodyIsMarkedOrphaned: a mutation whose body
+// fails after it staged a file's receipt leaves the file's core-write window
+// open, on both lanes, and marks it orphaned at the seq that opened it, with
+// one line naming the file: nothing of that mutation will close it. The next
+// save of the file closes the window and drops the mark.
+func TestContractCoreWindowFailedBodyIsMarkedOrphaned(t *testing.T) {
+	const owner = "fixture/consts.go"
+	for _, lane := range []string{"indexer", "multi_indexer"} {
+		t.Run(lane, func(t *testing.T) {
+			f := newRouteConstantFixture(t)
+			m := newContractLaneMutation(t, f, lane)
+			core, logs := observer.New(zapcore.InfoLevel)
+			m.idx.logger = zap.New(core)
+			_, apply := m.patch(t, "consts.go", jobConsts+"// a failed apply\n")
+			events, _ := f.store.ContractCoreOrphanEvents()
+			err := m.run(t.Context(), func(func(*OutputSourceContent)) error {
+				if err := apply(); err != nil {
+					return err
+				}
+				return errors.New("injected body failure")
+			})
+			require.ErrorContains(t, err, "injected body failure")
+			stamps, scanErr := newFixtureScanner(t, f).scan(t.Context(), []string{owner})
+			require.NoError(t, scanErr)
+			stamp := stamps.Stamps[owner]
+			require.True(t, stamp.Writing, "a failed body leaves its window open")
+			orphaned := f.store.OrphanedContractCoreWindows("fixture")
+			require.Len(t, orphaned, 1)
+			require.Equal(t, owner, orphaned[0].Path)
+			require.Equal(t, stamp.Seq, orphaned[0].OpenerSeq, "marked at the seq that opened the window")
+			require.Equal(t, orphaned, f.store.OpenContractCoreWindows("fixture"), "the only open window is the orphaned one")
+			now, _ := f.store.ContractCoreOrphanEvents()
+			require.Equal(t, events+1, now, "the mark is one orphan event")
+			lines := logs.FilterMessage("contract journal orphaned").All()
+			require.Len(t, lines, 1)
+			require.Equal(t, []any{owner}, lines[0].ContextMap()["paths"])
+
+			f.save("consts.go", jobConsts+"// saved again\n")
+			require.Empty(t, f.store.OrphanedContractCoreWindows("fixture"), "the next save of the file drops the mark")
+			require.Empty(t, f.store.OpenContractCoreWindows("fixture"), "and closes the window")
+		})
 	}
 }

@@ -535,6 +535,11 @@ func (mi *MultiIndexer) withRepositoryOutputGenerationSource(
 		// windows of the files it began, whatever Complete says.
 		mi.endInstalledContractCoreWrites(repoPrefix)
 	}
+	if !bodyDone && err != nil {
+		// As on the Indexer's own lane: a failed body leaves its windows
+		// open and marks them orphaned.
+		mi.orphanInstalledContractCoreWrites(repoPrefix)
+	}
 	if err != nil {
 		return err
 	}
@@ -1921,6 +1926,14 @@ func (idx *Indexer) withOutputGenerationSource(
 			// come. After a settle this closes only a window the settle did
 			// not, one whose path a later receipt write moved.
 			journal.written()
+		}
+	}
+	if !bodyDone && err != nil {
+		// A body that failed after it began receipts may have stopped
+		// between an evict and its add: their windows stay open, marked
+		// orphaned, since nothing of this mutation will close them.
+		if journal := current.contractCoreInputs; journal != nil {
+			journal.orphan()
 		}
 	}
 	if err != nil {
