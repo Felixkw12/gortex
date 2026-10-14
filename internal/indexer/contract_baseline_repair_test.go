@@ -105,7 +105,16 @@ func TestContractBaselineRepairsStaleReceiptsFromAcceptedCore(t *testing.T) {
 			}
 			selected, err := materializer.CaptureContractInputs(ctx, nil, "fixture", "")
 			require.NoError(t, err)
-			_, _, err = NewContractFollowupCapture(options)(ctx, nil, selected, "fixture", "")
+			snapshot, _, err := NewContractFollowupCapture(options)(ctx, nil, selected, "fixture", "")
+			if mode == "unaccepted" {
+				// A staged row whose core-write window is open is admitted in
+				// flight: the job reads nothing of the file until a mutation
+				// closes the window, then proves it by its stamp.
+				require.NoError(t, err)
+				require.Equal(t, []string{prior.FilePath}, snapshot.InFlight)
+				snapshot.Release()
+				return
+			}
 			require.Error(t, err)
 		})
 	}

@@ -30,13 +30,82 @@ type ContractFollowupCaptureOptions struct {
 	Yield               func(context.Context) error
 	BaselineAdmissionMu *sync.Mutex
 	BaselineJobs        *sync.WaitGroup
-	selectedInputs      *graphview.SelectedContractInputs
+	// SuspectStuck, when set, receives the census paths a capture refused
+	// because their receipt row cannot be in flight in this process: a
+	// deleted row, or an unaccepted row no mutation of this process wrote.
+	// Nothing of a live mutation will make such a row admissible.
+	SuspectStuck   func(repo string, paths []string)
+	selectedInputs *graphview.SelectedContractInputs
 }
+
+// ContractCaptureSource is what a capture takes from a request's selected
+// view before the request returns: an independently owned handoff of the
+// view's generations and the view facts the capture reads. A primary actor
+// has no view and no source; its capture pins the base corpus itself.
+type ContractCaptureSource struct {
+	handoff      *graphview.ViewHandoff
+	repo         string
+	composesBase bool
+	sources      []graphview.GenerationSource
+	once         sync.Once
+}
+
+// PrepareContractCaptureSource joins the view's lease and copies what the
+// capture needs of the view, in time independent of the census: nothing is
+// read from the store. A nil view prepares no source. A view whose lease has
+// no live holder left cannot be captured.
+func PrepareContractCaptureSource(view *graphview.RepoView) (*ContractCaptureSource, error) {
+	if view == nil {
+		return nil, nil
+	}
+	handoff := view.Handoff()
+	if handoff == nil {
+		return nil, graph.ErrContractProjectionStale
+	}
+	return &ContractCaptureSource{handoff: handoff, repo: view.ID.RepoPrefix, composesBase: view.ComposesBaseCorpus(), sources: view.GenerationSources()}, nil
+}
+
+// Release releases the source's handoff once. A capture that takes the
+// source releases it itself, with its snapshot or on its failure; Release is
+// for a source no capture took. A nil source releases nothing.
+func (s *ContractCaptureSource) Release() {
+	if s != nil {
+		s.once.Do(s.handoff.Close)
+	}
+}
+
+// ContractFollowupSourceCapture is a capture from a prepared source: the
+// census, receipts and witnesses, with no request view. It owns the source on
+// every return.
+type ContractFollowupSourceCapture func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error)
 
 // NewContractFollowupCapture captures only the supplied admitted dependency
 // cohort. It acquires independent ownership before returning to the RPC.
 func NewContractFollowupCapture(options ContractFollowupCaptureOptions) ContractFollowupCapture {
-	return func(ctx context.Context, view *graphview.RepoView, inputs *graphview.SelectedContractInputs, repo, checkout string) (snapshot ContractFollowupSnapshot, targets []ContractFollowupTarget, err error) {
+	capture := NewContractFollowupSourceCapture(options)
+	return func(ctx context.Context, view *graphview.RepoView, inputs *graphview.SelectedContractInputs, repo, checkout string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+		if inputs == nil || options.Store == nil || options.Materializer == nil {
+			return ContractFollowupSnapshot{}, nil, graph.ErrContractInputVector
+		}
+		prepared, err := PrepareContractCaptureSource(view)
+		if err != nil {
+			return ContractFollowupSnapshot{}, nil, err
+		}
+		return capture(ctx, prepared, inputs, repo, checkout)
+	}
+}
+
+// NewContractFollowupSourceCapture captures the supplied admitted dependency
+// cohort from a prepared source.
+func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) ContractFollowupSourceCapture {
+	return func(ctx context.Context, prepared *ContractCaptureSource, inputs *graphview.SelectedContractInputs, repo, checkout string) (snapshot ContractFollowupSnapshot, targets []ContractFollowupTarget, err error) {
+		// The source is the capture's until its census takes it over.
+		sourceOwned := true
+		defer func() {
+			if sourceOwned {
+				prepared.Release()
+			}
+		}()
 		if inputs == nil || options.Store == nil || options.Materializer == nil {
 			return snapshot, nil, graph.ErrContractInputVector
 		}
@@ -54,7 +123,8 @@ func NewContractFollowupCapture(options ContractFollowupCaptureOptions) Contract
 		sort.Strings(names)
 		captureOptions := options
 		captureOptions.selectedInputs = inputs
-		snapshot, err = captureAcceptedContractFiles(ctx, captureOptions, view, names)
+		sourceOwned = false
+		snapshot, err = captureAcceptedContractFiles(ctx, captureOptions, prepared, names)
 		if err != nil {
 			return snapshot, nil, err
 		}
@@ -74,12 +144,11 @@ func NewContractFollowupCapture(options ContractFollowupCaptureOptions) Contract
 		snapshot.Inputs = append([]graph.ContractInputWitness(nil), inputs.Witnesses...)
 		snapshot.Key = graph.ContractAttachmentKey{RepoPrefix: repo, CheckoutID: checkout, InputVersion: inputs.State.InputVersion, InputFingerprint: inputs.State.InputFingerprint}
 		receiver := options.Store.AtGeneration(0)
-		if view != nil {
-			sources := view.GenerationSources()
-			if len(sources) == 0 {
+		if prepared != nil {
+			if len(prepared.sources) == 0 {
 				return ContractFollowupSnapshot{}, nil, graph.ErrContractInputVector
 			}
-			receiver = sources[len(sources)-1].Handle
+			receiver = prepared.sources[len(prepared.sources)-1].Handle
 		}
 		for _, name := range names {
 			state, e := graph.ComposeContractInputState(name, checkout, snapshot.Inputs)
@@ -127,12 +196,15 @@ func NewContractFollowupCapture(options ContractFollowupCaptureOptions) Contract
 // captureAcceptedContractFiles gives background work a complete checked census
 // and independently owned sources. Bytes are read one file at a time and must
 // reproduce the accepted transformed BLAKE3+size inventory; current disk bytes
-// are never substituted for a different historical accepted file.
-func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupCaptureOptions, view *graphview.RepoView, repos []string) (snapshot ContractFollowupSnapshot, err error) {
+// are never substituted for a different historical accepted file. It owns
+// prepared on every return: the snapshot releases it, or the failure does.
+func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupCaptureOptions, prepared *ContractCaptureSource, repos []string) (snapshot ContractFollowupSnapshot, err error) {
 	if ctx == nil || options.Store == nil || options.Materializer == nil || options.Materializer.Leases == nil || options.Materializer.Catalog == nil || options.MultiIndexer == nil || options.Registry == nil {
+		prepared.Release()
 		return snapshot, fmt.Errorf("contract capture: incomplete selected owner")
 	}
 	if err = ctx.Err(); err != nil {
+		prepared.Release()
 		return snapshot, err
 	}
 	var release []func()
@@ -152,22 +224,18 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 		}
 	}()
 	handles := []*store_sqlite.Store{}
-	if view == nil {
+	if prepared == nil {
 		lease := options.Materializer.Leases.Acquire(0)
 		release = append(release, lease.Release)
 		snapshot.Core = options.Store.AtGeneration(0)
 		handles = append(handles, options.Store.AtGeneration(0))
 	} else {
-		handoff := view.Handoff()
-		if handoff == nil {
-			return ContractFollowupSnapshot{}, graph.ErrContractProjectionStale
-		}
-		release = append(release, handoff.Close)
-		snapshot.Core = handoff.Reader
-		if view.ComposesBaseCorpus() {
+		release = append(release, prepared.Release)
+		snapshot.Core = prepared.handoff.Reader
+		if prepared.composesBase {
 			handles = append(handles, options.Store.AtGeneration(0))
 		}
-		for _, physical := range handoff.GenerationSources() {
+		for _, physical := range prepared.handoff.GenerationSources() {
 			handles = append(handles, physical.Handle)
 		}
 	}
@@ -232,8 +300,8 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 		configs[repo] = owned
 		// A selected linked actor's own source lives at its catalog root. The
 		// accepted hash still fences historical and dirty-file movement.
-		if view != nil && view.ID.RepoPrefix == repo {
-			physical := view.GenerationSources()
+		if prepared != nil && prepared.repo == repo {
+			physical := prepared.sources
 			if len(physical) > 0 && physical[len(physical)-1].CheckoutID != "" {
 				checkout, found, e := options.Materializer.Catalog.GetCheckout(ctx, physical[len(physical)-1].CheckoutID)
 				if e != nil {
@@ -401,8 +469,22 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 					// settled it, or staged it in this process and has ended its
 					// core writes (a watcher patch overtaken after its writes is
 					// never accepted or settled), so the file's core rows are
-					// complete. A row whose core-write window is open is stale.
-					if row.Deleted || (!row.Accepted && !contractReceiptRowsComplete(repoHandles[i].ContractReceiptWriteStates(repo, actor, []string{path})[path])) {
+					// complete. A row whose core-write window is open is
+					// admitted in flight: the job's stamp scans see the window,
+					// and its first read of the file waits for it to close.
+					var state store_sqlite.ContractReceiptWriteState
+					if !row.Deleted && !row.Accepted {
+						state = repoHandles[i].ContractReceiptWriteStates(repo, actor, []string{path})[path]
+					}
+					switch contractCaptureRowAdmission(row, state, options.selectedInputs != nil) {
+					case contractCaptureInFlight:
+						snapshot.InFlight = append(snapshot.InFlight, path)
+					case contractCaptureStale:
+						return ContractFollowupSnapshot{}, graph.ErrContractProjectionStale
+					case contractCaptureStuck:
+						if options.SuspectStuck != nil {
+							options.SuspectStuck(repo, []string{path})
+						}
 						return ContractFollowupSnapshot{}, graph.ErrContractProjectionStale
 					}
 					prior, known, e := contractCorePriorReceipt(row, true)
@@ -551,6 +633,46 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 	}
 	complete = true
 	return snapshot, nil
+}
+
+// contractCaptureAdmission is what a capture does with one census path's
+// receipt row.
+type contractCaptureAdmission int
+
+const (
+	// contractCaptureAdmitted: the file's core rows are complete.
+	contractCaptureAdmitted contractCaptureAdmission = iota
+	// contractCaptureInFlight: a mutation of this process has the file's
+	// core-write window open; the job proves its reads of the file once the
+	// window closes.
+	contractCaptureInFlight
+	// contractCaptureStale: the capture refuses the row until it moves.
+	contractCaptureStale
+	// contractCaptureStuck: the capture refuses a row no live mutation of
+	// this process will move, and reports it.
+	contractCaptureStuck
+)
+
+// contractCaptureRowAdmission classifies a census path's selected receipt
+// row: accepted, or unaccepted with complete core rows (state quiescent), is
+// admitted. An unaccepted row whose window is open is admitted in flight only
+// when the job will take stamp scans (scanned): a frozen snapshot reads the
+// row as captured and could not wait for the window. An unaccepted row this
+// process never wrote (seq 0) was left by a mutation of an earlier process,
+// and a deleted row in the census contradicts it: both are stuck.
+func contractCaptureRowAdmission(row *graph.ContractBoundaryReceipt, state store_sqlite.ContractReceiptWriteState, scanned bool) contractCaptureAdmission {
+	switch {
+	case row.Deleted:
+		return contractCaptureStuck
+	case row.Accepted || contractReceiptRowsComplete(state):
+		return contractCaptureAdmitted
+	case state.Writing && state.Seq > 0 && scanned:
+		return contractCaptureInFlight
+	case state.Seq == 0:
+		return contractCaptureStuck
+	default:
+		return contractCaptureStale
+	}
 }
 
 // Inventory discovery uses physical indexed rows, while ownership is selected

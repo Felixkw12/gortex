@@ -3314,13 +3314,15 @@ func TestContractWatcherPatchOvertakenAfterItsWritesEndsItsWindow(t *testing.T) 
 	require.True(t, stamp.quiescent())
 }
 
-// TestContractCaptureAdmitsAnUnacceptedRowOnlyOnceItsCoreWritesEnded: the
+// TestContractCaptureAdmitsAnUnacceptedRowOnTheRuleAJobProvesItsReadsBy: the
 // capture admits an unaccepted receipt row on the rule a job proves its reads
 // by. A watcher patch overtaken after its writes leaves its row neither
 // accepted nor settled with its window closed: a job is admitted and publishes
-// the cold build from it. A pass whose body failed after it staged a row
-// leaves that row's window open: the capture refuses it as stale.
-func TestContractCaptureAdmitsAnUnacceptedRowOnlyOnceItsCoreWritesEnded(t *testing.T) {
+// the cold build from it. An apply that staged a row and has not ended its
+// core writes leaves that row's window open: the capture admits it in flight,
+// and the job's reads of the file wait for the window to close
+// (TestContractCaptureAdmitsAFileInFlight).
+func TestContractCaptureAdmitsAnUnacceptedRowOnTheRuleAJobProvesItsReadsBy(t *testing.T) {
 	t.Run("overtaken_patch", func(t *testing.T) {
 		f := newRouteConstantFixture(t)
 		f.mi.mu.RLock()
@@ -3370,8 +3372,11 @@ func TestContractCaptureAdmitsAnUnacceptedRowOnlyOnceItsCoreWritesEnded(t *testi
 		require.True(t, state.Seq > 0 && state.Writing && !state.Settled, "the row is staged with its window open")
 		inputs, err := f.options.Materializer.CaptureContractInputs(t.Context(), nil, "fixture", "")
 		require.NoError(t, err)
-		_, _, err = NewContractFollowupCapture(f.options)(t.Context(), nil, inputs, "fixture", "")
-		require.ErrorIs(t, err, graph.ErrContractProjectionStale, "a row whose core writes may be in flight is not admitted")
+		snapshot, _, err := NewContractFollowupCapture(f.options)(t.Context(), nil, inputs, "fixture", "")
+		require.NoError(t, err, "a row whose core writes may be in flight is admitted in flight")
+		require.Equal(t, []string{owner}, snapshot.InFlight)
+		require.NotNil(t, snapshot.Scan, "a snapshot with a file in flight takes stamp scans")
+		snapshot.Release()
 		// The apply ends its core writes; nothing accepts or settles it.
 		f.store.EndContractCoreWrites("fixture", "", f.store.ContractReceiptWriteSeqs("fixture", "", []string{owner}))
 		report, err := f.job(nil, contractJobDeadline(time.Minute))

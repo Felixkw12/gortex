@@ -56,6 +56,10 @@ type ContractFollowupSnapshot struct {
 	// Excluded names the census paths whose accepted receipt is a failure
 	// envelope: they are not live, so no file of the job reads them.
 	Excluded []string
+	// InFlight names the census paths captured while a mutation had their
+	// core-write window open. Only a job that takes stamp scans (Scan) can
+	// prove reads of them; a snapshot without Scan that names any is refused.
+	InFlight []string
 	// RepoConfigs is captured immutable extractor/transform policy authority.
 	RepoConfigs map[string]config.IndexConfig
 	// RepoExtractionOptions freezes repository parser options for baseline replay.
@@ -292,6 +296,11 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 	}
 	if err := ctx.Err(); err != nil {
 		return report, err
+	}
+	if len(snap.InFlight) > 0 && snap.Scan == nil {
+		// A frozen snapshot reads every census file as captured: it cannot
+		// wait for an in-flight file's window to close.
+		return report, graph.ErrContractProjectionStale
 	}
 	if req.RebuildReason != ContractFollowupColdBaseline && req.RebuildReason != ContractFollowupUnknownInterval && req.RebuildReason != ContractFollowupChangedBoundary {
 		return report, fmt.Errorf("contract followup: explicit rebuild reason required")
