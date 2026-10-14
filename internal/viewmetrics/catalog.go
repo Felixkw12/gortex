@@ -183,6 +183,42 @@ const (
 	// ProbeAnswerTotal counts path-scoped probe answers by the kind of view
 	// that answered and whether it was the path's own.
 	ProbeAnswerTotal = "views_probe_answer_total"
+
+	// The contract analysis family: the background attachment worker that
+	// turns accepted core inputs into a published contract attachment.
+	//
+	// ContractAnalysisJobsTotal counts attachment jobs by the mode the job ran
+	// in and how it ended. A superseded job names why its inputs moved; a
+	// deferred one never ran a job body (it waits on a baseline or acceptance).
+	ContractAnalysisJobsTotal = "views_contract_analysis_jobs_total"
+	// ContractAnalysisRequestsTotal counts scheduling requests by what the
+	// request did: the answer every strict consumer's wait loop starts from.
+	ContractAnalysisRequestsTotal = "views_contract_analysis_requests_total"
+	// ContractAnalysisFilesTotal counts per-file extractions a job ran, by why
+	// the file was extracted. Its cold share is the whole-cohort cost.
+	ContractAnalysisFilesTotal = "views_contract_analysis_files_total"
+	// ContractAnalysisJobSeconds is how long one job body took, by mode.
+	ContractAnalysisJobSeconds = "views_contract_analysis_job_seconds"
+	// ContractAnalysisRoundsTotal counts proof rounds and
+	// ContractAnalysisIterationsTotal convergence iterations: a job that keeps
+	// adding iterations is chasing inputs that do not settle.
+	ContractAnalysisRoundsTotal     = "views_contract_analysis_rounds_total"
+	ContractAnalysisIterationsTotal = "views_contract_analysis_iterations_total"
+	// ContractAnalysisRequeuedTotal counts jobs put back on the queue after a
+	// supersession at a key that is still current and unpublished.
+	ContractAnalysisRequeuedTotal = "views_contract_analysis_requeued_total"
+	// ContractAnalysisUnstampedReadsTotal counts evidence reads whose owner
+	// carries no boundary receipt, so no stamp can prove them.
+	ContractAnalysisUnstampedReadsTotal = "views_contract_analysis_unstamped_reads_total"
+	// ContractAnalysisPredecessorRetiredTotal counts stale answers refused
+	// because the attachment they would have served was retired meanwhile.
+	ContractAnalysisPredecessorRetiredTotal = "views_contract_analysis_predecessor_retired_total"
+	// ContractBaselineTotal counts primary contract baseline admissions and
+	// their terminal outcomes.
+	ContractBaselineTotal = "views_contract_baseline_total"
+	// ContractRepairTotal counts idle repairs of contract inputs that no
+	// ordinary save would settle, by what was repaired.
+	ContractRepairTotal = "views_contract_repair_total"
 )
 
 // Label names.
@@ -204,6 +240,76 @@ const (
 	LabelConsumer = "consumer"
 	LabelShape    = "shape"
 	LabelWhy      = "why"
+	LabelMode     = "mode"
+	LabelResult   = "result"
+)
+
+// Contract analysis job modes: a whole-cohort rebuild, a cache fill that
+// publishes nothing, or a rebuild of the changed file set.
+const (
+	ContractModeCold  = "cold"
+	ContractModeFill  = "fill"
+	ContractModeDelta = "delta"
+)
+
+// contractModes is the complete mode vocabulary.
+var contractModes = []string{ContractModeCold, ContractModeFill, ContractModeDelta}
+
+// Contract analysis job outcomes. Exactly one is recorded per job. The
+// superseded outcomes name why the job's inputs moved before it could publish.
+const (
+	ContractJobPublished                = "published"
+	ContractJobSupersededKeyMoved       = "superseded_key_moved"
+	ContractJobSupersededInputsMoving   = "superseded_inputs_moving"
+	ContractJobSupersededReadUnsettled  = "superseded_read_unsettled"
+	ContractJobSupersededPublishRefused = "superseded_publish_refused"
+	ContractJobPreempted                = "preempted"
+	ContractJobFailed                   = "failed"
+	ContractJobPanic                    = "panic"
+	ContractJobDeferred                 = "deferred"
+)
+
+// Contract analysis request results: what one scheduling request did.
+const (
+	ContractRequestAdmitted         = "admitted"
+	ContractRequestCoalesced        = "coalesced"
+	ContractRequestAttached         = "attached"
+	ContractRequestInputsPending    = "inputs_pending"
+	ContractRequestBaselineAdmitted = "baseline_admitted"
+	ContractRequestRefused          = "refused"
+	ContractRequestQueueFull        = "queue_full"
+	ContractRequestError            = "error"
+)
+
+// Why a job extracted one file.
+const (
+	ContractFilesCold     = "cold"
+	ContractFilesFill     = "fill"
+	ContractFilesDelta    = "delta"
+	ContractFilesRetry    = "retry"
+	ContractFilesStale    = "stale"
+	ContractFilesKeyCheck = "key_check"
+	ContractFilesGoMod    = "go_mod"
+	ContractFilesRouter   = "router_facts"
+)
+
+// Contract baseline outcomes: admission answers and terminal job outcomes.
+const (
+	ContractBaselineAdmitted  = "admitted"
+	ContractBaselineCoalesced = "coalesced"
+	ContractBaselineSaturated = "saturated"
+	ContractBaselineCurrent   = "current"
+	ContractBaselinePublished = "published"
+	ContractBaselineRefused   = "refused"
+	ContractBaselineFailed    = "failed"
+	ContractBaselinePanic     = "panic"
+)
+
+// Contract repair kinds: a pending input-state header no save will accept,
+// and a receipt left unaccepted by a failed apply.
+const (
+	ContractRepairPendingHeader = "pending_header"
+	ContractRepairStuckReceipt  = "stuck_receipt"
 )
 
 // Committed-base generation shapes: self-contained, or composed over a parent.
@@ -657,5 +763,46 @@ var catalog = map[string]spec{
 	ProbeAnswerTotal: {kind: kindCounter, labels: []labelSpec{
 		{name: LabelKind, values: []string{ViewBase, ViewWorktree, ViewUnrouted}},
 		{name: LabelExact, values: []string{AnswerExact, AnswerFallback}},
+	}},
+
+	ContractAnalysisJobsTotal: {kind: kindCounter, labels: []labelSpec{
+		{name: LabelMode, values: contractModes},
+		{name: LabelOutcome, values: []string{
+			ContractJobPublished, ContractJobSupersededKeyMoved,
+			ContractJobSupersededInputsMoving, ContractJobSupersededReadUnsettled,
+			ContractJobSupersededPublishRefused, ContractJobPreempted,
+			ContractJobFailed, ContractJobPanic, ContractJobDeferred,
+		}},
+	}},
+	ContractAnalysisRequestsTotal: {kind: kindCounter, labels: []labelSpec{
+		{name: LabelResult, values: []string{
+			ContractRequestAdmitted, ContractRequestCoalesced, ContractRequestAttached,
+			ContractRequestInputsPending, ContractRequestBaselineAdmitted,
+			ContractRequestRefused, ContractRequestQueueFull, ContractRequestError,
+		}},
+	}},
+	ContractAnalysisFilesTotal: {kind: kindCounter, labels: []labelSpec{
+		{name: LabelReason, values: []string{
+			ContractFilesCold, ContractFilesFill, ContractFilesDelta, ContractFilesRetry,
+			ContractFilesStale, ContractFilesKeyCheck, ContractFilesGoMod, ContractFilesRouter,
+		}},
+	}},
+	ContractAnalysisJobSeconds: {kind: kindDuration, labels: []labelSpec{
+		{name: LabelMode, values: contractModes},
+	}},
+	ContractAnalysisRoundsTotal:             {kind: kindCounter},
+	ContractAnalysisIterationsTotal:         {kind: kindCounter},
+	ContractAnalysisRequeuedTotal:           {kind: kindCounter},
+	ContractAnalysisUnstampedReadsTotal:     {kind: kindCounter},
+	ContractAnalysisPredecessorRetiredTotal: {kind: kindCounter},
+	ContractBaselineTotal: {kind: kindCounter, labels: []labelSpec{
+		{name: LabelOutcome, values: []string{
+			ContractBaselineAdmitted, ContractBaselineCoalesced, ContractBaselineSaturated,
+			ContractBaselineCurrent, ContractBaselinePublished, ContractBaselineRefused,
+			ContractBaselineFailed, ContractBaselinePanic,
+		}},
+	}},
+	ContractRepairTotal: {kind: kindCounter, labels: []labelSpec{
+		{name: LabelKind, values: []string{ContractRepairPendingHeader, ContractRepairStuckReceipt}},
 	}},
 }
