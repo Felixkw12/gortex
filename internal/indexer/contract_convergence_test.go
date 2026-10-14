@@ -1,7 +1,9 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
@@ -599,15 +601,14 @@ func TestContractJobRetriesOnFreshEvidence(t *testing.T) {
 // no records, so only the enrichment round's own recorded inputs (the live
 // unit set it consumed and the handler lookup it answered) rerun it.
 func TestContractJobEnrichmentFollowsADepartedHandlerFile(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("a root process reads a mode-000 file")
-	}
 	// The handler is a method value: per-file extraction leaves it to the
 	// enrichment round's cross-file resolution, so no unit reads serve.go.
 	routes := "package fixture\nimport \"net/http\"\nfunc register(mux *http.ServeMux) { mux.HandleFunc(\"GET /items\", h.serveItems) }\n"
 	serve := "package fixture\nimport \"net/http\"\ntype H struct{}\nfunc (H) serveItems(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, Item{}) }\ntype Item struct { Name string `json:\"name\"` }\nfunc writeJSON(w http.ResponseWriter, code int, body any) {}\n"
 	files := map[string]string{"routes.go": routes, "serve.go": serve, "helper.go": jobHelper}
-	f := newContractJobFixture(t, files)
+	registry := parser.NewRegistry()
+	registry.Register(contractFailingGoExtractor{GoExtractor: languages.NewGoExtractor()})
+	f := newContractJobFixtureWithRegistry(t, files, registry)
 	done := false
 	hooks := &contractConvergenceHooks{afterPP: func() {
 		if !done {
@@ -615,9 +616,9 @@ func TestContractJobEnrichmentFollowsADepartedHandlerFile(t *testing.T) {
 			before, _, err := f.store.ContractInputStateContext(context.Background(), "fixture", "")
 			require.NoError(t, err)
 			path := filepath.Join(f.root, "serve.go")
-			writeFile(t, path, serve+"// unreadable from here on\n")
-			require.NoError(t, os.Chmod(path, 0o000))
-			t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+			// A save whose bytes fail extraction: the same content failure
+			// on every platform.
+			writeFile(t, path, serve+"// EXTRACT_FAIL from here on\n")
 			future := time.Now().Add(time.Hour)
 			require.NoError(t, os.Chtimes(path, future, future))
 			_, _ = f.mi.IncrementalReindexRepo("fixture", []string{path})
@@ -687,6 +688,21 @@ func TestContractJobDerivesSeedsFromTheSelectedCore(t *testing.T) {
 	require.Equal(t, contractIDs(cold.contracts()), contractIDs(f.contracts()), "seeds come from the core at the enrichment round, not from a torn load")
 }
 
+// contractFailingGoExtractor is the Go extractor except that source holding
+// EXTRACT_FAIL fails extraction, the content failure an unparseable save is.
+type contractFailingGoExtractor struct{ *languages.GoExtractor }
+
+func (e contractFailingGoExtractor) Extract(path string, src []byte) (*parser.ExtractionResult, error) {
+	return e.ExtractWithOptions(path, src, parser.ExtractionOptions{})
+}
+
+func (e contractFailingGoExtractor) ExtractWithOptions(path string, src []byte, opts parser.ExtractionOptions) (*parser.ExtractionResult, error) {
+	if bytes.Contains(src, []byte("EXTRACT_FAIL")) {
+		return nil, errors.New("go: unparseable source")
+	}
+	return e.GoExtractor.ExtractWithOptions(path, src, opts)
+}
+
 // TestContractJobPinnedReader: the accepted-bytes cache serves a file
 // whose disk moved ahead of its receipt; without it the read is unproven and
 // retried on the next Published event; a failure envelope is excluded.
@@ -720,16 +736,21 @@ func TestContractJobPinnedReader(t *testing.T) {
 		require.Contains(t, contractIDs(f.contracts()), "http::GET::/accepted")
 	})
 	t.Run("envelope_excluded", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("a root process reads a mode-000 file")
-		}
-		f := newContractJobFixture(t, map[string]string{"routes.go": jobRoutes, "consts.go": jobConsts, "extra.go": "package fixture\nfunc registerExtra(r Router) { r.GET(\"/extra\", extra) }\nfunc extra() {}\n"})
+		// The save's bytes fail extraction: a deterministic content failure
+		// on every platform, unlike a mode-000 file, which Windows still reads.
+		registry := parser.NewRegistry()
+		registry.Register(contractFailingGoExtractor{GoExtractor: languages.NewGoExtractor()})
+		extraSource := "package fixture\nfunc registerExtra(r Router) { r.GET(\"/extra\", extra) }\nfunc extra() {}\n"
+		f := newContractJobFixtureWithRegistry(t, map[string]string{"routes.go": jobRoutes, "consts.go": jobConsts, "extra.go": extraSource}, registry)
+		require.Contains(t, contractIDs(coldContracts(t, map[string]string{"routes.go": jobRoutes, "consts.go": jobConsts, "extra.go": extraSource})), "http::GET::/extra", "the file's records are contracts before it fails")
 		extra := filepath.Join(f.root, "extra.go")
-		require.NoError(t, os.Chmod(extra, 0o000))
-		t.Cleanup(func() { _ = os.Chmod(extra, 0o644) })
+		writeFile(t, extra, extraSource+"// EXTRACT_FAIL\n")
 		future := time.Now().Add(time.Hour)
 		require.NoError(t, os.Chtimes(extra, future, future))
 		_, _ = f.mi.IncrementalReindexRepo("fixture", []string{extra})
+		receipt, _, err := f.store.ContractBoundaryReceiptContext(t.Context(), "fixture", "", "fixture/extra.go")
+		require.NoError(t, err)
+		require.True(t, contractReceiptIsFailureEnvelope(receipt), "the failed save is an accepted failure envelope")
 		report, err := f.job(nil, nil)
 		require.NoError(t, err)
 		require.True(t, report.Published)

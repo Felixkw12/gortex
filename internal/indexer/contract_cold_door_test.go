@@ -330,11 +330,13 @@ func TestContractFailureEnvelopeEligibility(t *testing.T) {
 				t.Setenv(crashWorkerEnv, "1")
 			}
 			writeFile(t, path, row.content)
-			if row.unreadable {
-				require.NoError(t, os.Chmod(path, 0o000))
-			}
 			future := time.Now().Add(time.Hour)
 			require.NoError(t, os.Chtimes(path, future, future))
+			if row.unreadable {
+				// Stale first, unreadable second: on Windows the read is
+				// denied by a lock whose open handle refuses a later Chtimes.
+				denyFileRead(t, path)
+			}
 			_, _ = f.mi.IncrementalReindexRepo("fixture", []string{path})
 			receipt, _, err := f.store.ContractBoundaryReceiptContext(t.Context(), "fixture", "", "fixture/x.boom")
 			require.NoError(t, err)
@@ -395,10 +397,11 @@ func TestContractFailureEnvelopeMovesTheKeyOncePerTransition(t *testing.T) {
 	touch := func(at time.Time) {
 		require.NoError(t, os.Chtimes(failing, at, at))
 	}
+	// Stale first, unreadable second: on Windows the read is denied by a lock
+	// whose open handle refuses a Chtimes, so every touch below lifts it.
 	writeFile(t, failing, coldDoorFailing+"// a save that will not be readable\n")
-	require.NoError(t, os.Chmod(failing, 0o000))
-	t.Cleanup(func() { _ = os.Chmod(failing, 0o644) })
 	touch(time.Now().Add(time.Minute))
+	allowRead := denyFileRead(t, failing)
 	_, _ = f.mi.IncrementalReindexRepo("fixture", []string{failing})
 	broken := f.state(t)
 	require.True(t, broken.Accepted)
@@ -408,7 +411,9 @@ func TestContractFailureEnvelopeMovesTheKeyOncePerTransition(t *testing.T) {
 	require.True(t, contractReceiptIsFailureEnvelope(row), "the unreadable file is an envelope")
 
 	// (e) a second failed save of the same file restates no new cause.
+	allowRead()
 	touch(time.Now().Add(2 * time.Minute))
+	allowRead = denyFileRead(t, failing)
 	_, _ = f.mi.IncrementalReindexRepo("fixture", []string{failing})
 	require.Equal(t, broken, f.state(t), "a still-failing file moves no key")
 
@@ -424,7 +429,7 @@ func TestContractFailureEnvelopeMovesTheKeyOncePerTransition(t *testing.T) {
 	require.Equal(t, broken, f.state(t))
 
 	// (c) fix: the complete receipt replaces the envelope, one more move.
-	require.NoError(t, os.Chmod(failing, 0o644))
+	allowRead()
 	touch(time.Now().Add(3 * time.Minute))
 	_, err = f.mi.IncrementalReindexRepo("fixture", []string{failing})
 	require.NoError(t, err)
