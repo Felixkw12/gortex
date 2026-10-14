@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io/fs"
 	"slices"
+	"sort"
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	"go.uber.org/zap"
 )
 
 // A journal is scoped to one already-coordinated core mutation/build. It is
@@ -22,6 +24,22 @@ type contractCoreInputJournal struct {
 	backend contractCoreInputBackend
 	changes map[string]contractCoreInputChange
 	begun   map[string]struct{}
+	// logger receives the Debug begin/accept bracket lines. They time each
+	// path's unaccepted window, the interval a contract read cannot prove.
+	logger *zap.Logger
+	// sources receives the exact bytes each prepared receipt fingerprints.
+	sources *contractAcceptedSourceCache
+}
+
+// contractJournalLogPaths bounds the paths one bracket line carries.
+const contractJournalLogPaths = 16
+
+func contractJournalPathFields(paths []string) []zap.Field {
+	shown := paths
+	if len(shown) > contractJournalLogPaths {
+		shown = shown[:contractJournalLogPaths]
+	}
+	return []zap.Field{zap.Int("count", len(paths)), zap.Strings("paths", shown)}
 }
 
 // Backend methods perform bounded selected-view receipt/dependency reads and
@@ -74,6 +92,7 @@ func (j *contractCoreInputJournal) prepare(ctx context.Context, idx *Indexer, pa
 	change := contractCoreInputChange{FilePath: path, Prior: prior, Deleted: deleted}
 	if !deleted {
 		change.SourceFingerprint = contractInputHash(source)
+		j.sources.put(change.SourceFingerprint, source)
 	}
 	if !deleted && silentZeroExtraction(result) {
 		// A parse that minted no symbols is a deterministic content failure:
@@ -280,9 +299,14 @@ func (j *contractCoreInputJournal) begin(paths []string) error {
 		}
 		return fmt.Errorf("%w: %w", errContractJournalWrite, err)
 	}
+	begun := make([]string, 0, len(pending))
 	for _, change := range pending {
 		j.begun[change.FilePath] = struct{}{}
 		delete(j.changes, change.FilePath)
+		begun = append(begun, change.FilePath)
+	}
+	if j.logger != nil {
+		j.logger.Debug("contract journal begin", contractJournalPathFields(begun)...)
 	}
 	return nil
 }
@@ -306,6 +330,49 @@ func (j *contractCoreInputJournal) accept(coreErr error) error {
 	if err := j.backend.AcceptBoundaryMutation(j.ctx); err != nil {
 		return err
 	}
+	if j.logger != nil {
+		accepted := make([]string, 0, len(j.begun))
+		for path := range j.begun {
+			accepted = append(accepted, path)
+		}
+		sort.Strings(accepted)
+		j.logger.Debug("contract journal accept", contractJournalPathFields(accepted)...)
+	}
 	j.begun = make(map[string]struct{})
 	return nil
+}
+
+// written ends the core-write windows of the receipts this pass began: the
+// pass's body returned, every core write of their files done.
+func (j *contractCoreInputJournal) written() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if len(j.begun) == 0 {
+		return
+	}
+	if ender, ok := j.backend.(interface{ EndBoundaryCoreWrites() }); ok {
+		ender.EndBoundaryCoreWrites()
+	}
+	if j.logger != nil {
+		written := make([]string, 0, len(j.begun))
+		for path := range j.begun {
+			written = append(written, path)
+		}
+		sort.Strings(written)
+		j.logger.Debug("contract journal written", contractJournalPathFields(written)...)
+	}
+}
+
+// settle ends a pass that completed its core writes without being accepted
+// (a newer mutation took its owner over): its begun receipts stay unaccepted
+// and are marked settled at their write seqs.
+func (j *contractCoreInputJournal) settle() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if len(j.begun) == 0 {
+		return
+	}
+	if settler, ok := j.backend.(interface{ SettleBoundaryMutation() }); ok {
+		settler.SettleBoundaryMutation()
+	}
 }

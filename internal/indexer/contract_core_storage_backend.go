@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"sync"
@@ -45,6 +46,10 @@ type contractCoreStorageBackend struct {
 	coldRows       []graph.ContractBoundaryReceipt
 	coldSources    []graph.ContractBoundaryReceiptSource
 	coldBytes      int
+
+	// stagedSeqs holds the write seq of each primary receipt this mutation
+	// staged and has not accepted.
+	stagedSeqs map[string]uint64
 }
 
 func newContractCoreStorageBackend(store *store_sqlite.Store, repo, checkout string, generation int64, cumulative, expected *graph.ContractInputState, capture contractCoreStorageCapture) (*contractCoreStorageBackend, error) {
@@ -127,6 +132,42 @@ func (b *contractCoreStorageBackend) BoundaryDependents(ctx context.Context, key
 // contractCoreBeginFault, when set by a test, refuses the begin of one path the
 // way a failed cold-row flush or a refused receipt write would.
 var contractCoreBeginFault atomic.Pointer[func(path string) error]
+
+// contractCoreAcceptHold, when set by a test, ends a repository's completed
+// mutations the way an overtaken one ends: settled, never accepted, with no
+// Published event. It is a test seam only: production never sets it, and the
+// check on the accept path is one atomic load of a nil pointer.
+var contractCoreAcceptHold atomic.Pointer[func(repo string) bool]
+
+func contractCoreAcceptHeld(repo string) bool {
+	hold := contractCoreAcceptHold.Load()
+	return hold != nil && *hold != nil && (*hold)(repo)
+}
+
+// SettleBoundaryMutation settles the receipts this primary mutation staged
+// and never accepted: the mutation completed every core write, then lost its
+// owner to a newer one. The rows stay unaccepted; until a newer write of a
+// path begins, its core rows are complete.
+func (b *contractCoreStorageBackend) SettleBoundaryMutation() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.generation != 0 || b.cold || len(b.stagedSeqs) == 0 {
+		return
+	}
+	b.store.SettleContractReceiptWrites(b.repo, b.checkout, b.stagedSeqs)
+}
+
+// EndBoundaryCoreWrites closes the core-write windows of the receipts this
+// primary mutation staged: its body ended every core write of their files,
+// whether or not anything accepts them.
+func (b *contractCoreStorageBackend) EndBoundaryCoreWrites() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.generation != 0 || b.cold || len(b.stagedSeqs) == 0 {
+		return
+	}
+	b.store.EndContractCoreWrites(b.repo, b.checkout, b.stagedSeqs)
+}
 
 // PriorFailureEnvelope reports whether path's selected prior receipt is a
 // failure envelope, which the decoded-receipt API reports only as unknown.
@@ -266,6 +307,7 @@ func (b *contractCoreStorageBackend) BeginBoundaryMutation(ctx context.Context, 
 		b.headerPending = b.generation == 0
 		b.stateInstalled = true
 	}
+	paths := make([]string, 0, len(rows))
 	for _, row := range rows {
 		// Durable rows own payloads, lookup memberships and the old receipt.
 		// The cold foreground retains only a compact acceptance identity.
@@ -273,6 +315,15 @@ func (b *contractCoreStorageBackend) BeginBoundaryMutation(ctx context.Context, 
 		row.Scope = graph.ContractWorkScope{}
 		b.staged[row.FilePath] = row
 		delete(b.sources, row.FilePath)
+		paths = append(paths, row.FilePath)
+	}
+	if b.generation == 0 {
+		// The serialized apply interval admits no other write of these
+		// receipts before this mutation ends, so these are its own seqs.
+		if b.stagedSeqs == nil {
+			b.stagedSeqs = make(map[string]uint64, len(paths))
+		}
+		maps.Copy(b.stagedSeqs, b.store.ContractReceiptWriteSeqs(b.repo, b.checkout, paths))
 	}
 	return nil
 }
@@ -313,6 +364,7 @@ func (b *contractCoreStorageBackend) acceptBoundaryFiles(ctx context.Context, pa
 		}
 		for _, path := range chunk {
 			delete(b.staged, path)
+			delete(b.stagedSeqs, path)
 		}
 	}
 	return nil

@@ -1,14 +1,13 @@
 package indexer
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -54,6 +53,9 @@ type ContractFollowupSnapshot struct {
 	Inputs []graph.ContractInputWitness
 	Work   []graph.ContractWork
 	Files  []ContractFollowupFile
+	// Excluded names the census paths whose accepted receipt is a failure
+	// envelope: they are not live, so no file of the job reads them.
+	Excluded []string
 	// RepoConfigs is captured immutable extractor/transform policy authority.
 	RepoConfigs map[string]config.IndexConfig
 	// RepoExtractionOptions freezes repository parser options for baseline replay.
@@ -62,9 +64,37 @@ type ContractFollowupSnapshot struct {
 	TrackedRepoModules map[string]string
 	ReadAccepted       func(context.Context, ContractFollowupFile) (ContractAcceptedSource, error)
 	ReadCoreFile       func(context.Context, ContractFollowupFile) (ContractFollowupCoreFile, error)
-	ValidateAccepted   func(context.Context) error
-	Release            func()
+	// Scan takes a stamp scan of the selected chain: every row and the live
+	// census for nil paths, else the named paths. Nil means the captured
+	// inputs cannot move (a test's frozen cohort): every census file is
+	// accepted at its captured source fingerprint.
+	Scan func(context.Context, []string) (ContractFollowupScan, error)
+	// CensusFile classifies a path that joined the census during the job.
+	CensusFile func(context.Context, string) (ContractFollowupFile, bool, error)
+	// ReadPinned returns the transformed bytes whose fingerprint is the given
+	// receipt source fingerprint, from the accepted-bytes cache or the disk,
+	// and errContractSourceMoved when neither holds them.
+	ReadPinned func(context.Context, ContractFollowupFile, string) ([]byte, error)
+	// Seeds re-derives one repository's enrichment seeds (DI owner edges,
+	// Spring readers, Java methods) from the selected core. supported=false
+	// asks the enrichment round to load every live file of the repository.
+	Seeds func(context.Context, string) (nodes []*graph.Node, edges []*graph.Edge, supported bool, err error)
+	// ReceiptEvents counts the selected chain's ended receipt writes and
+	// settles, with a channel closed by the next one: a job's retry wakes on
+	// them as well as on Published.
+	ReceiptEvents func() (uint64, <-chan struct{})
+	// ReceiptContents reads the contract content of each stamped path's
+	// receipt row and of its accepted predecessor, keyed by receipt
+	// fingerprint. Nil means no move is known to keep a file's contract
+	// content.
+	ReceiptContents func(context.Context, map[string]ContractReceiptStamp) (map[string]string, error)
+	Release         func()
 }
+
+// errContractSourceMoved reports that a file's accepted bytes are no longer
+// readable: the disk moved past the stamped receipt and the accepted-bytes
+// cache no longer holds them. The read is unproven, not failed.
+var errContractSourceMoved = errors.New("contract followup: accepted source moved")
 
 // ContractFollowupRequest receives an installer-reserved Building managed
 // payload. Catalog retains the selected core generation used for CAS; it is
@@ -92,6 +122,14 @@ type ContractFollowupRequest struct {
 	RepoConfigs            map[string]config.IndexConfig
 	ScratchParent          string
 	Yield                  func(context.Context) error
+	// PublishedEpoch counts core acceptances announced to the runtime, and
+	// WaitPublished blocks until the count passes since or until until. A
+	// job retries an unproven read only on a new acceptance. Nil retries
+	// after a short pause.
+	PublishedEpoch func() uint64
+	WaitPublished  func(context.Context, uint64, time.Time) bool
+	// convergenceHooks are test seams at the job's interleaving points.
+	convergenceHooks *contractConvergenceHooks
 }
 
 type ContractFollowupReport struct {
@@ -106,6 +144,23 @@ type ContractFollowupReport struct {
 	SymbolDocuments                                  int
 	FTSDuration                                      time.Duration
 	Published                                        bool
+	// Phase ledger of the job's convergence: census and stamp scans, scratch
+	// evidence opens, proof rounds and payload assembly. Iterations and
+	// Rounds count the convergence loop's passes and proof rounds.
+	CensusDuration, StampsDuration, ScratchDuration time.Duration
+	RoundsDuration, PayloadDuration                 time.Duration
+	Iterations, Rounds                              int
+	// EnrichRuns counts enrichment rounds that ran to completion and
+	// EnrichReruns those after the first a recorded input change forced;
+	// EnrichRechecks counts fence re-checks of the round's recorded inputs
+	// and EnrichRecheckReads the store reads they asked again (census reads
+	// are always asked); Revalidated counts units re-proven by asking their
+	// reads again.
+	EnrichRuns, EnrichReruns, Revalidated int
+	EnrichRechecks, EnrichRecheckReads    int
+	// ContentKept counts observed receipt moves whose contract content was
+	// unchanged: they make no unit and no enrichment round stale.
+	ContentKept int
 }
 
 // ContractFollowupTarget reserves one independently published repository payload.
@@ -130,6 +185,9 @@ type ContractFollowupBatchRequest struct {
 	RepoConfigs            map[string]config.IndexConfig
 	ScratchParent          string
 	Yield                  func(context.Context) error
+	PublishedEpoch         func() uint64
+	WaitPublished          func(context.Context, uint64, time.Time) bool
+	convergenceHooks       *contractConvergenceHooks
 }
 
 type ContractFollowupTargetResult struct {
@@ -182,7 +240,8 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 		snap.Key = target.Key
 		snap.Work = target.Work
 		snap.Release = func() {}
-		single := ContractFollowupRequest{Snapshot: snap, RebuildReason: req.RebuildReason, Payload: target.Payload, Catalog: target.Catalog, Registry: req.Registry, Config: req.Config, Logger: req.Logger, Leases: req.Leases, WorkspaceID: req.WorkspaceID, ProjectID: req.ProjectID, RepoConfigs: req.RepoConfigs, ScratchParent: req.ScratchParent, Yield: req.Yield}
+		single := ContractFollowupRequest{Snapshot: snap, RebuildReason: req.RebuildReason, Payload: target.Payload, Catalog: target.Catalog, Registry: req.Registry, Config: req.Config, Logger: req.Logger, Leases: req.Leases, WorkspaceID: req.WorkspaceID, ProjectID: req.ProjectID, RepoConfigs: req.RepoConfigs, ScratchParent: req.ScratchParent, Yield: req.Yield,
+			PublishedEpoch: req.PublishedEpoch, WaitPublished: req.WaitPublished, convergenceHooks: req.convergenceHooks}
 		report, targetErr := runContractFollowupPrepared(ctx, single, prepared)
 		batch.Targets = append(batch.Targets, ContractFollowupTargetResult{Key: target.Key, Report: report, Err: targetErr})
 		if prepared.registry == nil && targetErr != nil {
@@ -261,202 +320,31 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 			}
 			fileByPath[file.Path] = file
 		}
-		prepareStart := time.Now()
-		scratchDir, openErr := os.MkdirTemp(req.ScratchParent, "gortex-contract-evidence-")
-		if openErr != nil {
-			return report, openErr
-		}
-		prepared.scratchDir = scratchDir
-		scratch, openErr := store_sqlite.Open(filepath.Join(scratchDir, "evidence.sqlite"))
-		if openErr != nil {
-			return report, openErr
-		}
-		prepared.scratch = scratch
-		evidence = &contractFollowupEvidence{Store: scratch, scratch: scratch, ctx: ctx, core: snap.Core, files: fileByPath, readCore: snap.ReadCoreFile, allowedRepos: repos}
-		logger := req.Logger
-		if logger == nil {
-			logger = zap.NewNop()
-		}
-		indexers := make(map[string]*Indexer)
-		readSource := func(path string) ([]byte, error) {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			file, ok := fileByPath[path]
-			if !ok {
-				return nil, fmt.Errorf("contract followup: accepted source outside census %q", path)
-			}
-			accepted, err := snap.ReadAccepted(ctx, file)
-			if err != nil {
-				return nil, err
-			}
-			if len(accepted.Bytes) > contractFollowupCompactLimit {
-				return nil, graph.ErrContractProjectionLimit
-			}
-			if accepted.SourceFingerprint != file.SourceFingerprint || accepted.Policy != file.Policy || contractInputHash(accepted.Bytes) != file.SourceFingerprint {
-				return nil, fmt.Errorf("%w: accepted source proof %s", errContractInputsChanged, path)
-			}
-			report.SourceReads++
-			report.SourceBytes += len(accepted.Bytes)
-			return bytes.Clone(accepted.Bytes), nil
-		}
+		scopes := make(map[string][2]string)
 		for _, file := range snap.Files {
-			if prior := indexers[file.RepoPrefix]; prior != nil {
-				if prior.workspaceID != file.WorkspaceID || prior.projectID != file.ProjectID {
-					return report, fmt.Errorf("contract followup: inconsistent accepted namespace scope %q", file.RepoPrefix)
-				}
-				continue
+			if prior, seen := scopes[file.RepoPrefix]; seen && prior != [2]string{file.WorkspaceID, file.ProjectID} {
+				return report, fmt.Errorf("contract followup: inconsistent accepted namespace scope %q", file.RepoPrefix)
 			}
-			cfg := req.Config
-			if override, ok := req.RepoConfigs[file.RepoPrefix]; ok {
-				cfg = override
-			}
-			idx := &Indexer{graph: evidence, rootPath: filepath.Join(string(filepath.Separator), "contract-followup", file.RepoPrefix), repoPrefix: file.RepoPrefix, workspaceID: file.WorkspaceID, projectID: file.ProjectID, config: cfg, logger: logger, registry: req.Registry}
-			opts := snap.RepoExtractionOptions[file.RepoPrefix]
-			idx.extractionOptions.Store(&opts)
-			idx.contractAnalysisOnly = true
-			idx.contractAcceptedFileSource = readSource
-			if reader, ok := snap.Core.(graph.SemanticBindingTypeReader); ok {
-				idx.contractSemanticReader = reader
-			}
-			indexers[file.RepoPrefix] = idx
+			scopes[file.RepoPrefix] = [2]string{file.WorkspaceID, file.ProjectID}
 		}
-		// A certified empty own namespace still receives a complete empty snapshot.
-		if indexers[snap.Key.RepoPrefix] == nil {
-			idx := &Indexer{graph: evidence, rootPath: "/contract-followup", repoPrefix: snap.Key.RepoPrefix, workspaceID: req.WorkspaceID, projectID: req.ProjectID, config: req.Config, logger: logger, registry: req.Registry}
-			opts := snap.RepoExtractionOptions[snap.Key.RepoPrefix]
-			idx.extractionOptions.Store(&opts)
-			idx.contractAnalysisOnly = true
-			idx.contractAcceptedFileSource = readSource
-			indexers[snap.Key.RepoPrefix] = idx
+		prepareStart := time.Now()
+		engine := newContractConvergence(ctx, req, fileByPath, repos, &report)
+		runErr := engine.run()
+		// The final enrichment round's store is the payload's evidence; it is
+		// closed with the prepared cohort, on failure too.
+		prepared.scratch, prepared.scratchDir = engine.scratch, engine.scratchDir
+		if runErr != nil {
+			return report, runErr
 		}
-		files := slices.Clone(snap.Files)
-		sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-		extractStart := time.Now()
-		registry = contracts.NewRegistry()
-		retainedRecordBytes, retainedRecords := 0, 0
-		for _, file := range files {
-			if req.Yield != nil {
-				if err := req.Yield(ctx); err != nil {
-					return report, err
-				}
-			}
-			if err := ctx.Err(); err != nil {
-				return report, err
-			}
-			idx := indexers[file.RepoPrefix]
-			projected, err := idx.contractFollowupPolicyMode(file.Language, file.Policy)
-			if err != nil {
-				return report, err
-			}
-			nodes, edges, err := evidence.loadFile(file.Path)
-			if err != nil {
-				return report, err
-			}
-			src, err := readSource(file.Path)
-			if err != nil {
-				return report, err
-			}
-			_, byLanguage := idx.buildPerFileContractExtractors()
-			var tree *parser.ParseTree
-			if projected {
-				if !idx.contractGeneratedCoreProof(ctx, file, src, nodes, edges, snap.Core) {
-					return report, fmt.Errorf("contract followup: unproved accepted projection %s", file.Path)
-				}
-			} else {
-				tree = contracts.ParseTreeForLang(file.Language, src)
-			}
-			found := idx.collectContractRecordsForFile(file.Path, src, nodes, edges, byLanguage[file.Language], tree, evidence)
-			if tree != nil {
-				tree.Release()
-			}
-			if file.Language == "gomod" || strings.HasSuffix(file.Path, "/go.mod") || file.Path == "go.mod" {
-				found = append(found, (&contracts.GoModExtractor{TrackedRepos: snap.TrackedRepoModules}).Extract(file.Path, src, nodes, edges)...)
-			}
-			registry.AddAllScoped(found, file.RepoPrefix, file.WorkspaceID, file.ProjectID)
-			encoded, encodeErr := json.Marshal(found)
-			if encodeErr != nil {
-				return report, encodeErr
-			}
-			retainedRecordBytes += len(encoded)
-			retainedRecords += len(found)
-			if retainedRecordBytes > contractFollowupCompactLimit || retainedRecords > graph.ContractProjectionRowLimit {
-				return report, graph.ErrContractProjectionLimit
-			}
-			report.Files++
-			if evidence.err != nil {
-				return report, evidence.err
-			}
-		}
-		report.ExtractDuration = time.Since(extractStart)
-		enrichStart := time.Now()
-		// All postpasses see only detached evidence and proof-bound source reads.
-		prefixes := make([]string, 0, len(indexers))
-		for repo := range indexers {
-			prefixes = append(prefixes, repo)
-		}
-		sort.Strings(prefixes)
-		for _, repo := range prefixes {
-			if req.Yield != nil {
-				if err := req.Yield(ctx); err != nil {
-					return report, err
-				}
-			}
-			idx := indexers[repo]
-			local := contracts.NewRegistry()
-			local.AddAll(registry.ByRepo(repo), repo)
-			idx.extractDIContracts(local)
-			idx.upgradeContractBareTypeRefs(local)
-			idx.resolveProviderHandlers(local)
-			if scans := idx.routerPrefixScanFiles(local); len(scans) > 0 {
-				contracts.JoinRouterPrefixes(local, scans, idx.contractFileSrc)
-			}
-			contracts.BindSpringConfig(evidence, contracts.SpringConfigScope{RepoPrefix: repo, RepoRoot: idx.rootPath, WorkspaceID: idx.workspaceID, ReadSource: func(path string) ([]byte, error) {
-				data, err := readSource(path)
-				if err != nil {
-					idx.rememberContractInputError(err)
-				}
-				return data, err
-			}})
-			idx.resolveCallReturnTypes(local)
-			idx.snapshotContractShapes(local)
-			idx.inlineEnvelopeShapes(local)
-			if err := idx.contractInputError(); err != nil {
-				return report, err
-			}
-			if evidence.err != nil {
-				return report, evidence.err
-			}
-			for _, id := range registry.AllIDs() {
-				registry.ReplaceByID(id, contractFollowupOtherOwners(registry.ByID(id), repo))
-			}
-			registry.AddAll(local.All(), repo)
-
-		}
-		allRecords := registry.All()
-		encodedRecords, encodeErr := json.Marshal(allRecords)
-		if encodeErr != nil {
-			return report, encodeErr
-		}
-		if len(encodedRecords) > contractFollowupCompactLimit || len(allRecords) > graph.ContractProjectionRowLimit {
-			return report, graph.ErrContractProjectionLimit
-		}
-		report.EnrichDuration = time.Since(enrichStart)
+		registry, evidence = engine.registry, engine.evidence
 		report.PrepareDuration = time.Since(prepareStart)
 		report.ScratchNodes, report.ScratchEdges = evidence.writtenNodes, evidence.writtenEdges
 		report.ScratchBytes = contractFollowupScratchBytes(prepared.scratchDir)
 		prepared.registry, prepared.evidence, prepared.report = registry, evidence, report
 	} else {
-		report.Files = prepared.report.Files
-		report.SourceReads = prepared.report.SourceReads
-		report.SourceBytes = prepared.report.SourceBytes
-		report.ExtractDuration = prepared.report.ExtractDuration
-		report.EnrichDuration = prepared.report.EnrichDuration
-		report.ScratchNodes = prepared.report.ScratchNodes
-		report.ScratchEdges = prepared.report.ScratchEdges
-		report.ScratchBytes = prepared.report.ScratchBytes
-		report.PrepareDuration = prepared.report.PrepareDuration
+		report = contractPreparedReport(report, prepared.report)
 	}
+	payloadStart := time.Now()
 	own := registry.ByRepo(snap.Key.RepoPrefix)
 	nodes, allOwnerEdges, missing := contractGraphRows(evidence, registry.All(), true)
 	var edges []*graph.Edge
@@ -527,6 +415,7 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 	if len(encodedRows) > contractFollowupCompactLimit || len(nodes)+len(edges) > graph.ContractProjectionRowLimit {
 		return report, graph.ErrContractProjectionLimit
 	}
+	report.PayloadDuration = time.Since(payloadStart)
 	publishStart := time.Now()
 	for start := 0; start < len(nodes); start += contractFrontierReadBatchSize {
 		if req.Yield != nil {
@@ -616,17 +505,36 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 		tokens = append(tokens, w.Token)
 	}
 	attachment := graph.ContractAttachment{RepoPrefix: snap.Key.RepoPrefix, CheckoutID: snap.Key.CheckoutID, InputVersion: snap.Key.InputVersion, InputFingerprint: snap.Key.InputFingerprint, PayloadGeneration: generation, CompletedTokens: tokens}
-	if snap.ValidateAccepted != nil {
-		if err := snap.ValidateAccepted(ctx); err != nil {
-			return report, err
-		}
-	}
+	// The job converged before the payload: every live file was accepted and
+	// proven at its final fence. Publication's own witness CAS refuses a key
+	// that moved since; body-level saves since the fence are later inputs at
+	// the same key.
 	if err := req.Catalog.PublishContractAttachmentWithInputsContext(ctx, logical, snap.Inputs, attachment, snap.Work, time.Now().Unix()); err != nil {
 		return report, err
 	}
 	report.PublishDuration = time.Since(publishStart)
 	report.Published = true
 	return report, nil
+}
+
+// contractPreparedReport carries the shared cohort's preparation figures into
+// a later target's report.
+func contractPreparedReport(report, prepared ContractFollowupReport) ContractFollowupReport {
+	report.Files = prepared.Files
+	report.SourceReads = prepared.SourceReads
+	report.SourceBytes = prepared.SourceBytes
+	report.ExtractDuration = prepared.ExtractDuration
+	report.EnrichDuration = prepared.EnrichDuration
+	report.ScratchNodes = prepared.ScratchNodes
+	report.ScratchEdges = prepared.ScratchEdges
+	report.ScratchBytes = prepared.ScratchBytes
+	report.PrepareDuration = prepared.PrepareDuration
+	report.CensusDuration, report.StampsDuration = prepared.CensusDuration, prepared.StampsDuration
+	report.ScratchDuration, report.RoundsDuration = prepared.ScratchDuration, prepared.RoundsDuration
+	report.Iterations, report.Rounds = prepared.Iterations, prepared.Rounds
+	report.EnrichRuns, report.EnrichReruns, report.Revalidated = prepared.EnrichRuns, prepared.EnrichReruns, prepared.Revalidated
+	report.EnrichRechecks, report.EnrichRecheckReads = prepared.EnrichRechecks, prepared.EnrichRecheckReads
+	return report
 }
 
 func contractFollowupOtherOwners(rows []contracts.Contract, repo string) []contracts.Contract {
@@ -820,9 +728,20 @@ type contractFollowupEvidence struct {
 	ctx                        context.Context
 	core                       graph.Reader
 	files                      map[string]ContractFollowupFile
-	readCore                   func(context.Context, ContractFollowupFile) (ContractFollowupCoreFile, error)
-	allowedRepos               map[string]bool
-	loaded                     map[string]bool
+	// excluded census paths are failure envelopes: loading one yields no
+	// evidence rather than an out-of-census refusal.
+	excluded map[string]bool
+	// ledger, while one file's extraction or an enrichment round runs,
+	// records every key requested, the owning file of every node answered,
+	// and every read answered from the core with a digest of its answer.
+	ledger *contractUnitLedger
+	// guard brackets every read the facade answers from the core.
+	guard *contractReadGuard
+	// semantic answers binding-type lookups from the selected core.
+	semantic     graph.SemanticBindingTypeReader
+	readCore     func(context.Context, ContractFollowupFile) (ContractFollowupCoreFile, error)
+	allowedRepos map[string]bool
+	loaded       map[string]bool
 	// Completed names belong to this private, single-worker captured evidence.
 	// Keep raw row counts so cached names still consume the request's budget;
 	// scratch results and final accepted-source fences remain live.
@@ -834,6 +753,13 @@ type contractFollowupEvidence struct {
 // RepoFilePaths serves the complete accepted census directly; no errorless
 // repository-wide scratch query is needed for Spring configuration discovery.
 func (e *contractFollowupEvidence) RepoFilePaths(repo, workspace string, languages, extensions []string) []string {
+	out := e.repoFilePaths(repo, workspace, languages, extensions)
+	// The census is a read too: a join or departure answers differently.
+	e.ledger.read(contractReadRepoFiles, []string{repo, workspace, contractJoinArgs(languages), contractJoinArgs(extensions)}, out)
+	return out
+}
+
+func (e *contractFollowupEvidence) repoFilePaths(repo, workspace string, languages, extensions []string) []string {
 	var out []string
 	for path, file := range e.files {
 		if file.RepoPrefix != repo || (workspace != "" && file.WorkspaceID != workspace) {
@@ -1010,6 +936,19 @@ func contractFollowupCloneValue(v reflect.Value) reflect.Value {
 	}
 }
 func (e *contractFollowupEvidence) loadFile(path string) ([]*graph.Node, []*graph.Edge, error) {
+	// The target is an owner before the read: one caught between its evict
+	// and add answers with no file node, and its stamp shows the move.
+	e.ledger.owner(path)
+	e.ledger.key("path:", path)
+	defer e.guard.enter()()
+	nodes, edges, err := e.loadFileRows(path)
+	if err == nil {
+		e.ledger.read(contractReadFile, []string{path}, contractFileAnswer{Nodes: nodes, Edges: edges}, path)
+	}
+	return nodes, edges, err
+}
+
+func (e *contractFollowupEvidence) loadFileRows(path string) ([]*graph.Node, []*graph.Edge, error) {
 	if e.loaded == nil {
 		e.loaded = make(map[string]bool)
 	}
@@ -1042,6 +981,9 @@ func (e *contractFollowupEvidence) loadFile(path string) ([]*graph.Node, []*grap
 	}
 	file, ok := e.files[path]
 	if !ok {
+		if e.excluded[path] {
+			return nil, nil, nil
+		}
 		return nil, nil, fmt.Errorf("contract followup: selected file outside accepted census %q", path)
 	}
 	rows, err := e.readCore(e.ctx, file)
@@ -1114,6 +1056,19 @@ func (e *contractFollowupEvidence) GetFileNodesByPaths(paths []string) map[strin
 	return out
 }
 func (e *contractFollowupEvidence) GetNodesByIDs(ids []string) map[string]*graph.Node {
+	e.ledger.key("id:", ids...)
+	defer e.guard.enter()()
+	out := e.getNodesByIDs(ids)
+	for _, node := range out {
+		e.ledger.nodes(node)
+	}
+	if e.err == nil {
+		e.ledger.read(contractReadIDs, ids, out)
+	}
+	return out
+}
+
+func (e *contractFollowupEvidence) getNodesByIDs(ids []string) map[string]*graph.Node {
 	out, readErr := e.scratch.GetNodesByIDsContext(e.ctx, ids)
 	if readErr != nil {
 		e.fail(readErr)
@@ -1155,6 +1110,19 @@ func (e *contractFollowupEvidence) GetNode(id string) *graph.Node {
 	return e.GetNodesByIDs([]string{id})[id]
 }
 func (e *contractFollowupEvidence) FindNodesByNames(names []string) map[string][]*graph.Node {
+	e.ledger.key("name:", names...)
+	defer e.guard.enter()()
+	out := e.findNodesByNames(names)
+	for _, nodes := range out {
+		e.ledger.nodes(nodes...)
+	}
+	if e.err == nil {
+		e.ledger.read(contractReadNames, names, out)
+	}
+	return out
+}
+
+func (e *contractFollowupEvidence) findNodesByNames(names []string) map[string][]*graph.Node {
 	if e.err != nil {
 		return nil
 	}
@@ -1252,9 +1220,75 @@ func (e *contractFollowupEvidence) FindNodesByName(name string) []*graph.Node {
 	return e.FindNodesByNames([]string{name})[name]
 }
 func (e *contractFollowupEvidence) ConstantValuesByNodeIDs(ids []string) (map[string]string, error) {
+	e.ledger.key("id:", ids...)
+	defer e.guard.enter()()
+	out, owners, err := e.constantValues(ids)
+	if err == nil {
+		e.ledger.read(contractReadConstants, ids, out, owners...)
+	}
+	return out, err
+}
+
+// semanticTypes answers a binding-type lookup from the selected core through
+// the facade, recorded like every other core read.
+func (e *contractFollowupEvidence) semanticTypes(sites []graph.SemanticBindingSite) (map[graph.SemanticBindingSite]string, error) {
+	if e.semantic == nil {
+		return nil, nil
+	}
+	defer e.guard.enter()()
+	out, err := e.semantic.SemanticBindingTypes(sites)
+	if err != nil {
+		return out, err
+	}
+	encoded, encodeErr := json.Marshal(sites)
+	if encodeErr != nil {
+		if e.ledger != nil {
+			e.ledger.opaque = true
+		}
+		return out, nil
+	}
+	files := make([]string, 0, len(sites))
+	for _, site := range sites {
+		files = append(files, site.FilePath)
+	}
+	e.ledger.read(contractReadSemantic, []string{string(encoded)}, out, files...)
+	return out, nil
+}
+
+// contractLedgerSemanticReader is the semantic reader an analysis indexer
+// sees: every lookup goes through the evidence facade.
+type contractLedgerSemanticReader struct{ evidence *contractFollowupEvidence }
+
+func (r contractLedgerSemanticReader) SemanticBindingTypes(sites []graph.SemanticBindingSite) (map[graph.SemanticBindingSite]string, error) {
+	return r.evidence.semanticTypes(sites)
+}
+
+// constantValues reads constant values and, for a recording ledger, the
+// files declaring the answered constants: the value rows carry no file.
+func (e *contractFollowupEvidence) constantValues(ids []string) (map[string]string, []string, error) {
 	out, err := graph.ConstantValuesByNodeIDsContext(e.ctx, e.core, ids)
 	if err != nil {
 		e.fail(err)
+		return out, nil, err
 	}
-	return out, err
+	var files []string
+	if e.ledger != nil && len(out) > 0 {
+		answered := make([]string, 0, len(out))
+		for id := range out {
+			answered = append(answered, id)
+		}
+		sort.Strings(answered)
+		owners, ownerErr := graph.ContractSourceNodesContext(e.ctx, e.core, answered)
+		if ownerErr != nil {
+			e.fail(ownerErr)
+			return out, nil, ownerErr
+		}
+		for _, owner := range owners {
+			e.ledger.nodes(owner)
+			if owner != nil {
+				files = append(files, owner.FilePath)
+			}
+		}
+	}
+	return out, files, err
 }

@@ -1,0 +1,436 @@
+package store_sqlite
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"slices"
+	"sync"
+	"sync/atomic"
+
+	"github.com/zzet/gortex/internal/graph"
+)
+
+// The boundary-receipt write sequence.
+//
+// A contract analysis job proves a read by comparing a file's receipt stamp
+// taken before the read with one taken after it. Row identity alone cannot do
+// that: a same-identity rewrite goes (I,accepted) → (I,pending) → (I,accepted),
+// and an evict and its re-add are separate transactions. Every receipt write
+// therefore bumps a process-local counter for the path it writes BEFORE the
+// write executes, and per repository a begun counter before and a done counter
+// after the transaction ends (commit or rollback). A scan that samples
+// (begun, done) before reading rows, then reads rows, then seqs, sees every
+// write that overlaps the interval between two scans as a row or seq change.
+//
+// The counters are not persisted: a restart loses them, and with them every
+// stamp a job held. A chain fold or flatten copies rows verbatim and bumps
+// nothing, so compaction does not make a settled file look moved.
+//
+// A mutation that wrote every core row of its files but was never accepted (a
+// newer mutation took the owner over) settles its receipts at their write
+// seqs: such a row stays unaccepted, and its file's core rows are complete
+// until the next receipt write of the path begins. Every ended receipt write
+// and every settle advances an event counter a job's retry waits on.
+//
+// Each path also has a core-write window: the staging write that rewrites a
+// receipt unaccepted before its mutation's core writes opens it as it begins,
+// and it closes when the mutation's body ends its core writes, when the
+// staged row is accepted, or when the mutation settles it. While it is open
+// the path's core rows may be between an evict and its add; once it is
+// closed they are complete for the staged row whether or not anything
+// accepted it. A window opened again is a later write seq, so an unchanged
+// seq and a closed window before and after a read mean no core write of the
+// path overlapped the read. A body that fails leaves its window open until the
+// next mutation of the path.
+type contractReceiptWriteSequence struct {
+	mu      sync.Mutex
+	seq     map[contractReceiptWriteKey]uint64
+	settled map[contractReceiptWriteKey]uint64
+	// writing holds the write seq that opened each open core-write window.
+	writing map[contractReceiptWriteKey]uint64
+	repos   map[string]*contractReceiptWriteBracket
+	events  uint64
+	changed chan struct{}
+}
+
+// contractCoreWindow is what one receipt write does to the core-write windows
+// of the paths it writes.
+type contractCoreWindow int
+
+const (
+	contractCoreWindowKept contractCoreWindow = iota
+	// contractCoreWindowOpened stages unaccepted rows ahead of their
+	// mutation's core writes and opens their windows as it begins.
+	contractCoreWindowOpened
+	// contractCoreWindowClosed accepts staged rows and closes their windows
+	// once it commits.
+	contractCoreWindowClosed
+)
+
+// notifyLocked advances the event counter and wakes its waiters.
+func (w *contractReceiptWriteSequence) notifyLocked() {
+	w.events++
+	if w.changed != nil {
+		close(w.changed)
+		w.changed = nil
+	}
+}
+
+type contractReceiptWriteKey struct{ repo, checkout, path string }
+
+// contractReceiptWriteStage, when set by a test, runs at "begun" (after the
+// begun and seq bumps, before the transaction) and at "ending" (after commit
+// or rollback, before the done bump) of every receipt write, with the paths
+// the write names.
+var contractReceiptWriteStage atomic.Pointer[func(stage string, paths []string)]
+
+// SetContractReceiptWriteHookForTest installs a hook at the receipt write
+// stages so a test can hold a write in flight between a scan's phases.
+func SetContractReceiptWriteHookForTest(hook func(stage string, paths []string)) (restore func()) {
+	previous := contractReceiptWriteStage.Swap(&hook)
+	return func() { contractReceiptWriteStage.Store(previous) }
+}
+
+func contractReceiptWriteAt(stage string, keys []contractReceiptWriteKey) {
+	hook := contractReceiptWriteStage.Load()
+	if hook == nil || *hook == nil {
+		return
+	}
+	paths := make([]string, 0, len(keys))
+	for _, key := range keys {
+		paths = append(paths, key.path)
+	}
+	(*hook)(stage, paths)
+}
+
+type contractReceiptWriteBracket struct{ begun, done uint64 }
+
+// beginContractReceiptWrites bumps the begun counter of every repository
+// written and the seq of every path written, opens the core-write windows of
+// staged unaccepted rows when window says so, and returns the matching done
+// bump. The caller holds the write gate and defers done past its commit or
+// rollback, reporting whether it committed: an accepting write closes its
+// rows' windows only then.
+func (s *Store) beginContractReceiptWrites(rows []graph.ContractBoundaryReceipt, sources []graph.ContractBoundaryReceiptSource, window contractCoreWindow) func(committed bool) {
+	if len(rows) == 0 && len(sources) == 0 {
+		return func(bool) {}
+	}
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.seq == nil {
+		w.seq = make(map[contractReceiptWriteKey]uint64)
+		w.repos = make(map[string]*contractReceiptWriteBracket)
+	}
+	if w.writing == nil {
+		w.writing = make(map[contractReceiptWriteKey]uint64)
+	}
+	var repos []string
+	var keys []contractReceiptWriteKey
+	bump := func(key contractReceiptWriteKey) {
+		w.seq[key]++
+		keys = append(keys, key)
+		if !slices.Contains(repos, key.repo) {
+			repos = append(repos, key.repo)
+		}
+	}
+	for _, row := range rows {
+		key := contractReceiptWriteKey{row.RepoPrefix, row.CheckoutID, row.FilePath}
+		bump(key)
+		if window == contractCoreWindowOpened && !row.Accepted {
+			w.writing[key] = w.seq[key]
+		}
+	}
+	for _, source := range sources {
+		bump(contractReceiptWriteKey{source.Receipt.RepoPrefix, source.TargetCheckoutID, source.Receipt.FilePath})
+	}
+	for _, repo := range repos {
+		bracket := w.repos[repo]
+		if bracket == nil {
+			bracket = &contractReceiptWriteBracket{}
+			w.repos[repo] = bracket
+		}
+		bracket.begun++
+	}
+	w.mu.Unlock()
+	contractReceiptWriteAt("begun", keys)
+	w.mu.Lock()
+	return func(committed bool) {
+		contractReceiptWriteAt("ending", keys)
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if committed && window == contractCoreWindowClosed {
+			for _, row := range rows {
+				delete(w.writing, contractReceiptWriteKey{row.RepoPrefix, row.CheckoutID, row.FilePath})
+			}
+		}
+		for _, repo := range repos {
+			w.repos[repo].done++
+		}
+		w.notifyLocked()
+	}
+}
+
+// EndContractCoreWrites closes the core-write windows one repository and
+// actor's mutation opened at the given write seqs: its body ended every core
+// write of those paths. A path written again since keeps its newer window.
+// Closing moves no row, so the repository's bracket steps as a write would,
+// and waiters are woken.
+func (s *Store) EndContractCoreWrites(repo, checkout string, seqs map[string]uint64) {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	closed := false
+	for path, seq := range seqs {
+		key := contractReceiptWriteKey{repo, checkout, path}
+		if seq == 0 || w.writing[key] != seq {
+			continue
+		}
+		delete(w.writing, key)
+		closed = true
+	}
+	if !closed {
+		return
+	}
+	if bracket := w.repos[repo]; bracket != nil {
+		bracket.begun++
+		bracket.done++
+	}
+	w.notifyLocked()
+}
+
+// SettleContractReceiptWrites marks one repository and actor's receipts
+// settled at the given write seqs: the mutation that wrote them completed its
+// core writes without accepting them. A path written again since keeps its
+// newer, unsettled seq.
+func (s *Store) SettleContractReceiptWrites(repo, checkout string, seqs map[string]uint64) {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	settled := false
+	for path, seq := range seqs {
+		key := contractReceiptWriteKey{repo, checkout, path}
+		if seq == 0 || w.seq[key] != seq {
+			continue
+		}
+		if w.settled == nil {
+			w.settled = make(map[contractReceiptWriteKey]uint64)
+		}
+		w.settled[key] = seq
+		if w.writing[key] == seq {
+			delete(w.writing, key)
+		}
+		settled = true
+	}
+	if settled {
+		w.notifyLocked()
+	}
+}
+
+// ContractReceiptWriteState is one path's write seq, whether the mutation
+// that wrote it settled it, and whether a core-write window of the path is
+// open.
+type ContractReceiptWriteState struct {
+	Seq     uint64
+	Settled bool
+	Writing bool
+}
+
+// ContractReceiptWriteStates returns the write state of each path of one
+// repository and actor. A path never written in this process has seq 0, is
+// not settled and has no open window.
+func (s *Store) ContractReceiptWriteStates(repo, checkout string, paths []string) map[string]ContractReceiptWriteState {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make(map[string]ContractReceiptWriteState, len(paths))
+	for _, path := range paths {
+		key := contractReceiptWriteKey{repo, checkout, path}
+		seq := w.seq[key]
+		_, writing := w.writing[key]
+		out[path] = ContractReceiptWriteState{Seq: seq, Settled: seq > 0 && w.settled[key] == seq, Writing: writing}
+	}
+	return out
+}
+
+// ContractReceiptEvents returns the count of ended receipt writes and settles
+// in this process, and a channel closed by the next one.
+func (s *Store) ContractReceiptEvents() (uint64, <-chan struct{}) {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.changed == nil {
+		w.changed = make(chan struct{})
+	}
+	return w.events, w.changed
+}
+
+// ContractReceiptWriteSample reports how many receipt write transactions of a
+// repository have begun and how many have ended. begun == done means none is
+// in flight. Scans take it before reading any row.
+func (s *Store) ContractReceiptWriteSample(repo string) (begun, done uint64) {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if bracket := w.repos[repo]; bracket != nil {
+		return bracket.begun, bracket.done
+	}
+	return 0, 0
+}
+
+// ContractReceiptWriteSeqs returns the write seq of each path of one
+// repository and actor. A path never written in this process has seq 0.
+func (s *Store) ContractReceiptWriteSeqs(repo, checkout string, paths []string) map[string]uint64 {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make(map[string]uint64, len(paths))
+	for _, path := range paths {
+		out[path] = w.seq[contractReceiptWriteKey{repo, checkout, path}]
+	}
+	return out
+}
+
+// ContractBoundaryReceiptStamp is a receipt row's identity without its
+// payload: what a contract job compares before and after a read.
+type ContractBoundaryReceiptStamp struct {
+	FilePath, Fingerprint, SourceFingerprint string
+	Accepted                                 bool
+}
+
+// ContractBoundaryReceiptStampsContext reads the non-payload columns of this
+// generation's receipt rows for one repository and actor: every row when
+// paths is nil, otherwise the named paths. The payload column is stored last,
+// so the read never touches its overflow pages.
+func (s *Store) ContractBoundaryReceiptStampsContext(ctx context.Context, repo, actor string, paths []string) (map[string]ContractBoundaryReceiptStamp, error) {
+	if err := s.requireContractBoundaryContext(ctx); err != nil {
+		return nil, err
+	}
+	out := make(map[string]ContractBoundaryReceiptStamp)
+	const columns = `SELECT file_path,fingerprint,source_fingerprint,accepted FROM generation_contract_boundary_receipt WHERE view_gen=? AND repo_prefix=? AND checkout_id=?`
+	queries := [][]any{{columns, s.viewGen, repo, actor}}
+	if paths != nil {
+		queries = nil
+		unique := slices.Clone(paths)
+		slices.Sort(unique)
+		unique = slices.Compact(unique)
+		for start := 0; start < len(unique); start += lookupChunkSize {
+			chunk := unique[start:min(start+lookupChunkSize, len(unique))]
+			query := []any{columns + ` AND file_path IN (` + inPlaceholders(len(chunk)) + `)`, s.viewGen, repo, actor}
+			queries = append(queries, append(query, toAnyArgs(chunk)...))
+		}
+	}
+	for _, query := range queries {
+		if err := s.readContractBoundaryStamps(ctx, query[0].(string), query[1:], out); err != nil {
+			return nil, err
+		}
+	}
+	return out, ctx.Err()
+}
+
+func (s *Store) readContractBoundaryStamps(ctx context.Context, query string, args []any, out map[string]ContractBoundaryReceiptStamp) error {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var stamp ContractBoundaryReceiptStamp
+		if err := rows.Scan(&stamp.FilePath, &stamp.Fingerprint, &stamp.SourceFingerprint, &stamp.Accepted); err != nil {
+			return err
+		}
+		out[stamp.FilePath] = stamp
+	}
+	return rows.Err()
+}
+
+// ContractSeedEdgesContext returns this generation's dependency-injection
+// owner edges of one repository: provides and consumes edges whose source
+// node the repository owns. A contract job's enrichment round re-derives its
+// DI seeds from them every round instead of from per-file loads, because an
+// evicted file tears other files' edges into it without rewriting their
+// receipts.
+func (s *Store) ContractSeedEdgesContext(ctx context.Context, repo string) ([]*graph.Edge, error) {
+	if err := s.requireContractBoundaryContext(ctx); err != nil {
+		return nil, err
+	}
+	reposJSON, err := json.Marshal([]string{repo})
+	if err != nil {
+		return nil, err
+	}
+	kindsJSON, err := json.Marshal([]string{string(graph.EdgeProvides), string(graph.EdgeConsumes)})
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, repoContractEdgesByKindsQuery(), string(reposJSON), string(kindsJSON), s.viewGen)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*graph.Edge
+	for rows.Next() {
+		var repoPrefix string
+		edge, err := s.scanEdgeCursor(repoPrefixedEdgeScanner{scanner: rows, repo: &repoPrefix})
+		if err != nil {
+			return nil, err
+		}
+		if edge != nil {
+			out = append(out, edge)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, ctx.Err()
+}
+
+// ContractSeedNodesContext returns this generation's enrichment seed nodes of
+// one repository: Java methods (Spring bean injection candidates) and nodes
+// that carry Spring configuration keys.
+func (s *Store) ContractSeedNodesContext(ctx context.Context, repo string) ([]*graph.Node, error) {
+	if err := s.requireContractBoundaryContext(ctx); err != nil {
+		return nil, err
+	}
+	kindsJSON, err := json.Marshal([]string{string(graph.KindField), string(graph.KindType), string(graph.KindInterface), string(graph.KindMethod)})
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, repoNodesByKindsWithMetaKeyQuery(false), string(kindsJSON), repo, s.viewGen, s.viewGen)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := make(map[string]bool)
+	var out []*graph.Node
+	for rows.Next() {
+		node, err := scanNodeCursor(rows)
+		if err != nil {
+			return nil, err
+		}
+		if node == nil || seen[node.ID] {
+			continue
+		}
+		_, spring := node.Meta["spring_config_keys"]
+		if spring || (node.Kind == graph.KindMethod && node.Language == "java") {
+			seen[node.ID] = true
+			out = append(out, node)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(out, func(a, b *graph.Node) int {
+		if a.ID < b.ID {
+			return -1
+		}
+		if a.ID > b.ID {
+			return 1
+		}
+		return 0
+	})
+	if len(out) > graph.ContractProjectionRowLimit {
+		return nil, fmt.Errorf("%w: contract seed nodes", graph.ErrContractProjectionLimit)
+	}
+	return out, ctx.Err()
+}

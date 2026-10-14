@@ -2815,6 +2815,12 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 			zap.Int64("ms", ev.DurationMs))
 	}
 	if superseded {
+		// Every core write of the patch landed before the newer generation
+		// overtook it: its files' core-write windows close, as a completed
+		// body's do, though nothing accepts this receipt.
+		if journal := idx.contractCoreInputs; journal != nil {
+			journal.written()
+		}
 		return errMutationSuperseded
 	}
 	return nil

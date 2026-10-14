@@ -17,6 +17,7 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/viewmetrics"
 	"go.uber.org/zap"
 )
 
@@ -95,7 +96,20 @@ func NewContractAnalysisCoordinator(options ContractAnalysisCoordinatorOptions) 
 	return c, nil
 }
 
-func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphview.RepoView, inputs *graphview.SelectedContractInputs, repo, checkout string) (bool, error) {
+func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphview.RepoView, inputs *graphview.SelectedContractInputs, repo, checkout string) (admitted bool, err error) {
+	result := ""
+	defer func() {
+		switch {
+		case result != "":
+		case err != nil:
+			result = viewmetrics.ContractRequestError
+		case admitted:
+			result = viewmetrics.ContractRequestAdmitted
+		default:
+			result = viewmetrics.ContractRequestRefused
+		}
+		countContractRequest(result)
+	}()
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -111,8 +125,8 @@ func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphvi
 		}
 		key := graph.ContractAttachmentKey{RepoPrefix: repo, CheckoutID: checkout}
 		waiter, observation := c.observeProgress(ctx, key)
-		admitted, err := c.options.ReconcileBaseline(ctx, view, repo, checkout)
-		if !admitted || err != nil {
+		started, err := c.options.ReconcileBaseline(ctx, view, repo, checkout)
+		if !started || err != nil {
 			c.mu.Lock()
 			if c.baselines[waiter] == observation {
 				delete(c.baselines, waiter)
@@ -120,8 +134,10 @@ func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphvi
 			c.mu.Unlock()
 			observation.stop()
 		}
-
-		return admitted, err
+		if started && err == nil {
+			result = viewmetrics.ContractRequestBaselineAdmitted
+		}
+		return started, err
 	}
 	key := graph.ContractAttachmentKey{RepoPrefix: repo, CheckoutID: checkout, InputVersion: inputs.State.InputVersion, InputFingerprint: inputs.State.InputFingerprint}
 	if !inputs.State.Accepted {
@@ -146,7 +162,7 @@ func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphvi
 					pendingPositive = true
 				}
 			}
-			admitted := false
+			baselines := false
 			namespaces := make([]string, 0, len(pendingPrimary))
 			for namespace := range pendingPrimary {
 				namespaces = append(namespaces, namespace)
@@ -158,9 +174,12 @@ func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphvi
 					c.forgetProgress(waiter, observation)
 					return false, err
 				}
-				admitted = admitted || started
+				baselines = baselines || started
 			}
-			if !admitted && !pendingPositive {
+			if baselines {
+				result = viewmetrics.ContractRequestBaselineAdmitted
+			}
+			if !baselines && !pendingPositive {
 				c.forgetProgress(waiter, observation)
 				// A repair may have completed between validation and admission.
 				// Let the consumer recapture that change, rather than wait with
@@ -171,6 +190,9 @@ func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphvi
 				return false, nil
 			}
 		}
+		if result == "" {
+			result = viewmetrics.ContractRequestInputsPending
+		}
 		return true, nil // Core acceptance/supersession owns eligibility, not this job.
 	}
 	if key.InputVersion != "" && key.InputFingerprint != "" {
@@ -179,6 +201,7 @@ func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphvi
 			return false, err
 		}
 		if header != nil {
+			result = viewmetrics.ContractRequestAttached
 			return true, nil
 		}
 	}
@@ -214,6 +237,9 @@ func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphvi
 			return false, nil
 		}
 		header, err := c.options.Store.GetContractAttachmentContext(ctx, key)
+		if err == nil && header != nil {
+			result = viewmetrics.ContractRequestAttached
+		}
 		return header != nil, err
 	}
 	if snapshot.Core == nil || release == nil {
@@ -259,11 +285,13 @@ func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphvi
 		}
 		c.mu.Unlock()
 		snapshot.Release()
+		result = viewmetrics.ContractRequestCoalesced
 		return true, nil
 	}
 	if len(c.queue) >= c.options.QueueCapacity {
 		c.mu.Unlock()
 		snapshot.Release()
+		result = viewmetrics.ContractRequestQueueFull
 		return false, nil
 	}
 	seen := make(map[graph.ContractAttachmentKey]bool, len(targets))
@@ -321,13 +349,21 @@ func (c *ContractAnalysisCoordinator) observeProgress(ctx context.Context, key g
 func contractAnalysisCohortID(snapshot ContractFollowupSnapshot, cfg config.IndexConfig) (string, error) {
 	// Exact physical witnesses preserve source actor, order, Found and Accepted.
 	// No source clock or latest attachment substitutes for immutable authority.
+	// File source fingerprints are left out: a job proves its own reads by
+	// receipt stamps, so a body-level save between two captures of one key
+	// joins the running job instead of queueing another.
+	files := make([]ContractFollowupFile, len(snapshot.Files))
+	for i, file := range snapshot.Files {
+		file.SourceFingerprint = ""
+		files[i] = file
+	}
 	encoded, err := json.Marshal(struct {
 		Inputs             []graph.ContractInputWitness
 		Files              []ContractFollowupFile
 		Config             config.IndexConfig
 		RepoConfigs        map[string]config.IndexConfig
 		TrackedRepoModules map[string]string
-	}{snapshot.Inputs, snapshot.Files, cfg, snapshot.RepoConfigs, snapshot.TrackedRepoModules})
+	}{snapshot.Inputs, files, cfg, snapshot.RepoConfigs, snapshot.TrackedRepoModules})
 	if err != nil {
 		return "", err
 	}
@@ -512,18 +548,36 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) {
 	if len(targets) == 0 {
 		return
 	}
-	report, err := RunContractFollowupBatch(c.ctx, ContractFollowupBatchRequest{Snapshot: job.snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: c.options.Registry, Config: c.options.Config, RepoConfigs: job.snapshot.RepoConfigs, Logger: c.options.Logger, Leases: c.options.Leases, ScratchParent: c.options.ScratchParent, Yield: c.options.Yield})
+	c.options.Logger.Info("contract analysis job started", zap.String("mode", viewmetrics.ContractModeCold), zap.String("job", job.id),
+		zap.String("repo", targets[0].Key.RepoPrefix), zap.String("checkout", targets[0].Key.CheckoutID), zap.Int("targets", len(targets)))
+	started := time.Now()
+	report, err := RunContractFollowupBatch(c.ctx, ContractFollowupBatchRequest{Snapshot: job.snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: c.options.Registry, Config: c.options.Config, RepoConfigs: job.snapshot.RepoConfigs, Logger: c.options.Logger, Leases: c.options.Leases, ScratchParent: c.options.ScratchParent, Yield: c.options.Yield,
+		PublishedEpoch: c.publishedEpoch, WaitPublished: c.waitPublished})
 	if err != nil {
 		c.options.Logger.Warn("contract cohort analysis failed", zap.Error(err))
 	}
+	var targetErr error
 	for _, result := range report.Targets {
 		if result.Report.Published {
 			published[result.Key] = true
 		}
 		if result.Err != nil {
+			targetErr = result.Err
 			c.options.Logger.Warn("contract target publication failed", zap.String("repo", result.Key.RepoPrefix), zap.Error(result.Err))
 		}
 	}
+	if err == nil {
+		err = targetErr
+	}
+	elapsed := time.Since(started)
+	outcome := contractJobOutcome(err)
+	countContractJob(viewmetrics.ContractModeCold, outcome, elapsed)
+	logContractJob(c.options.Logger, viewmetrics.ContractModeCold, outcome, elapsed, report)
+}
+
+// contractJobOutcome classifies a finished job body for the jobs counter.
+func contractJobOutcome(err error) string {
+	return contractJobOutcomeOf(err)
 }
 
 // Close cancels running work, drains every queued source handoff, then waits

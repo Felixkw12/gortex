@@ -17,6 +17,10 @@ type contractCapturedCore struct {
 	readers map[string]graph.Reader
 }
 
+// contractSpringConfigKeyIDPrefix is the identity namespace of Spring
+// configuration-key nodes, scoped or legacy.
+const contractSpringConfigKeyIDPrefix = "cfg::spring::"
+
 func (c *contractCapturedCore) repoForID(id string) (string, error) {
 	repo := ""
 	found := false
@@ -38,6 +42,11 @@ func (c *contractCapturedCore) LayerContractIDProjectionContext(ctx context.Cont
 	out := graph.ContractFileProjection{SourceNodes: make(map[string]*graph.Node)}
 	groups := make(map[string][]string)
 	for _, id := range ids {
+		if strings.HasPrefix(id, contractSpringConfigKeyIDPrefix) {
+			// Spring configuration keys are minted by the analysis itself and
+			// owned by no repository path: the cohort holds none of them.
+			continue
+		}
 		repo, e := c.repoForID(id)
 		if e != nil {
 			return graph.ContractFileProjection{}, e

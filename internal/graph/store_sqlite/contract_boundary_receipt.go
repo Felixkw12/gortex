@@ -225,6 +225,14 @@ func (s *Store) requireContractBoundaryContext(ctx context.Context) error {
 	return nil
 }
 func (s *Store) contractBoundaryTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	return s.contractBoundaryWriteTx(ctx, nil, nil, contractCoreWindowKept, fn)
+}
+
+// contractBoundaryWriteTx is contractBoundaryTx for a transaction that writes
+// the named receipt rows (and carried sources): their write sequence is
+// bumped under the gate before the transaction begins and settled after it
+// ends, and their core-write windows move as window says.
+func (s *Store) contractBoundaryWriteTx(ctx context.Context, rows []graph.ContractBoundaryReceipt, sources []graph.ContractBoundaryReceiptSource, window contractCoreWindow, fn func(*sql.Tx) error) error {
 	if err := s.requireContractBoundaryContext(ctx); err != nil {
 		return err
 	}
@@ -233,6 +241,9 @@ func (s *Store) contractBoundaryTx(ctx context.Context, fn func(*sql.Tx) error) 
 		return err
 	}
 	defer release()
+	committed := false
+	ended := s.beginContractReceiptWrites(rows, sources, window)
+	defer func() { ended(committed) }()
 	tx, err := s.beginWriteContext(ctx)
 	if err != nil {
 		return err
@@ -241,7 +252,11 @@ func (s *Store) contractBoundaryTx(ctx context.Context, fn func(*sql.Tx) error) 
 	if err := fn(tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // SetContractBoundaryReceiptsContext stages primary receipts before core writes.
@@ -252,7 +267,7 @@ func (s *Store) SetContractBoundaryReceiptsContext(ctx context.Context, rows []g
 			return fmt.Errorf("%w: primary receipt needs staged acceptance", ErrCatalogInvalidValue)
 		}
 	}
-	return s.contractBoundaryTx(ctx, func(tx *sql.Tx) error { return s.setContractBoundaryReceiptsTx(ctx, tx, rows) })
+	return s.contractBoundaryWriteTx(ctx, rows, nil, contractCoreWindowOpened, func(tx *sql.Tx) error { return s.setContractBoundaryReceiptsTx(ctx, tx, rows) })
 }
 
 func (s *Store) setContractBoundaryReceiptsTx(ctx context.Context, tx *sql.Tx, rows []graph.ContractBoundaryReceipt) error {
@@ -327,7 +342,7 @@ func (s *Store) setContractBoundaryReceiptsTx(ctx context.Context, tx *sql.Tx, r
 // ordinary edit whose contract identity carries unchanged. Exact bytes and all
 // captured fields must still match the staged receipt.
 func (s *Store) AcceptContractBoundaryReceiptsContext(ctx context.Context, expected []graph.ContractBoundaryReceipt) error {
-	return s.contractBoundaryTx(ctx, func(tx *sql.Tx) error { return s.acceptContractBoundaryReceiptsTx(ctx, tx, expected) })
+	return s.contractBoundaryWriteTx(ctx, expected, nil, contractCoreWindowClosed, func(tx *sql.Tx) error { return s.acceptContractBoundaryReceiptsTx(ctx, tx, expected) })
 }
 func (s *Store) acceptContractBoundaryReceiptsTx(ctx context.Context, tx *sql.Tx, expected []graph.ContractBoundaryReceipt) error {
 	if len(expected) > contractWorkReadLimit {
@@ -394,7 +409,7 @@ func (s *Store) SetContractBoundaryReceiptsWithSourcesContext(ctx context.Contex
 	if s.viewGen == 0 {
 		return ErrCatalogInvalidValue
 	}
-	return s.contractBoundaryTx(ctx, func(tx *sql.Tx) error {
+	return s.contractBoundaryWriteTx(ctx, rows, sources, contractCoreWindowKept, func(tx *sql.Tx) error {
 		if err := s.carryContractBoundarySourcesTx(ctx, tx, sources); err != nil {
 			return err
 		}

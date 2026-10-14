@@ -514,18 +514,35 @@ func (mi *MultiIndexer) withRepositoryOutputGenerationSource(
 		}
 		defer restore()
 	}
+	bodyDone := false
 	err = runUnderOutputReceipt(receipt, func() error {
-		return fn(func(content *OutputSourceContent) {
+		bodyErr := fn(func(content *OutputSourceContent) {
 			if content != nil && content.Root == "" {
 				content.Root = target.RootPath
 			}
 			receipt.ObserveSourceContent(content)
 		})
+		bodyDone = bodyErr == nil
+		return bodyErr
 	})
+	if bodyDone && err != nil {
+		// As on the Indexer's own lane: a completed body closes the core-write
+		// windows of the files it began, whatever Complete says.
+		mi.endInstalledContractCoreWrites(repoPrefix)
+	}
 	if err != nil {
+		if bodyDone && errors.Is(err, ErrOutputMutationReceiptSuperseded) {
+			// Overtaken after every core write: never accepted, settled.
+			mi.settleInstalledContractCoreInputs(repoPrefix)
+		}
 		return err
 	}
-	return mi.acceptInstalledContractCoreInputs(ctx, repoPrefix)
+	// As on the Indexer's own lane, the accept closes the windows of the rows
+	// it accepts as it commits; whatever a failed accept leaves open closes
+	// after it.
+	acceptErr := mi.acceptInstalledContractCoreInputs(ctx, repoPrefix)
+	mi.endInstalledContractCoreWrites(repoPrefix)
+	return acceptErr
 }
 
 // withRepositoryMutationLanes acquires a deterministic set of stable lanes.
@@ -1873,22 +1890,55 @@ func (idx *Indexer) withOutputGenerationSource(
 		return err
 	}
 	defer restore()
+	bodyDone := false
 	err = runUnderOutputReceipt(receipt, func() error {
-		return fn(func(content *OutputSourceContent) {
+		bodyErr := fn(func(content *OutputSourceContent) {
 			if content != nil && content.Root == "" {
 				content.Root = target.RootPath
 			}
 			receipt.ObserveSourceContent(content)
 		})
+		bodyDone = bodyErr == nil
+		return bodyErr
 	})
+	if bodyDone && err != nil {
+		// Every core write of the begun files is done, whatever Complete
+		// says: their core-write windows close, so a contract job can read
+		// their rows without waiting for an accept that will not come.
+		if journal := current.contractCoreInputs; journal != nil {
+			journal.written()
+		}
+	}
 	if err != nil {
+		if bodyDone && errors.Is(err, ErrOutputMutationReceiptSuperseded) {
+			// The body completed every core write and Complete found that a
+			// newer mutation took the owner over: its receipts are never
+			// accepted, and are settled so a contract job sees the file's
+			// rows are complete. A body that failed, or never ran, left its
+			// rows in whatever state it stopped in and settles nothing.
+			if journal := current.contractCoreInputs; journal != nil {
+				journal.settle()
+			}
+		}
 		return err
 	}
 	// Complete has validated the existing source/output authority. Contract
 	// eligibility cannot be acknowledged by the inner mutation body earlier.
 	if journal := current.contractCoreInputs; journal != nil {
-		if err := journal.accept(nil); err != nil {
-			return err
+		if contractCoreAcceptHeld(current.repoPrefix) {
+			journal.written()
+			journal.settle()
+			return nil
+		}
+		// The accept closes the core-write windows of the rows it accepts as
+		// it commits, so a contract job woken by that close reads each row's
+		// final stamp. Closed before the accept, they would wake the job while
+		// the accept is still to rewrite the rows it reads. Whatever a failed
+		// accept leaves open closes after it: the body's writes are done.
+		acceptErr := journal.accept(nil)
+		journal.written()
+		if acceptErr != nil {
+			return acceptErr
 		}
 		if hooks := current.contractCoreRuntime.Load(); hooks != nil && hooks.Published != nil {
 			hooks.Published(ctx, current.repoPrefix, "")

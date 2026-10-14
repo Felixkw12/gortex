@@ -329,6 +329,11 @@ func TestContractFollowupScratchFailureRefusesPublicationAndCleans(t *testing.T)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			once, readClosed := false, false
+			// Each proof round opens its own private evidence store; the
+			// failure is injected into the one the extraction is using.
+			var scratch *store_sqlite.Store
+			opened := 0
+			req.convergenceHooks = &contractConvergenceHooks{openedEvidence: func(store *store_sqlite.Store) { scratch = store; opened++ }}
 			yield := req.Yield
 			req.Yield = func(ctx context.Context) error {
 				if !once {
@@ -337,7 +342,7 @@ func TestContractFollowupScratchFailureRefusesPublicationAndCleans(t *testing.T)
 					case "cancel":
 						cancel()
 					case "write":
-						if err := prepared.scratch.Close(); err != nil {
+						if err := scratch.Close(); err != nil {
 							return err
 						}
 					}
@@ -348,9 +353,12 @@ func TestContractFollowupScratchFailureRefusesPublicationAndCleans(t *testing.T)
 				base := req.Snapshot.ReadAccepted
 				req.Snapshot.ReadAccepted = func(ctx context.Context, file ContractFollowupFile) (ContractAcceptedSource, error) {
 					src, err := base(ctx, file)
-					if !readClosed {
+					// The publication's evidence is the enrichment round's
+					// store (the second opened): a read failure there must
+					// refuse publication.
+					if !readClosed && opened >= 2 {
 						readClosed = true
-						if closeErr := prepared.scratch.Close(); err == nil {
+						if closeErr := scratch.Close(); err == nil {
 							err = closeErr
 						}
 					}

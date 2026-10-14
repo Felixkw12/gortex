@@ -528,6 +528,11 @@ type storeCore struct {
 	stmtSelectEdgeOrigin    *sql.Stmt
 	stmtDeleteEdgeByKey     *sql.Stmt
 	stmtEdgeExists          *sql.Stmt
+
+	// contractReceiptWrites is the process-local boundary-receipt write
+	// sequence (contract_receipt_stamps.go). It lives on the shared core so a
+	// write through any generation handle is visible to every scan.
+	contractReceiptWrites contractReceiptWriteSequence
 }
 
 // Store is the SQLite-backed graph.Store implementation. It is a handle over

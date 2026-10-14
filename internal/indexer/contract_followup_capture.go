@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -200,21 +199,9 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 			handlesByRepo[repo] = handles
 		}
 	}
-	var basePins []*graphview.BasePin
-	for _, repo := range repos {
-		needsBase := false
-		for _, handle := range handlesByRepo[repo] {
-			needsBase = needsBase || handle.ViewGeneration() == 0
-		}
-		if needsBase {
-			pin := options.Materializer.Leases.AcquireBaseCorpus(repo)
-			release = append(release, pin.Release)
-			if e := pin.ValidateAcceptedCurrent(); e != nil {
-				return ContractFollowupSnapshot{}, e
-			}
-			basePins = append(basePins, pin)
-		}
-	}
+	// No raw-source pin fences the capture or its job: a job proves each read
+	// by the receipt stamps of the files it read (contract_stamp_scan.go), so
+	// a save to a file it never read cannot fail it.
 	metaByPath := make(map[string]graph.FileMetaRow)
 	sources := make(map[string]source.ContentSource)
 	configs := make(map[string]config.IndexConfig)
@@ -288,42 +275,76 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 		}
 	}
 	options.MultiIndexer.mu.RUnlock()
-	read := func(ctx context.Context, file ContractFollowupFile) (ContractAcceptedSource, error) {
+	readDisk := func(ctx context.Context, file ContractFollowupFile) ([]byte, error) {
 		if err := ctx.Err(); err != nil {
-			return ContractAcceptedSource{}, err
+			return nil, err
 		}
 		content := sources[file.RepoPrefix]
 		if content == nil {
-			return ContractAcceptedSource{}, graph.ErrContractProjectionIncomplete
+			return nil, graph.ErrContractProjectionIncomplete
 		}
 		rel := strings.TrimPrefix(file.Path, file.RepoPrefix+"/")
 		if file.RepoPrefix == "" {
 			rel = file.Path
 		}
 		if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../") {
-			return ContractAcceptedSource{}, fmt.Errorf("contract capture: invalid source path")
+			return nil, fmt.Errorf("contract capture: invalid source path")
 		}
 		rc, _, e := content.Open(rel)
 		if e != nil {
-			return ContractAcceptedSource{}, e
+			return nil, e
 		}
 		raw, e := io.ReadAll(rc)
 		closeErr := rc.Close()
 		if e != nil {
-			return ContractAcceptedSource{}, e
+			return nil, e
 		}
 		if closeErr != nil {
-			return ContractAcceptedSource{}, closeErr
+			return nil, closeErr
 		}
-		accepted := newTransformPipeline(configs[file.RepoPrefix].Transforms, options.Registry, options.Logger).run(rel, raw)
+		return newTransformPipeline(configs[file.RepoPrefix].Transforms, options.Registry, options.Logger).run(rel, raw), ctx.Err()
+	}
+	read := func(ctx context.Context, file ContractFollowupFile) (ContractAcceptedSource, error) {
+		accepted, err := readDisk(ctx, file)
+		if err != nil {
+			return ContractAcceptedSource{}, err
+		}
 		prior := metaByPath[file.Path]
 		if contentHashForSource(accepted) != prior.ContentHash || len(accepted) != prior.Size {
 			return ContractAcceptedSource{}, graph.ErrContractProjectionStale
 		}
-		if err := ctx.Err(); err != nil {
-			return ContractAcceptedSource{}, err
-		}
 		return ContractAcceptedSource{Bytes: accepted, SourceFingerprint: contractInputHash(accepted), Policy: file.Policy}, nil
+	}
+	policies := make(map[[2]string]string)
+	var policiesMu sync.Mutex
+	// classify names one census path's language, extraction policy and
+	// accepted scope, or reports that the path carries no contract language.
+	classify := func(path, repo string) (ContractFollowupFile, bool, error) {
+		language, ok := options.Registry.DetectLanguage(path)
+		if !ok {
+			if filepath.Base(path) != "go.mod" {
+				return ContractFollowupFile{}, false, nil
+			}
+			language = "go"
+		}
+		policiesMu.Lock()
+		policy, cached := policies[[2]string{repo, language}]
+		policiesMu.Unlock()
+		if !cached {
+			idx := &Indexer{config: configs[repo], repoPrefix: repo, registry: options.Registry, logger: options.Logger}
+			opts := extractionOptions[repo]
+			idx.extractionOptions.Store(&opts)
+			computed, e := contractFollowupPolicy(idx, language)
+			if e != nil {
+				return ContractFollowupFile{}, false, e
+			}
+			policy = computed
+			policiesMu.Lock()
+			policies[[2]string{repo, language}] = policy
+			policiesMu.Unlock()
+		}
+		scope := scopes[repo]
+		return ContractFollowupFile{RepoPrefix: repo, WorkspaceID: scope[0], ProjectID: scope[1], Path: path, Language: language, Policy: policy}, true, nil
 	}
 	paths := make([]string, 0, len(metaByPath))
 	for path := range metaByPath {
@@ -332,26 +353,21 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 	sort.Strings(paths)
 	for _, path := range paths {
 		repo := pathRepos[path]
-		language, ok := options.Registry.DetectLanguage(path)
-		if !ok {
-			if filepath.Base(path) == "go.mod" {
-				language = "go"
-			} else {
-				continue
-			}
-		}
-		idx := &Indexer{config: configs[repo], repoPrefix: repo, registry: options.Registry, logger: options.Logger}
-		opts := extractionOptions[repo]
-		idx.extractionOptions.Store(&opts)
-		policy, e := contractFollowupPolicy(idx, language)
+		file, ok, e := classify(path, repo)
 		if e != nil {
 			return ContractFollowupSnapshot{}, e
 		}
-		scope := scopes[repo]
-		file := ContractFollowupFile{RepoPrefix: repo, WorkspaceID: scope[0], ProjectID: scope[1], Path: path, Language: language, Policy: policy}
+		if !ok {
+			continue
+		}
+		language := file.Language
+		idx := &Indexer{config: configs[repo], repoPrefix: repo, registry: options.Registry, logger: options.Logger}
+		opts := extractionOptions[repo]
+		idx.extractionOptions.Store(&opts)
 		// Admission reads durable receipt identities, never every source file.
 		// Missing legacy proof is usable only by background baseline rebuilding.
 		repoHandles := handlesByRepo[repo]
+		excluded := false
 		if options.selectedInputs == nil {
 			// Baseline repair derives its source proof from accepted core metadata,
 			// even when old optional analysis receipts are incomplete or obsolete.
@@ -373,7 +389,19 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 					return ContractFollowupSnapshot{}, e
 				}
 				if row != nil {
-					if !row.Accepted || row.Deleted {
+					if row.Accepted && contractReceiptIsFailureEnvelope(row) {
+						// A failure envelope is not live: the file is excluded
+						// from the census rather than certified or refused.
+						excluded = true
+						break
+					}
+					// An unaccepted row is admitted on the rule a job proves its
+					// reads by (ContractReceiptStamp.quiescent): its mutation
+					// settled it, or staged it in this process and has ended its
+					// core writes (a watcher patch overtaken after its writes is
+					// never accepted or settled), so the file's core rows are
+					// complete. A row whose core-write window is open is stale.
+					if row.Deleted || (!row.Accepted && !contractReceiptRowsComplete(repoHandles[i].ContractReceiptWriteStates(repo, actor, []string{path})[path])) {
 						return ContractFollowupSnapshot{}, graph.ErrContractProjectionStale
 					}
 					prior, known, e := contractCorePriorReceipt(row, true)
@@ -397,37 +425,85 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 					break
 				}
 			}
-			if file.SourceFingerprint != "" {
+			if file.SourceFingerprint != "" || excluded {
 				break
 			}
 		}
+		if excluded {
+			snapshot.Excluded = append(snapshot.Excluded, path)
+			continue
+		}
 		snapshot.Files = append(snapshot.Files, file)
 	}
-	snapshot.ValidateAccepted = func(ctx context.Context) error {
-		for _, pin := range basePins {
-			if e := pin.ValidateAcceptedCurrent(); e != nil {
-				return e
+	if options.selectedInputs != nil {
+		// The job proves its reads by receipt stamps of the selected chain
+		// and re-reads the census at every full scan, instead of fencing the
+		// whole inventory at publication.
+		census := func(ctx context.Context) (map[string]bool, error) {
+			live := make(map[string]bool)
+			for _, repo := range repos {
+				rows, e := captureAcceptedContractInventory(ctx, readers[repo], handlesByRepo[repo], repo)
+				if e != nil {
+					return nil, e
+				}
+				for path := range rows {
+					if _, ok := options.Registry.DetectLanguage(path); ok || filepath.Base(path) == "go.mod" {
+						live[path] = true
+					}
+				}
 			}
+			return live, ctx.Err()
 		}
-		current := make(map[string]graph.FileMetaRow)
+		scanner := newContractStampScanner(options.selectedInputs, handlesByRepo, census)
+		snapshot.Scan = scanner.scan
+		snapshot.ReceiptContents = scanner.contents
 		for _, repo := range repos {
-			rows, e := captureAcceptedContractInventory(ctx, readers[repo], handlesByRepo[repo], repo)
-			if e != nil {
-				return e
-			}
-			for path, row := range rows {
-				current[path] = row
-			}
-		}
-		if !reflect.DeepEqual(current, metaByPath) {
-			return graph.ErrContractProjectionStale
-		}
-		for _, pin := range basePins {
-			if e := pin.ValidateAcceptedCurrent(); e != nil {
-				return e
+			if handles := handlesByRepo[repo]; len(handles) > 0 {
+				// Every handle shares one store core, and with it the receipt
+				// write sequence.
+				snapshot.ReceiptEvents = handles[0].ContractReceiptEvents
+				break
 			}
 		}
-		return ctx.Err()
+		snapshot.CensusFile = func(ctx context.Context, path string) (ContractFollowupFile, bool, error) {
+			for _, repo := range repos {
+				if contractPathInRepo(path, repo, repos) {
+					return classify(path, repo)
+				}
+			}
+			return ContractFollowupFile{}, false, ctx.Err()
+		}
+		accepted := options.MultiIndexer.contractAcceptedSources()
+		snapshot.ReadPinned = func(ctx context.Context, file ContractFollowupFile, sourceFingerprint string) ([]byte, error) {
+			if cached, ok := accepted.get(sourceFingerprint); ok && contractInputHash(cached) == sourceFingerprint {
+				return cached, nil
+			}
+			bytes, err := readDisk(ctx, file)
+			if err != nil {
+				return nil, err
+			}
+			if contractInputHash(bytes) != sourceFingerprint {
+				return nil, errContractSourceMoved
+			}
+			return bytes, nil
+		}
+		snapshot.Seeds = func(ctx context.Context, repo string) ([]*graph.Node, []*graph.Edge, bool, error) {
+			handles := handlesByRepo[repo]
+			if len(handles) != 1 || handles[0].ViewGeneration() != 0 {
+				// A composed chain has no single physical seed query; the
+				// enrichment round loads every live file of the repository.
+				return nil, nil, false, nil
+			}
+			edges, err := handles[0].ContractSeedEdgesContext(ctx, repo)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			nodes, err := handles[0].ContractSeedNodesContext(ctx, repo)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			return nodes, edges, true, nil
+		}
 	}
 	snapshot.ReadAccepted = read
 	snapshot.ReadCoreFile = func(ctx context.Context, file ContractFollowupFile) (ContractFollowupCoreFile, error) {

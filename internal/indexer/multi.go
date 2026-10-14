@@ -80,6 +80,10 @@ type repositoryUntrackState struct {
 type MultiIndexer struct {
 	graph               graph.Store
 	contractCoreRuntime atomic.Pointer[ContractCoreRuntimeHooks]
+	// contractSources caches the accepted bytes each journal fingerprinted,
+	// by source fingerprint, for contract analysis reads.
+	contractSources     *contractAcceptedSourceCache
+	contractSourcesOnce sync.Once
 	registry            *parser.Registry
 	search              search.Backend
 	embedder            embedding.Provider

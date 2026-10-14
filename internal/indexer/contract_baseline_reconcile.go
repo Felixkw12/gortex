@@ -14,6 +14,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/viewmetrics"
 	"go.uber.org/zap"
 )
 
@@ -44,6 +45,7 @@ func NewContractBaselineReconciler(options ContractFollowupCaptureOptions) func(
 			return false, err
 		}
 		if baseline != nil && baseline.Version == contractBoundaryReceiptVersion {
+			countContractBaseline(viewmetrics.ContractBaselineCurrent)
 			return false, nil
 		}
 		options.BaselineAdmissionMu.Lock()
@@ -54,6 +56,7 @@ func NewContractBaselineReconciler(options ContractFollowupCaptureOptions) func(
 		jobsMu.Lock()
 		if jobs[repo] {
 			jobsMu.Unlock()
+			countContractBaseline(viewmetrics.ContractBaselineCoalesced)
 			return true, nil
 		}
 		select {
@@ -62,10 +65,12 @@ func NewContractBaselineReconciler(options ContractFollowupCaptureOptions) func(
 			jobsMu.Unlock()
 			// The occupied slots have independently owned jobs that publish a
 			// global change after releasing admission capacity.
+			countContractBaseline(viewmetrics.ContractBaselineSaturated)
 			return true, nil
 		}
 		jobs[repo] = true
 		jobsMu.Unlock()
+		countContractBaseline(viewmetrics.ContractBaselineAdmitted)
 		lease := options.Materializer.Leases.Acquire(0)
 		options.BaselineJobs.Add(1)
 		go func() {
@@ -82,12 +87,18 @@ func NewContractBaselineReconciler(options ContractFollowupCaptureOptions) func(
 			// A panicking job still releases its slot, lease and waiters above.
 			defer func() {
 				if recovered := recover(); recovered != nil {
+					countContractBaseline(viewmetrics.ContractBaselinePanic)
 					if options.Logger != nil {
 						options.Logger.Error("contract baseline reconstruction panicked", zap.String("repo", repo), zap.Any("panic", recovered))
 					}
 				}
 			}()
 			err := reconcilePrimaryContractBaseline(options.Context, options, repo)
+			if err != nil {
+				countContractBaseline(viewmetrics.ContractBaselineFailed)
+			} else {
+				countContractBaseline(viewmetrics.ContractBaselinePublished)
+			}
 			if err != nil && options.Context.Err() == nil && options.Logger != nil {
 				options.Logger.Warn("contract baseline reconstruction refused", zap.String("repo", repo), zap.Error(err))
 			}

@@ -100,6 +100,13 @@ func (s *Store) setContractInputStateWithWorkReceiptsAndSources(ctx context.Cont
 		return err
 	}
 	defer release()
+	// A pending mutation's staged receipts open their core-write windows; an
+	// accepted payload's rows are complete as written.
+	window := contractCoreWindowOpened
+	if accepted {
+		window = contractCoreWindowKept
+	}
+	defer s.beginContractReceiptWrites(receipts, sources, window)(false)
 	tx, err := s.beginWriteContext(ctx)
 	if err != nil {
 		return err
@@ -289,7 +296,7 @@ func (s *Store) AcceptContractInputMutationWithReceiptsContext(ctx context.Conte
 	if err := validateContractInput(expected); err != nil {
 		return err
 	}
-	return s.contractBoundaryTx(ctx, func(tx *sql.Tx) error {
+	return s.contractBoundaryWriteTx(ctx, receipts, nil, contractCoreWindowClosed, func(tx *sql.Tx) error {
 		for _, row := range receipts {
 			if row.RepoPrefix != expected.RepoPrefix || row.CheckoutID != expected.CheckoutID {
 				return ErrCatalogInvalidValue

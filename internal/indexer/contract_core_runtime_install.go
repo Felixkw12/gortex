@@ -41,6 +41,8 @@ func (idx *Indexer) beginInstalledContractCoreInputs(ctx context.Context) (func(
 	if err != nil {
 		return nil, err
 	}
+	journal.logger = idx.logger
+	journal.sources = idx.repositoryMutationOwner.contractAcceptedSources()
 	idx.contractCoreInputs = journal
 	return func() { idx.contractCoreInputs = nil }, nil
 }
@@ -94,4 +96,32 @@ func (mi *MultiIndexer) acceptInstalledContractCoreInputs(ctx context.Context, r
 		hooks.Published(ctx, repo, "")
 	}
 	return nil
+}
+
+// installedContractCoreInputs is the journal the outer MI output receipt
+// installed on the repository's live Indexer, or nil.
+func (mi *MultiIndexer) installedContractCoreInputs(repo string) *contractCoreInputJournal {
+	mi.mu.RLock()
+	idx := mi.indexers[repo]
+	mi.mu.RUnlock()
+	if idx == nil {
+		return nil
+	}
+	return idx.contractCoreInputs
+}
+
+// endInstalledContractCoreWrites closes the core-write windows of the files
+// the outer MI output receipt's completed body began.
+func (mi *MultiIndexer) endInstalledContractCoreWrites(repo string) {
+	if journal := mi.installedContractCoreInputs(repo); journal != nil {
+		journal.written()
+	}
+}
+
+// settleInstalledContractCoreInputs settles the receipts of a completed body
+// a newer mutation overtook: they are never accepted.
+func (mi *MultiIndexer) settleInstalledContractCoreInputs(repo string) {
+	if journal := mi.installedContractCoreInputs(repo); journal != nil {
+		journal.settle()
+	}
 }

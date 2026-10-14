@@ -10,7 +10,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graphview"
 )
 
 type completedNameRows struct {
@@ -208,16 +207,23 @@ func TestContractCompletedNamesNeverReplaceFinalAcceptedSourceFence(t *testing.T
 	first := e.FindNodesByName("register")
 	require.NoError(t, e.err)
 	require.NotEmpty(t, first)
-	require.NoError(t, snap.ValidateAccepted(t.Context()))
 	require.Len(t, snap.Files, 1)
-	_, err = snap.ReadAccepted(t.Context(), snap.Files[0])
+	// The job's fence is the receipt stamp, not the completed-name cache: a
+	// read is pinned to the stamped source fingerprint.
+	scan, err := snap.Scan(t.Context(), nil)
 	require.NoError(t, err)
-	// Raw bytes are checked by ReadAccepted; the final census/source fence
-	// checks the accepted inventory and source authority, not unindexed writes.
+	require.True(t, scan.Settled)
+	stamp := scan.Stamps[snap.Files[0].Path]
+	require.True(t, stamp.Accepted)
+	_, err = snap.ReadPinned(t.Context(), snap.Files[0], stamp.SourceFingerprint)
+	require.NoError(t, err)
+	// An unindexed disk write leaves the stamped bytes unreadable: unproven.
 	file := filepath.Join(idx.RootPath(), "routes.go")
 	writeFile(t, file, "package fixture\nfunc register() {}\n// different physical source\n")
-	_, err = snap.ReadAccepted(t.Context(), snap.Files[0])
-	require.ErrorIs(t, err, graph.ErrContractProjectionStale)
+	_, err = snap.ReadPinned(t.Context(), snap.Files[0], stamp.SourceFingerprint)
+	require.ErrorIs(t, err, errContractSourceMoved)
+	// A raw-source mutation without a receipt write moves no stamp: the
+	// cached name answer and the stamp scan both still hold.
 	mutation, err := options.Materializer.Leases.AcquireBaseCorpusMutation(t.Context(), "fixture", idx.RootPath())
 	require.NoError(t, err)
 	defer mutation.Release()
@@ -225,7 +231,10 @@ func TestContractCompletedNamesNeverReplaceFinalAcceptedSourceFence(t *testing.T
 	mutation.Release()
 	require.Equal(t, first, e.FindNodesByName("register"))
 	require.NoError(t, e.err)
-	require.ErrorIs(t, snap.ValidateAccepted(t.Context()), graphview.ErrBaseCorpusChanged)
+	again, err := snap.Scan(t.Context(), nil)
+	require.NoError(t, err)
+	require.True(t, again.Settled)
+	require.Equal(t, stamp, again.Stamps[snap.Files[0].Path])
 }
 
 func TestContractCompletedNamesCancelBeforeCachedLookup(t *testing.T) {
