@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
@@ -464,6 +465,25 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 				snapshot.ReceiptEvents = handles[0].ContractReceiptEvents
 				break
 			}
+		}
+		snapshot.WindowGaps = func(paths []string, since time.Time) []time.Duration {
+			var out []time.Duration
+			for _, repo := range repos {
+				handles := handlesByRepo[repo]
+				if len(handles) == 0 {
+					continue
+				}
+				var own []string
+				for _, path := range paths {
+					if contractPathInRepo(path, repo, repos) {
+						own = append(own, path)
+					}
+				}
+				for _, gap := range handles[0].ContractCoreWindowGaps(repo, own, since) {
+					out = append(out, gap.Quiet)
+				}
+			}
+			return out
 		}
 		snapshot.CensusFile = func(ctx context.Context, path string) (ContractFollowupFile, bool, error) {
 			for _, repo := range repos {

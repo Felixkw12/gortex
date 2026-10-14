@@ -55,7 +55,15 @@ type contractAnalysisJob struct {
 	id       string
 	snapshot ContractFollowupSnapshot
 	targets  []ContractFollowupTarget
+	// trigger is what queued the job and queuedAt when; capture is how long
+	// capturing its snapshot took.
+	trigger  string
+	queuedAt time.Time
+	capture  time.Duration
 }
+
+// contractJobTriggerInterest queues a job for a request's interest in its key.
+const contractJobTriggerInterest = "interest"
 
 // ContractAnalysisCoordinator owns a bounded single background analysis lane.
 // Core publication notifications only wake waiters; ordinary tools never
@@ -75,6 +83,9 @@ type ContractAnalysisCoordinator struct {
 	ready            chan struct{}
 	baselines        map[contractBaselineWaiter]*contractBaselineObservation
 	captureAdmission chan struct{}
+	// acceptedAt holds when each repository last announced an accepted core
+	// mutation.
+	acceptedAt map[string]time.Time
 }
 
 func NewContractAnalysisCoordinator(options ContractAnalysisCoordinatorOptions) (*ContractAnalysisCoordinator, error) {
@@ -214,7 +225,9 @@ func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphvi
 	}
 	captureCtx, cancelCapture := context.WithCancel(ctx)
 	stopCancel := context.AfterFunc(c.ctx, cancelCapture)
+	captureStart := time.Now()
 	snapshot, targets, err := c.options.Capture(captureCtx, view, inputs, repo, checkout)
+	captureDuration := time.Since(captureStart)
 	stopCancel()
 	cancelCapture()
 	defer func() { <-c.captureAdmission }()
@@ -259,7 +272,7 @@ func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphvi
 		snapshot.Release()
 		return false, err
 	}
-	job := &contractAnalysisJob{id: id, snapshot: snapshot, targets: targets}
+	job := &contractAnalysisJob{id: id, snapshot: snapshot, targets: targets, trigger: contractJobTriggerInterest, capture: captureDuration}
 	c.mu.Lock()
 	if c.closed || ctx.Err() != nil {
 		c.mu.Unlock()
@@ -307,6 +320,7 @@ func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphvi
 	for key := range seen {
 		c.keys[key]++
 	}
+	job.queuedAt = time.Now()
 	c.queue = append(c.queue, job)
 	c.mu.Unlock()
 	select {
@@ -420,11 +434,29 @@ func (c *ContractAnalysisCoordinator) WaitChange(ctx context.Context, key graph.
 	}
 }
 
-func (c *ContractAnalysisCoordinator) Published(_ context.Context, _, _ string) {
+func (c *ContractAnalysisCoordinator) Published(_ context.Context, repo, _ string) {
 	c.mu.Lock()
 	c.published++
+	if c.acceptedAt == nil {
+		c.acceptedAt = make(map[string]time.Time)
+	}
+	c.acceptedAt[repo] = time.Now()
 	c.notifyLocked()
 	c.mu.Unlock()
+}
+
+// lastAccepted is when a repository of the cohort last announced an accepted
+// core mutation, zero when none did.
+func (c *ContractAnalysisCoordinator) lastAccepted(inputs []graph.ContractInputWitness) time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var last time.Time
+	for _, witness := range inputs {
+		if at := c.acceptedAt[witness.State.RepoPrefix]; at.After(last) {
+			last = at
+		}
+	}
+	return last
 }
 
 // publishedEpoch is the level a running job samples before a round's first
@@ -548,9 +580,18 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) {
 	if len(targets) == 0 {
 		return
 	}
-	c.options.Logger.Info("contract analysis job started", zap.String("mode", viewmetrics.ContractModeCold), zap.String("job", job.id),
-		zap.String("repo", targets[0].Key.RepoPrefix), zap.String("checkout", targets[0].Key.CheckoutID), zap.Int("targets", len(targets)))
 	started := time.Now()
+	// The time from the last accepted core mutation of the cohort, -1 when
+	// none was announced since the coordinator started.
+	sinceAccept := -1.0
+	if accepted := c.lastAccepted(job.snapshot.Inputs); !accepted.IsZero() {
+		sinceAccept = contractMillis(started.Sub(accepted))
+	}
+	dispatch := started.Sub(job.queuedAt)
+	c.options.Logger.Info("contract analysis job started", zap.String("mode", viewmetrics.ContractModeCold), zap.String("job", job.id),
+		zap.String("repo", targets[0].Key.RepoPrefix), zap.String("checkout", targets[0].Key.CheckoutID), zap.Int("targets", len(targets)),
+		zap.String("trigger", job.trigger), zap.Float64("since_trigger_ms", contractMillis(dispatch)),
+		zap.Float64("since_accept_ms", sinceAccept), zap.Float64("capture_ms", contractMillis(job.capture)))
 	report, err := RunContractFollowupBatch(c.ctx, ContractFollowupBatchRequest{Snapshot: job.snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: c.options.Registry, Config: c.options.Config, RepoConfigs: job.snapshot.RepoConfigs, Logger: c.options.Logger, Leases: c.options.Leases, ScratchParent: c.options.ScratchParent, Yield: c.options.Yield,
 		PublishedEpoch: c.publishedEpoch, WaitPublished: c.waitPublished})
 	if err != nil {
@@ -572,7 +613,8 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) {
 	elapsed := time.Since(started)
 	outcome := contractJobOutcome(err)
 	countContractJob(viewmetrics.ContractModeCold, outcome, elapsed)
-	logContractJob(c.options.Logger, viewmetrics.ContractModeCold, outcome, elapsed, report)
+	logContractJob(c.options.Logger, viewmetrics.ContractModeCold, outcome, elapsed, report,
+		zap.Float64("dispatch_ms", contractMillis(dispatch)), zap.Float64("capture_ms", contractMillis(job.capture)))
 }
 
 // contractJobOutcome classifies a finished job body for the jobs counter.

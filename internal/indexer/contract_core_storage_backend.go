@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
@@ -50,6 +51,9 @@ type contractCoreStorageBackend struct {
 	// stagedSeqs holds the write seq of each primary receipt this mutation
 	// staged and has not accepted.
 	stagedSeqs map[string]uint64
+	// windowGaps holds the quiet gaps the stagings' windows recorded, for the
+	// journal's window lines.
+	windowGaps []store_sqlite.ContractCoreWindowGap
 }
 
 func newContractCoreStorageBackend(store *store_sqlite.Store, repo, checkout string, generation int64, cumulative, expected *graph.ContractInputState, capture contractCoreStorageCapture) (*contractCoreStorageBackend, error) {
@@ -323,9 +327,26 @@ func (b *contractCoreStorageBackend) BeginBoundaryMutation(ctx context.Context, 
 		if b.stagedSeqs == nil {
 			b.stagedSeqs = make(map[string]uint64, len(paths))
 		}
-		maps.Copy(b.stagedSeqs, b.store.ContractReceiptWriteSeqs(b.repo, b.checkout, paths))
+		seqs := b.store.ContractReceiptWriteSeqs(b.repo, b.checkout, paths)
+		maps.Copy(b.stagedSeqs, seqs)
+		// The quiet gaps the windows this staging opened recorded.
+		for _, gap := range b.store.ContractCoreWindowGaps(b.repo, paths, time.Time{}) {
+			if gap.Seq == seqs[gap.Path] {
+				b.windowGaps = append(b.windowGaps, gap)
+			}
+		}
 	}
 	return nil
+}
+
+// takeWindowGaps returns, once, the quiet gaps the windows this mutation's
+// stagings opened recorded, with the repository they belong to.
+func (b *contractCoreStorageBackend) takeWindowGaps() (string, []store_sqlite.ContractCoreWindowGap) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	gaps := b.windowGaps
+	b.windowGaps = nil
+	return b.repo, gaps
 }
 
 // Called only after the corresponding existing core graph/source receipt

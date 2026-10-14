@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -179,6 +180,124 @@ func TestContractReceiptCoreWriteWindows(t *testing.T) {
 	writer.SettleContractReceiptWrites("repo", "", writer.ContractReceiptWriteSeqs("repo", "", []string{b.FilePath}))
 	if st := state(b.FilePath); st.Writing || !st.Settled {
 		t.Fatalf("a settle closes the window: %+v", st)
+	}
+}
+
+// TestContractCoreWindowGapRing pins the quiet-gap ring: a window that opens
+// after the path's previous window closed records the gap from that close,
+// whether the body's end, the accept's commit (not its begin) or a settle
+// closed it, with how long the previous window was open. A window opened
+// again while it is open records nothing, the ring keeps the latest gaps
+// only, and a query returns the gaps opened at or after its since.
+func TestContractCoreWindowGapRing(t *testing.T) {
+	s := openCatalogStore(t)
+	ctx := context.Background()
+	base := time.Unix(1_700_000_000, 0)
+	var mu sync.Mutex
+	now := base
+	at := func(d time.Duration) {
+		mu.Lock()
+		now = base.Add(d)
+		mu.Unlock()
+	}
+	s.contractReceiptWrites.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	a, b := boundaryStorageReceipt("a.go", "a1"), boundaryStorageReceipt("b.go", "b1")
+	stage := func(row graph.ContractBoundaryReceipt) {
+		t.Helper()
+		if err := s.SetContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{row}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gaps := func(path string, since time.Time) []ContractCoreWindowGap {
+		return s.ContractCoreWindowGaps("repo", []string{path}, since)
+	}
+	end := func(path string) {
+		s.EndContractCoreWrites("repo", "", s.ContractReceiptWriteSeqs("repo", "", []string{path}))
+	}
+
+	at(0)
+	stage(a)
+	if got := gaps(a.FilePath, time.Time{}); len(got) != 0 {
+		t.Fatalf("a first window has no previous close: %+v", got)
+	}
+	// The body ends 5ms after the open; the next apply opens 120ms later.
+	at(5 * time.Millisecond)
+	end(a.FilePath)
+	at(125 * time.Millisecond)
+	stage(a)
+	got := gaps(a.FilePath, time.Time{})
+	if len(got) != 1 || got[0].Quiet != 120*time.Millisecond || got[0].OpenPrev != 5*time.Millisecond ||
+		got[0].Seq != s.ContractReceiptWriteSeqs("repo", "", []string{a.FilePath})[a.FilePath] || !got[0].OpenedAt.Equal(base.Add(125*time.Millisecond)) {
+		t.Fatalf("the gap runs from the close to the next open: %+v", got)
+	}
+	// Opened again while open: no gap.
+	at(130 * time.Millisecond)
+	stage(a)
+	if got := gaps(a.FilePath, time.Time{}); len(got) != 1 {
+		t.Fatalf("a window opened again while open records nothing: %+v", got)
+	}
+
+	// The accept begins at 200ms and commits at 240ms; the next open is at
+	// 310ms: the gap is the 70ms after the commit.
+	accepting := false
+	restore := SetContractReceiptWriteHookForTest(func(stage string, paths []string) {
+		if !accepting {
+			return
+		}
+		switch stage {
+		case "begun":
+			at(200 * time.Millisecond)
+		case "ending":
+			at(240 * time.Millisecond)
+		}
+	})
+	accepting = true
+	if err := s.AcceptContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{a}); err != nil {
+		t.Fatal(err)
+	}
+	accepting = false
+	restore()
+	if s.ContractReceiptWriteStates("repo", "", []string{a.FilePath})[a.FilePath].Writing {
+		t.Fatal("the accept closed the window")
+	}
+	at(310 * time.Millisecond)
+	stage(a)
+	got = gaps(a.FilePath, base.Add(300*time.Millisecond))
+	if len(got) != 1 || got[0].Quiet != 70*time.Millisecond || got[0].OpenPrev != 110*time.Millisecond {
+		t.Fatalf("the gap runs from the accept's commit, the previous window from its open: %+v", got)
+	}
+
+	// A settle closes the window too.
+	at(400 * time.Millisecond)
+	stage(b)
+	at(410 * time.Millisecond)
+	s.SettleContractReceiptWrites("repo", "", s.ContractReceiptWriteSeqs("repo", "", []string{b.FilePath}))
+	at(440 * time.Millisecond)
+	stage(b)
+	if got := gaps(b.FilePath, time.Time{}); len(got) != 1 || got[0].Quiet != 30*time.Millisecond || got[0].OpenPrev != 10*time.Millisecond {
+		t.Fatalf("the gap after a settle: %+v", got)
+	}
+
+	// The ring keeps the latest gaps of a path.
+	for i := range contractCoreWindowGapRing + 4 {
+		at(time.Second + time.Duration(2*i)*time.Millisecond)
+		end(b.FilePath)
+		at(time.Second + time.Duration(2*i+1)*time.Millisecond)
+		stage(b)
+	}
+	ring := gaps(b.FilePath, time.Time{})
+	if len(ring) != contractCoreWindowGapRing || !ring[len(ring)-1].OpenedAt.Equal(base.Add(time.Second+time.Duration(2*(contractCoreWindowGapRing+3)+1)*time.Millisecond)) {
+		t.Fatalf("the ring keeps the latest %d gaps: %d, last %+v", contractCoreWindowGapRing, len(ring), ring[len(ring)-1])
+	}
+	if both := s.ContractCoreWindowGaps("repo", []string{a.FilePath, b.FilePath}, time.Time{}); len(both) != 2+contractCoreWindowGapRing {
+		t.Fatalf("a query over two paths: %d", len(both))
+	}
+	if other := s.ContractCoreWindowGaps("other", []string{a.FilePath}, time.Time{}); len(other) != 0 {
+		t.Fatalf("another repository's paths: %+v", other)
 	}
 }
 

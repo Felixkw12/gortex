@@ -48,6 +48,8 @@ type contractJobFixture struct {
 	adjust func(*ContractFollowupSnapshot)
 	// onWait, when set, runs as a job starts waiting for a Published event.
 	onWait func()
+	// logger, when set, receives each job's lines.
+	logger *zap.Logger
 }
 
 func newContractJobFixture(t *testing.T, files map[string]string) *contractJobFixture {
@@ -292,11 +294,12 @@ func (f *contractJobFixture) job(hooks *contractConvergenceHooks, yield func(con
 	f.t.Helper()
 	f.layers++
 	return runFixtureContractJob(f.t, f.options, contractFixtureJob{hooks: hooks, yield: yield, layer: f.layers, adjust: f.adjust,
-		epoch: f.epoch.Load, wait: f.waitPublished})
+		epoch: f.epoch.Load, wait: f.waitPublished, logger: f.logger})
 }
 
 // contractFixtureJob is one job's knobs: test hooks, the yield, the payload
-// layer's creation order, a snapshot adjustment, and the Published source.
+// layer's creation order, a snapshot adjustment, the Published source and the
+// job's logger.
 type contractFixtureJob struct {
 	hooks  *contractConvergenceHooks
 	yield  func(context.Context) error
@@ -304,6 +307,7 @@ type contractFixtureJob struct {
 	adjust func(*ContractFollowupSnapshot)
 	epoch  func() uint64
 	wait   func(context.Context, uint64, time.Time) bool
+	logger *zap.Logger
 }
 
 // runFixtureContractJob captures the primary fixture repository's current
@@ -327,7 +331,11 @@ func runFixtureContractJob(t *testing.T, options ContractFollowupCaptureOptions,
 	if yield == nil {
 		yield = options.Yield
 	}
-	req := ContractFollowupRequest{RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: options.Registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: options.Materializer.Leases, Logger: zap.NewNop(), Yield: yield,
+	logger := job.logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	req := ContractFollowupRequest{RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: options.Registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: options.Materializer.Leases, Logger: logger, Yield: yield,
 		PublishedEpoch: job.epoch, WaitPublished: job.wait, convergenceHooks: job.hooks}
 	return RunContractFollowup(ctx, req)
 }

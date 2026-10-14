@@ -66,6 +66,9 @@ func TestContractAnalysisCountsRequestsAndJobs(t *testing.T) {
 	secondsBefore := viewmetrics.Default().Snapshot().Durations["views_contract_analysis_job_seconds{mode=cold}"].Count
 
 	inputs := &graphview.SelectedContractInputs{State: graph.ContractInputState{Accepted: true, InputVersion: a.Snapshot.Key.InputVersion, InputFingerprint: a.Snapshot.Key.InputFingerprint}}
+	// The cohort's repository announced an accepted mutation before the
+	// request: the start line times the job from it.
+	c.Published(t.Context(), "repo-a", "")
 	admitted, err := c.Request(t.Context(), nil, inputs, "repo-a", "")
 	require.NoError(t, err)
 	require.True(t, admitted)
@@ -95,9 +98,19 @@ func TestContractAnalysisCountsRequestsAndJobs(t *testing.T) {
 	require.Equal(t, viewmetrics.ContractModeCold, starts[0].ContextMap()["mode"])
 	require.Equal(t, "repo-a", starts[0].ContextMap()["repo"])
 	require.True(t, starts[0].Time.Compare(logs.FilterMessage("contract analysis job").All()[0].Time) <= 0, "the start line precedes the end line")
+	start := starts[0].ContextMap()
+	require.Equal(t, "interest", start["trigger"], "a request's interest queued the job")
+	for _, name := range []string{"since_trigger_ms", "since_accept_ms", "capture_ms"} {
+		require.GreaterOrEqual(t, start[name], 0.0, "the start line times %s", name)
+	}
 	lines := logs.FilterMessage("contract analysis job").All()
 	require.NotEmpty(t, lines, "every finished job leaves one phase line")
 	fields := lines[0].ContextMap()
+	require.Equal(t, start["since_trigger_ms"], fields["dispatch_ms"], "the job line carries the dispatch time")
+	require.Equal(t, start["capture_ms"], fields["capture_ms"])
+	for _, name := range []string{"w_need_sum", "w_iterations", "window_p10", "window_p50", "window_p90", "window_n"} {
+		require.Contains(t, fields, name)
+	}
 	require.Equal(t, viewmetrics.ContractModeCold, fields["mode"])
 	require.Equal(t, viewmetrics.ContractJobPublished, fields["outcome"])
 	for _, phase := range []string{"census", "stamps", "scratch", "extract", "rounds", "pp", "payload", "publish"} {

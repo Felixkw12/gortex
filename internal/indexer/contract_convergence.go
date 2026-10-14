@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -674,6 +675,36 @@ func (s contractRevalidationStats) fields() []zap.Field {
 	}
 }
 
+// noteReask records one re-ask that ran its reads, whether its answers were
+// admitted or refused because an input moved while they were asked: its span
+// from the opening scan to the closing one, and its lead from the event that
+// woke the wait before it, when one did. A re-ask every input of which was
+// inside an open window at its opening scan asked nothing and is not one.
+func (c *contractConvergence) noteReask(lead time.Duration, woken bool, span time.Duration, moved bool) {
+	c.spans = append(c.spans, span)
+	leadMS := -1.0
+	if woken {
+		c.leads = append(c.leads, lead)
+		leadMS = contractMillis(lead)
+	}
+	c.logger.Info("contract analysis reask", zap.String("repo", c.snap.Key.RepoPrefix), zap.Int("iteration", c.iteration),
+		zap.Float64("lead_ms", leadMS), zap.Float64("span_ms", contractMillis(span)), zap.Bool("moved", moved))
+}
+
+// contractMillis is d in milliseconds, to the microsecond.
+func contractMillis(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
+
+// contractQuantile is the nearest-rank q-quantile of samples, 0 for none.
+func contractQuantile(samples []time.Duration, q float64) time.Duration {
+	if len(samples) == 0 {
+		return 0
+	}
+	sorted := slices.Clone(samples)
+	slices.Sort(sorted)
+	rank := int(math.Ceil(q*float64(len(sorted)))) - 1
+	return sorted[min(max(rank, 0), len(sorted)-1)]
+}
+
 // contractEnrichment is what the enrichment round consumed: the clock its
 // inputs were last shown current at, the digest of every live unit's records,
 // and its own recorded reads.
@@ -810,6 +841,18 @@ type contractConvergence struct {
 	guard       *contractReadGuard
 	// revalidation counts one retry pass's revalidation work for its log line.
 	revalidation contractRevalidationStats
+	// What an iteration needs of a writer's quiet gap, measured: iteration is
+	// the current iteration; wokeAt is when the last wait saw the event that
+	// woke it, taken by the next re-ask as its lead; leads and spans are the
+	// iteration's re-asks that ran their reads (from the wake to the opening
+	// scan, and from the opening scan to the closing one). blocked holds the
+	// paths whose open window refused a read from the second iteration on,
+	// blockedSince when that iteration began.
+	iteration    int
+	wokeAt       time.Time
+	leads, spans []time.Duration
+	blocked      map[string]bool
+	blockedSince time.Time
 	report       *ContractFollowupReport
 	hooks        *contractConvergenceHooks
 	// The final enrichment round's evidence and registry.
@@ -1073,6 +1116,12 @@ func (c *contractConvergence) block(path string, stamp ContractReceiptStamp) {
 		c.waitOn = make(map[string]ContractReceiptStamp)
 	}
 	c.waitOn[path] = stamp
+	if c.iteration >= 1 {
+		if c.blocked == nil {
+			c.blocked = make(map[string]bool)
+		}
+		c.blocked[path] = true
+	}
 }
 
 // blockMoved records a read refused because an input moved, with no stamp to
@@ -1172,7 +1221,11 @@ func (c *contractConvergence) waitWake(since contractWake, until time.Time) bool
 		return false
 	}
 	if c.snap.ReceiptEvents == nil {
-		return c.req.WaitPublished(c.ctx, since.published, until)
+		published := c.req.WaitPublished(c.ctx, since.published, until)
+		if published {
+			c.wokeAt = time.Now()
+		}
+		return published
 	}
 	var windows map[string]ContractReceiptStamp
 	if !c.waitAny && c.snap.Scan != nil {
@@ -1186,12 +1239,14 @@ func (c *contractConvergence) waitWake(since contractWake, until time.Time) bool
 	}
 	events, changed := c.snap.ReceiptEvents()
 	if ready(c.ctx, events) {
+		c.wokeAt = time.Now()
 		return true
 	}
 	ctx, cancel := context.WithCancel(c.ctx)
 	defer cancel()
 	done := make(chan struct{})
 	woke := false
+	var wokeAt time.Time
 	go func() {
 		defer close(done)
 		for {
@@ -1200,10 +1255,11 @@ func (c *contractConvergence) waitWake(since contractWake, until time.Time) bool
 			case <-ctx.Done():
 				return
 			}
+			seen := time.Now()
 			var now uint64
 			now, changed = c.snap.ReceiptEvents()
 			if ready(ctx, now) && ctx.Err() == nil {
-				woke = true
+				woke, wokeAt = true, seen
 				cancel()
 				return
 			}
@@ -1212,6 +1268,12 @@ func (c *contractConvergence) waitWake(since contractWake, until time.Time) bool
 	published := c.req.WaitPublished(ctx, since.published, until)
 	cancel()
 	<-done
+	switch {
+	case woke:
+		c.wokeAt = wokeAt
+	case published:
+		c.wokeAt = time.Now()
+	}
 	return published || woke
 }
 
@@ -1821,6 +1883,10 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 	}
 	started := time.Now()
 	opened := started
+	// The first re-ask after a wake carries its lead: from the event that
+	// woke the wait to this opening scan.
+	lead, woken := opened.Sub(c.wokeAt), !c.wokeAt.IsZero()
+	c.wokeAt = time.Time{}
 	r0, err := c.scan(union)
 	if err != nil {
 		return nil, nil, nil, err
@@ -2030,6 +2096,8 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 	c.quietFrom = c.observePoint(union, r1.Stamps)
 	stats.scans += time.Since(started)
 	stats.span = time.Since(opened)
+	moved := false
+	defer func() { c.noteReask(lead, woken, stats.span, moved) }()
 	// An answer asked while an input moved may be torn: it is asked again,
 	// never acted on, and the round waits for that input's window to close.
 	blockMoves := func(bracket []string) {
@@ -2046,6 +2114,7 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 		if p.unit == nil {
 			switch {
 			case changedBetween(r0, r1, p.bracket):
+				moved = true
 				blockMoves(p.bracket)
 			case !held:
 				c.pp.stale = true
@@ -2063,6 +2132,7 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 		case changedBetween(r0, r1, p.bracket):
 			// An input moved while it was asked: its answers prove nothing,
 			// equal or not, and the round is blocked.
+			moved = true
 			blockMoves(p.bracket)
 			stats.moved++
 			if held {
@@ -2703,10 +2773,15 @@ func (c *contractConvergence) run() error {
 	for path := range c.excluded {
 		c.installExcluded(path)
 	}
+	defer c.noteWindowGaps()
 	for iteration := 0; ; iteration++ {
 		c.report.Iterations++
 		viewmetrics.Count(viewmetrics.ContractAnalysisIterationsTotal)
 		iterationStart := time.Now()
+		c.iteration, c.leads, c.spans = iteration, nil, nil
+		if iteration == 1 {
+			c.blockedSince = iterationStart
+		}
 		phase := *c.report
 		progress := c.progress
 		if err := c.rounds(pending); err != nil {
@@ -2738,7 +2813,10 @@ func (c *contractConvergence) run() error {
 		// unblocked round an event woke, against the iteration's progress.
 		fenceMark := c.markRound()
 		fenceMark.progress = progress
+		fenceStart := time.Now()
 		fence, _, deferred, err := c.fence()
+		// The fence's full scan, its census included.
+		fenceDuration := time.Since(fenceStart)
 		if err != nil {
 			return err
 		}
@@ -2756,6 +2834,14 @@ func (c *contractConvergence) run() error {
 		// Nothing pending is therefore the publish condition for the units.
 		c.staleUnits(pending)
 		current := c.enrichmentCurrent()
+		// What one more iteration needs of a writer's quiet gap: a re-ask's
+		// lead and span, the enrichment re-check and the fence.
+		leadP90, spanP90 := contractQuantile(c.leads, 0.9), contractQuantile(c.spans, 0.9)
+		need := leadP90 + spanP90 + ppDuration + fenceDuration
+		if iteration >= 1 {
+			c.report.NeedSum += need
+			c.report.NeedIterations++
+		}
 		c.logger.Info("contract analysis iteration",
 			zap.String("repo", c.snap.Key.RepoPrefix), zap.Int("iteration", iteration),
 			zap.Int("stale", len(pending)), zap.Bool("pp_ran", ran), zap.Int("pp_rechecks", c.report.EnrichRechecks-phase.EnrichRechecks),
@@ -2767,7 +2853,10 @@ func (c *contractConvergence) run() error {
 			zap.Duration("scratch", c.report.ScratchDuration-phase.ScratchDuration),
 			zap.Duration("extract", c.report.ExtractDuration-phase.ExtractDuration),
 			zap.Duration("rounds", c.report.RoundsDuration-phase.RoundsDuration),
-			zap.Duration("pp", ppDuration))
+			zap.Duration("pp", ppDuration),
+			zap.Duration("w_lead_p90", leadP90), zap.Int("w_leads", len(c.leads)),
+			zap.Duration("w_span_p90", spanP90), zap.Int("w_spans", len(c.spans)),
+			zap.Duration("w_pp", ppDuration), zap.Duration("w_fence", fenceDuration), zap.Duration("w_need", need))
 		if len(pending) == 0 && current {
 			return nil
 		}
@@ -2777,6 +2866,16 @@ func (c *contractConvergence) run() error {
 		// do not join the next iteration's.
 		c.endRound(fenceMark, false)
 	}
+}
+
+// noteWindowGaps reports the writer's quiet gaps on the paths whose open
+// window refused a read from the second iteration on, recorded since that
+// iteration began.
+func (c *contractConvergence) noteWindowGaps() {
+	if c.snap.WindowGaps == nil || len(c.blocked) == 0 {
+		return
+	}
+	c.report.WindowGaps = c.snap.WindowGaps(slices.Sorted(maps.Keys(c.blocked)), c.blockedSince)
 }
 
 // enrichmentHolds reports whether the last enrichment round still describes

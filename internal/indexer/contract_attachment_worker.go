@@ -88,7 +88,11 @@ type ContractFollowupSnapshot struct {
 	// fingerprint. Nil means no move is known to keep a file's contract
 	// content.
 	ReceiptContents func(context.Context, map[string]ContractReceiptStamp) (map[string]string, error)
-	Release         func()
+	// WindowGaps returns the quiet gaps a writer left between the core-write
+	// windows of the named paths that opened at or after since. Nil records
+	// none.
+	WindowGaps func(paths []string, since time.Time) []time.Duration
+	Release    func()
 }
 
 // errContractSourceMoved reports that a file's accepted bytes are no longer
@@ -161,6 +165,14 @@ type ContractFollowupReport struct {
 	// ContentKept counts observed receipt moves whose contract content was
 	// unchanged: they make no unit and no enrichment round stale.
 	ContentKept int
+	// NeedSum sums, over the iterations after the first, what each needed of
+	// a writer's quiet gap (its re-asks' p90 lead and span, its enrichment
+	// re-check and its fence); NeedIterations counts them. WindowGaps are
+	// the quiet gaps between the core-write windows of the paths those
+	// iterations waited on.
+	NeedSum        time.Duration
+	NeedIterations int
+	WindowGaps     []time.Duration
 }
 
 // ContractFollowupTarget reserves one independently published repository payload.
@@ -534,6 +546,7 @@ func contractPreparedReport(report, prepared ContractFollowupReport) ContractFol
 	report.Iterations, report.Rounds = prepared.Iterations, prepared.Rounds
 	report.EnrichRuns, report.EnrichReruns, report.Revalidated = prepared.EnrichRuns, prepared.EnrichReruns, prepared.Revalidated
 	report.EnrichRechecks, report.EnrichRecheckReads = prepared.EnrichRechecks, prepared.EnrichRecheckReads
+	report.NeedSum, report.NeedIterations, report.WindowGaps = prepared.NeedSum, prepared.NeedIterations, prepared.WindowGaps
 	return report
 }
 

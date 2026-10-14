@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -43,15 +44,89 @@ import (
 // seq and a closed window before and after a read mean no core write of the
 // path overlapped the read. A body that fails leaves its window open until the
 // next mutation of the path.
+//
+// Each window records when it opened and closed, and a window opened after
+// the previous one closed records the quiet gap between them in a bounded
+// per-path ring: the time a contract job has to ask its reads again between
+// two applies of the path.
 type contractReceiptWriteSequence struct {
 	mu      sync.Mutex
 	seq     map[contractReceiptWriteKey]uint64
 	settled map[contractReceiptWriteKey]uint64
 	// writing holds the write seq that opened each open core-write window.
 	writing map[contractReceiptWriteKey]uint64
-	repos   map[string]*contractReceiptWriteBracket
-	events  uint64
-	changed chan struct{}
+	// openedAt holds when each open window opened; closed holds when each
+	// path's last window opened and closed.
+	openedAt map[contractReceiptWriteKey]time.Time
+	closed   map[contractReceiptWriteKey]contractCoreWindowSpan
+	gaps     map[contractReceiptWriteKey][]ContractCoreWindowGap
+	repos    map[string]*contractReceiptWriteBracket
+	events   uint64
+	changed  chan struct{}
+	// now replaces time.Now in tests.
+	now func() time.Time
+}
+
+// contractCoreWindowSpan is when one closed core-write window opened and
+// closed.
+type contractCoreWindowSpan struct{ opened, closed time.Time }
+
+// contractCoreWindowGapRing bounds the gaps kept per path.
+const contractCoreWindowGapRing = 16
+
+// ContractCoreWindowGap is the quiet gap before one core-write window of a
+// path opened: Quiet runs from the close of the path's previous window to
+// this window's open, and OpenPrev is how long that previous window was
+// open. Seq is the write seq that opened this window.
+type ContractCoreWindowGap struct {
+	Path            string
+	Seq             uint64
+	OpenedAt        time.Time
+	Quiet, OpenPrev time.Duration
+}
+
+func (w *contractReceiptWriteSequence) clock() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
+}
+
+// openLocked opens key's core-write window at seq. A window opened after the
+// path's previous one closed records the gap between them; one opened again
+// while it is open records nothing.
+func (w *contractReceiptWriteSequence) openLocked(key contractReceiptWriteKey, seq uint64, at time.Time) {
+	if w.openedAt == nil {
+		w.openedAt = make(map[contractReceiptWriteKey]time.Time)
+	}
+	if _, open := w.writing[key]; !open {
+		if last, ok := w.closed[key]; ok {
+			if w.gaps == nil {
+				w.gaps = make(map[contractReceiptWriteKey][]ContractCoreWindowGap)
+			}
+			ring := append(w.gaps[key], ContractCoreWindowGap{Path: key.path, Seq: seq, OpenedAt: at,
+				Quiet: at.Sub(last.closed), OpenPrev: last.closed.Sub(last.opened)})
+			if len(ring) > contractCoreWindowGapRing {
+				ring = slices.Delete(ring, 0, len(ring)-contractCoreWindowGapRing)
+			}
+			w.gaps[key] = ring
+		}
+	}
+	w.writing[key] = seq
+	w.openedAt[key] = at
+}
+
+// closeLocked closes key's open core-write window at at.
+func (w *contractReceiptWriteSequence) closeLocked(key contractReceiptWriteKey, at time.Time) {
+	if _, open := w.writing[key]; !open {
+		return
+	}
+	if w.closed == nil {
+		w.closed = make(map[contractReceiptWriteKey]contractCoreWindowSpan)
+	}
+	w.closed[key] = contractCoreWindowSpan{opened: w.openedAt[key], closed: at}
+	delete(w.writing, key)
+	delete(w.openedAt, key)
 }
 
 // contractCoreWindow is what one receipt write does to the core-write windows
@@ -135,11 +210,12 @@ func (s *Store) beginContractReceiptWrites(rows []graph.ContractBoundaryReceipt,
 			repos = append(repos, key.repo)
 		}
 	}
+	opened := w.clock()
 	for _, row := range rows {
 		key := contractReceiptWriteKey{row.RepoPrefix, row.CheckoutID, row.FilePath}
 		bump(key)
 		if window == contractCoreWindowOpened && !row.Accepted {
-			w.writing[key] = w.seq[key]
+			w.openLocked(key, w.seq[key], opened)
 		}
 	}
 	for _, source := range sources {
@@ -161,8 +237,10 @@ func (s *Store) beginContractReceiptWrites(rows []graph.ContractBoundaryReceipt,
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		if committed && window == contractCoreWindowClosed {
+			// The window closes when the accept commits, not when it began.
+			closed := w.clock()
 			for _, row := range rows {
-				delete(w.writing, contractReceiptWriteKey{row.RepoPrefix, row.CheckoutID, row.FilePath})
+				w.closeLocked(contractReceiptWriteKey{row.RepoPrefix, row.CheckoutID, row.FilePath}, closed)
 			}
 		}
 		for _, repo := range repos {
@@ -182,12 +260,13 @@ func (s *Store) EndContractCoreWrites(repo, checkout string, seqs map[string]uin
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	closed := false
+	at := w.clock()
 	for path, seq := range seqs {
 		key := contractReceiptWriteKey{repo, checkout, path}
 		if seq == 0 || w.writing[key] != seq {
 			continue
 		}
-		delete(w.writing, key)
+		w.closeLocked(key, at)
 		closed = true
 	}
 	if !closed {
@@ -209,6 +288,7 @@ func (s *Store) SettleContractReceiptWrites(repo, checkout string, seqs map[stri
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	settled := false
+	at := w.clock()
 	for path, seq := range seqs {
 		key := contractReceiptWriteKey{repo, checkout, path}
 		if seq == 0 || w.seq[key] != seq {
@@ -219,7 +299,7 @@ func (s *Store) SettleContractReceiptWrites(repo, checkout string, seqs map[stri
 		}
 		w.settled[key] = seq
 		if w.writing[key] == seq {
-			delete(w.writing, key)
+			w.closeLocked(key, at)
 		}
 		settled = true
 	}
@@ -288,6 +368,24 @@ func (s *Store) ContractReceiptWriteSeqs(repo, checkout string, paths []string) 
 	out := make(map[string]uint64, len(paths))
 	for _, path := range paths {
 		out[path] = w.seq[contractReceiptWriteKey{repo, checkout, path}]
+	}
+	return out
+}
+
+// ContractCoreWindowGaps returns the recorded quiet gaps of one repository's
+// primary paths whose window opened at or after since, oldest first per path,
+// paths in the order given. Each path keeps only its latest gaps.
+func (s *Store) ContractCoreWindowGaps(repo string, paths []string, since time.Time) []ContractCoreWindowGap {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []ContractCoreWindowGap
+	for _, path := range paths {
+		for _, gap := range w.gaps[contractReceiptWriteKey{repo, "", path}] {
+			if !gap.OpenedAt.Before(since) {
+				out = append(out, gap)
+			}
+		}
 	}
 	return out
 }

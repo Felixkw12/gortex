@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
 	"go.uber.org/zap"
 )
@@ -307,6 +308,17 @@ func (j *contractCoreInputJournal) begin(paths []string) error {
 	}
 	if j.logger != nil {
 		j.logger.Debug("contract journal begin", contractJournalPathFields(begun)...)
+		// One line per window this begin opened after the path's previous
+		// window closed: the writer's quiet gap a contract job re-asks in.
+		if gaps, ok := j.backend.(interface {
+			takeWindowGaps() (string, []store_sqlite.ContractCoreWindowGap)
+		}); ok {
+			repo, opened := gaps.takeWindowGaps()
+			for _, gap := range opened {
+				j.logger.Info("contract receipt window", zap.String("repo", repo), zap.String("path", gap.Path), zap.Uint64("seq", gap.Seq),
+					zap.Float64("quiet_ms", contractMillis(gap.Quiet)), zap.Float64("open_prev_ms", contractMillis(gap.OpenPrev)))
+			}
+		}
 	}
 	return nil
 }
