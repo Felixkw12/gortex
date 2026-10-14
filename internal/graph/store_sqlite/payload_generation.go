@@ -1066,6 +1066,7 @@ func (s *Store) sweepFencedPayloadGeneration(
 	pass := budget.begin()
 	pass.state = &seal.sweep
 	if err := s.sweepPayloadGeneration(ctx, generationID, pass); err != nil {
+		err = contextInterrupt(ctx, err)
 		viewmetrics.Count(viewmetrics.GenerationRetireRefusedTotal, retireStopReason(ctx, err))
 		return s.noteRetirementFailure(generationID, err)
 	}
@@ -1073,6 +1074,7 @@ func (s *Store) sweepFencedPayloadGeneration(
 	// fence, and a rebase in between moved the "based" reference elsewhere.
 	base, err := catalog.deleteViewGeneration(ctx, generationID)
 	if err != nil {
+		err = contextInterrupt(ctx, err)
 		reason := retireStopReason(ctx, err)
 		if errors.Is(err, ErrCatalogGenerationReferenced) {
 			// Swept, but referenced again since the fence: a refusal, not an

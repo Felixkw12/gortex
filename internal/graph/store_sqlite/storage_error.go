@@ -37,6 +37,32 @@ func isSQLiteFullFailure(err error) bool {
 	return errors.As(err, &sqliteErr) && sqliteErr != nil && sqliteErr.Code()&0xff == 13
 }
 
+// isSQLiteInterrupt recognizes SQLITE_INTERRUPT from the driver: a statement
+// sqlite3_interrupt stopped.
+func isSQLiteInterrupt(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr != nil && sqliteErr.Code()&0xff == 9
+}
+
+// contextInterrupt reads an SQLITE_INTERRUPT under an ended context as that
+// context's error.
+//
+// The driver interrupts the connection when a statement's context ends, and
+// usually reports the context's own error. Not always: a BEGIN returns the
+// bare interrupt, and a context that ends just as a query returns its first
+// row leaves the interrupt for the next step to report. Read raw, a budget
+// that expired at the wrong moment is a storage failure — a retirement
+// quantum counted its own yield as a refusal with an error, recorded
+// "SQLite code 9" against the generation, and the sweep returned the error
+// instead of resuming. Any other error, and an interrupt under a live
+// context, is returned unchanged.
+func contextInterrupt(ctx context.Context, err error) error {
+	if err == nil || ctx.Err() == nil || !isSQLiteInterrupt(err) {
+		return err
+	}
+	return ctx.Err()
+}
+
 func wrapStorageError(err error) error {
 	if err == nil {
 		return nil

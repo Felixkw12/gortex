@@ -292,7 +292,9 @@ func (s *Store) beginWriteOnWithLifetimeContext(ctx, lifetime context.Context, b
 	err := s.withSQLiteBusyRetry(ctx, "begin_write", func(context.Context) error {
 		var beginErr error
 		tx, beginErr = beginner.BeginTx(lifetime, nil)
-		return beginErr
+		// The driver interrupts a BEGIN when lifetime ends but, unlike a
+		// statement, returns the bare SQLITE_INTERRUPT.
+		return contextInterrupt(lifetime, beginErr)
 	})
 	if err != nil {
 		return tx, err
