@@ -21,7 +21,9 @@ import (
 // and /healthz with its own auth) under the catch-all, and the /v1 REST
 // API (v1, the former `gortex server`) under /v1/ behind a bearer-auth
 // wrapper. CORS, when an origin is set, wraps the whole mux so browser
-// clients (the web UI) can reach either surface cross-origin.
+// clients (the web UI) can reach either surface cross-origin, and the
+// browser Origin guard wraps the whole mux outside CORS, so both surfaces
+// and preflight requests enforce the same explicit allowlist.
 // The /v1 handler is built by the daemon from the same MCP server the
 // streamable surface dispatches into, but it is handed only the mcp-go server
 // and the store — not the routed-view machinery. Its non-tool endpoints
@@ -41,10 +43,11 @@ func composeDaemonHTTPHandler(streamH, v1 http.Handler, tokenFn func() string, c
 	top := http.NewServeMux()
 	top.Handle("/", streamH)
 	top.Handle("/v1/", server.WithAuthFunc(v1, tokenFn))
+	var handler http.Handler = top
 	if corsOrigin != "" {
-		return server.WithCORS(top, server.CORSOptions{AllowOrigins: []string{corsOrigin}})
+		handler = server.WithCORS(handler, server.CORSOptions{AllowOrigins: []string{corsOrigin}})
 	}
-	return top
+	return browserOriginGuard(handler, daemonHTTPAllowedOrigins)
 }
 
 // daemonStreamableDispatcher bridges streamable.Transport (which has
@@ -440,7 +443,7 @@ func toolCallFrameCWD(frame []byte) string {
 func browserOriginGuard(next http.Handler, allowed []string) http.Handler {
 	allowSet := make(map[string]struct{}, len(allowed))
 	for _, o := range allowed {
-		if o = strings.ToLower(strings.TrimSpace(o)); o != "" {
+		if o = strings.ToLower(strings.TrimSpace(o)); o != "" && o != "*" {
 			allowSet[o] = struct{}{}
 		}
 	}
@@ -455,7 +458,7 @@ func browserOriginGuard(next http.Handler, allowed []string) http.Handler {
 			return
 		}
 		http.Error(w, "forbidden: cross-origin requests are not accepted; "+
-			"pass --http-allowed-origin to permit a specific web origin", http.StatusForbidden)
+			"configure an explicit trusted web origin to permit browser access", http.StatusForbidden)
 	})
 }
 

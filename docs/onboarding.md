@@ -179,7 +179,7 @@ Once the basics are working:
 - **Token savings + cost tracking** — `gortex savings` prints cumulative tokens saved + dollars avoided per model across all sessions. Accumulates automatically; no setup.
 - **Compact wire format (GCX1)** — every list-shaped tool accepts `format: "gcx"` for a round-trippable compact response. Median **−27.4% tokens** vs JSON on the benchmark, 100% round-trip integrity. Spec: [docs/wire-format.md](wire-format.md). TypeScript decoder on npm: [`@gortex/wire`](https://www.npmjs.com/package/@gortex/wire). Agents pick it up automatically — the PreToolUse and subagent hooks surface the opt-in. Applies to: `search_symbols`, `find_usages`, `analyze`, `contracts`, `batch_symbols`, `get_callers` / `get_call_chain` / `get_dependencies` / `get_dependents` / `find_implementations`, `get_file_summary`, `get_editing_context`, `smart_context`.
 - **Feedback loop** — after a successful task, call the `feedback` MCP tool with `action: "record"`. Future `smart_context` results rerank based on what was actually useful.
-- **Custom HTTP integration** — `gortex daemon start --http-addr 127.0.0.1:7411 --cors-origin '*'` exposes every MCP tool as HTTP (`/v1/*` + `/mcp`) for the tracked repos. Good for editor plugins, CI hooks, custom dashboards.
+- **Custom HTTP integration** — `gortex daemon start --http-addr 127.0.0.1:7411` exposes the MCP tools over HTTP (`/v1/*` + `/mcp`) for the tracked repos. Set `--http-auth-token` even on loopback. Browser dashboards also need their specific origin in both `--http-allowed-origin` and `--cors-origin`; see [browser access](server.md#server-mode-v1-json-api).
 
 ## Daemon Mode
 

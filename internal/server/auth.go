@@ -10,8 +10,9 @@ import (
 // `Authorization: Bearer <token>`; mismatches get a 401 JSON error.
 //
 // When token is empty, WithAuth returns h unchanged — the caller has
-// opted into unauthenticated mode (the server command enforces this is
-// only safe with a localhost bind; see cmd/gortex/server.go).
+// opted into unauthenticated mode. Callers must restrict this to loopback
+// binds and independently reject untrusted browser Origins: a loopback
+// listener is reachable from web pages as well as local clients.
 //
 // CORS preflights (OPTIONS) bypass the check so browsers on a different
 // origin can negotiate headers before the real request is issued.
