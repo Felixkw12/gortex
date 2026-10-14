@@ -3763,34 +3763,55 @@ func contractJobDeadline(d time.Duration) func(context.Context) error {
 	}
 }
 
-// contractTimedApplies rewrites one file body-only the way an apply does, one
+// contractHeldApplies rewrites one file body-only the way an apply does, one
 // apply at a time: begin stages the file's receipt (opening its core-write
-// window) and evicts its rows, and window later a timer re-adds them and ends
-// the apply's core writes (closing the window). Nothing accepts or announces
-// the applies.
-type contractTimedApplies struct {
-	f      *contractJobFixture
-	path   string
-	window time.Duration
-	wg     sync.WaitGroup
-	mu     sync.Mutex
+// window) and evicts its rows; the window stays open until release, which
+// re-adds the rows and ends the apply's core writes (closing the window) from
+// another goroutine, the way a concurrent writer finishes. Nothing accepts or
+// announces the applies.
+type contractHeldApplies struct {
+	f    *contractJobFixture
+	path string
+	wg   sync.WaitGroup
+	mu   sync.Mutex
+	// held is the open apply's evicted rows, nil while no window is open.
+	held   *contractHeldApply
 	closes []time.Time
 	err    error
 }
 
-func (a *contractTimedApplies) begin() {
+type contractHeldApply struct {
+	nodes []*graph.Node
+	edges []*graph.Edge
+}
+
+func (a *contractHeldApplies) begin() {
 	_, nodes, edges, err := a.f.evictStaged(a.path)
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err != nil {
-		a.mu.Lock()
-		a.err = err
-		a.mu.Unlock()
+		if a.err == nil {
+			a.err = err
+		}
 		return
+	}
+	a.held = &contractHeldApply{nodes: nodes, edges: edges}
+}
+
+// release closes the open apply's window, if one is open and no release of it
+// is under way, and reports whether it started one.
+func (a *contractHeldApplies) release() bool {
+	a.mu.Lock()
+	held := a.held
+	a.held = nil
+	a.mu.Unlock()
+	if held == nil {
+		return false
 	}
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		time.Sleep(a.window)
-		err := a.f.store.AddBatchChecked(nodes, edges)
+		err := a.f.store.AddBatchChecked(held.nodes, held.edges)
 		if err == nil {
 			a.f.store.EndContractCoreWrites("fixture", "", a.f.store.ContractReceiptWriteSeqs("fixture", "", []string{a.path}))
 		}
@@ -3801,15 +3822,16 @@ func (a *contractTimedApplies) begin() {
 			a.err = err
 		}
 	}()
+	return true
 }
 
 // writing reports whether the file has a core-write window open.
-func (a *contractTimedApplies) writing() bool {
+func (a *contractHeldApplies) writing() bool {
 	return a.f.store.ContractReceiptWriteStates("fixture", "", []string{a.path})[a.path].Writing
 }
 
 // lastClose is when the latest apply closed its window.
-func (a *contractTimedApplies) lastClose() time.Time {
+func (a *contractHeldApplies) lastClose() time.Time {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if len(a.closes) == 0 {
@@ -3820,37 +3842,37 @@ func (a *contractTimedApplies) lastClose() time.Time {
 
 // TestContractJobProvesInTheGapAfterApplyWindowsCoveringItsRounds: the
 // route's constant owner, the dependency of the job's last unit, is rewritten
-// body-only by one apply per round for 30 rounds, each apply's core-write
-// window open for 100 ms against a round of about a tenth of that (2 s under
-// the race detector, whose rounds take most of a second). Every
-// other apply begins as a round opens, so its opening scan finds the window
-// open; the others begin right after the opening scan found it closed, so
-// the round's answers are torn and its closing scan sees the move. Each of
-// those rounds is blocked, never counted, so the job is never superseded,
-// and each wait wakes when the window closes, not when an apply begins: the
-// round after every close starts at once, inside the gap. The first round
-// after the last apply lands in that gap and the job publishes, equal to a
-// cold build, with no enrichment rerun.
+// body-only by one apply per round for 30 rounds. Each apply's core-write
+// window stays open until the job, its round blocked on it, waits: only then
+// does the writer finish, so every round reads across an open window however
+// long the round takes on the host. Every other apply begins as a round
+// opens, so its opening scan finds the window open; the others begin right
+// after the opening scan found it closed, so the round's answers are torn and
+// its closing scan sees the move. Each of those rounds is blocked, never
+// counted, so the job is never superseded, and each wait wakes when the
+// window closes, not when an apply begins: the round after every close starts
+// at once, inside the gap. The first round after the last apply lands in that
+// gap and the job publishes, equal to a cold build, with no enrichment rerun.
 func TestContractJobProvesInTheGapAfterApplyWindowsCoveringItsRounds(t *testing.T) {
 	f := newRouteConstantFixture(t)
 	const (
 		owner   = "fixture/consts.go"
 		applies = 30
+		// roundWait bounds a wait no window close ends; none may run out.
+		roundWait = 5 * time.Second
 	)
-	// A round must end inside the window it opened with, or it is not
-	// blocked: the race detector slows a round's scratch store tenfold.
-	window := 100 * time.Millisecond
-	if indexerRaceDetectorOn {
-		window = 2 * time.Second
-	}
-	a := &contractTimedApplies{f: f, path: owner, window: window}
+	a := &contractHeldApplies{f: f, path: owner}
 	defer a.wg.Wait()
-	staged, begun, wakes := false, 0, 0
+	staged, begun, wakes, released := false, 0, 0, 0
 	var latencies []time.Duration
-	// The first wait closes the window the route's first round read across.
+	// The first wait closes the window the route's first round read across;
+	// every later one finishes the apply whose window blocked the round.
 	f.onWait = func() {
 		if staged && begun == 0 {
 			f.store.EndContractCoreWrites("fixture", "", f.store.ContractReceiptWriteSeqs("fixture", "", []string{owner}))
+		}
+		if a.release() {
+			released++
 		}
 	}
 	apply := func() {
@@ -3860,7 +3882,7 @@ func TestContractJobProvesInTheGapAfterApplyWindowsCoveringItsRounds(t *testing.
 		}
 	}
 	hooks := &contractConvergenceHooks{
-		roundWait: 20 * window,
+		roundWait: roundWait,
 		afterExtract: func(path string) {
 			if path == "fixture/routes.go" && !staged {
 				staged = true
@@ -3883,32 +3905,29 @@ func TestContractJobProvesInTheGapAfterApplyWindowsCoveringItsRounds(t *testing.
 		},
 	}
 	start := time.Now()
-	// The applies hold the owner for applies*window; a job still asking long
-	// after that is spinning on the writes that open windows.
-	deadline := start.Add(4 * applies * window)
-	yield := func(ctx context.Context) error {
-		if time.Now().After(deadline) {
-			return fmt.Errorf("the job was still asking %s after it started", time.Since(start))
-		}
-		return ctx.Err()
-	}
+	// A job that asks again without waiting for a window to close spins on
+	// the writes that open them and fails by name instead of hanging.
+	yield := contractJobDeadline(3 * time.Minute)
 	report, err := f.job(hooks, yield)
 	elapsed := time.Since(start)
 	f.onWait = nil
+	// An apply the job never waited on is finished here, so its writer ends.
+	a.release()
 	a.wg.Wait()
 	a.mu.Lock()
 	applyErr := a.err
 	a.mu.Unlock()
 	slices.Sort(latencies)
-	t.Logf("applies=%d wakes=%d rounds=%d elapsed=%s latencies=%v", begun, wakes, report.Rounds, elapsed, latencies)
+	t.Logf("applies=%d released=%d wakes=%d rounds=%d elapsed=%s latencies=%v", begun, released, wakes, report.Rounds, elapsed, latencies)
 	require.NoError(t, applyErr)
 	require.NoError(t, err, "blocked rounds never end the job")
 	require.True(t, report.Published)
 	require.Equal(t, applies, begun, "an apply held the owner's window open through 30 rounds")
+	require.Equal(t, applies, released, "every apply's window blocked a round that then waited on it")
 	require.Zero(t, report.EnrichReruns)
 	require.LessOrEqual(t, wakes, applies+5, "each wait woke once, on a window's close")
 	require.NotEmpty(t, latencies)
-	require.Less(t, latencies[len(latencies)-1], window, "the round after a close started inside the gap")
+	require.Less(t, latencies[len(latencies)-1], roundWait/2, "the round after a close started inside the gap, woken by the close")
 	want := coldContracts(t, map[string]string{"routes.go": jobRoutes, "consts.go": jobConsts, "helper.go": jobHelper})
 	require.Contains(t, contractIDs(want), "http::GET::/before")
 	require.Equal(t, contractMeta(want), contractMeta(f.contracts()))
