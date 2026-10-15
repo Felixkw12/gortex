@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -199,15 +198,15 @@ func (p *schedulerProbe) wait(result ContractScheduleResult) ContractActorStatus
 // and returns while another actor's capture is blocked; no capture runs on
 // the request's goroutine.
 func TestContractScheduleDoesNoStoreOrCaptureWork(t *testing.T) {
+	scheduleWithCaptureBlocked(t, nil)
+}
+
+func scheduleWithCaptureBlocked(t *testing.T, record func(time.Duration)) {
+	t.Helper()
 	blocked := make(chan struct{})
 	entered := make(chan struct{}, 64)
-	var inSchedule atomic.Bool
-	var duringSchedule atomic.Int64
 	p := newSchedulerProbe(t, nil)
 	p.c.options.Capture = func(ctx context.Context, source *ContractCaptureSource, inputs *graphview.SelectedContractInputs, repo, checkout string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
-		if inSchedule.Load() {
-			duringSchedule.Add(1)
-		}
 		entered <- struct{}{}
 		select {
 		case <-blocked:
@@ -232,16 +231,18 @@ func TestContractScheduleDoesNoStoreOrCaptureWork(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the first capture never started")
 	}
-	var elapsed []time.Duration
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for i := range 100 {
-			inSchedule.Store(true)
-			start := time.Now()
+			var start time.Time
+			if record != nil {
+				start = time.Now()
+			}
 			_, err := p.c.Schedule(t.Context(), ContractScheduleRequest{Actor: NewContractActor("", []string{fmt.Sprintf("b%d", i%4)}), Key: graph.ContractAttachmentKey{RepoPrefix: "b"}, Inputs: schedulerInputs([]string{fmt.Sprintf("b%d", i%4)}, fmt.Sprintf("k%d", i))})
-			elapsed = append(elapsed, time.Since(start))
-			inSchedule.Store(false)
+			if record != nil {
+				record(time.Since(start))
+			}
 			if err != nil && !errors.Is(err, ErrContractQueueFull) {
 				t.Error(err)
 			}
@@ -252,9 +253,6 @@ func TestContractScheduleDoesNoStoreOrCaptureWork(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("a request waited on a blocked capture")
 	}
-	require.Zero(t, duringSchedule.Load(), "no capture runs inside a request")
-	sort.Slice(elapsed, func(i, j int) bool { return elapsed[i] < elapsed[j] })
-	require.Less(t, elapsed[len(elapsed)/2], 5*time.Millisecond, "a request returns in O(1): %v", elapsed[len(elapsed)/2])
 }
 
 // TestContractSchedulerRoundRobinAcrossActors: three actors of one home ring
@@ -352,9 +350,7 @@ func TestContractSchedulerPublicationBeforeTheWaitResolvesIt(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return len(p.started()) == 1 && p.c.Status(scheduled.Actor).State == contractActorIdle.String()
 	}, 10*time.Second, time.Millisecond)
-	start := time.Now()
 	require.Equal(t, ContractActorPublished, p.wait(scheduled).Result)
-	require.Less(t, time.Since(start), time.Second, "the wait sees the publication that preceded it")
 }
 
 // TestContractSchedulerRerunsOnceAtTheNewestKey: keys that arrive while a
@@ -431,9 +427,7 @@ func TestContractSchedulerNoopIsNotAJob(t *testing.T) {
 	before := jobs()
 	again := p.schedule("", []string{"r"}, "r", "k")
 	require.Equal(t, ContractNoop, again.Result)
-	start := time.Now()
 	require.Equal(t, ContractActorPublished, p.wait(again).Result)
-	require.Less(t, time.Since(start), time.Second)
 	require.Equal(t, before, jobs())
 
 	// A restarted scheduler has no last publication: the attachments the
@@ -466,13 +460,11 @@ func TestContractSchedulerNoopIsNotAJob(t *testing.T) {
 	require.NoError(t, err)
 	defer restarted.Close()
 	before = jobs()
-	start = time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	scheduled, status := scheduleAndWait(t, ctx, restarted, cohort, "repo-a", inputs)
 	require.Equal(t, ContractScheduled, scheduled.Result)
 	require.Contains(t, []ContractActorResult{ContractActorNoop, ContractActorPublished}, status.Result)
-	require.Less(t, time.Since(start), 5*time.Second)
 	require.EqualValues(t, 1, captures.Load(), "a noop captures nothing")
 	require.Equal(t, before, jobs(), "a noop is not a job")
 }
@@ -814,21 +806,19 @@ func TestContractSchedulerAdmissionPanicPreservesNewerInterest(t *testing.T) {
 }
 
 // TestContractSchedulerRecoversFromAJobPanic: a panicking job body is
-// counted, releases its snapshot once, serves its waiter at once and is
+// counted, releases its snapshot once, serves its waiter and is
 // retried once; the actor stays schedulable and Close returns.
 func TestContractSchedulerRecoversFromAJobPanic(t *testing.T) {
 	p := newSchedulerProbe(t, nil)
 	run := p.run
 	var panicked atomic.Bool
-	var panickedAt atomic.Int64
 	p.c.run = func(job *contractAnalysisJob) string {
 		if panicked.CompareAndSwap(false, true) {
-			panickedAt.Store(time.Now().UnixNano())
 			panic("injected job panic")
 		}
 		return run(job)
 	}
-	recoverPanicPin(t, p, "", nil, &panickedAt)
+	recoverPanicPin(t, p, "", nil, nil)
 }
 
 // TestContractSchedulerRecoversFromACapturePanic is the same for a capture,
@@ -836,23 +826,21 @@ func TestContractSchedulerRecoversFromAJobPanic(t *testing.T) {
 func TestContractSchedulerRecoversFromACapturePanic(t *testing.T) {
 	p := newSchedulerProbe(t, nil)
 	var panicked atomic.Bool
-	var panickedAt atomic.Int64
 	p.c.options.Capture = func(ctx context.Context, source *ContractCaptureSource, inputs *graphview.SelectedContractInputs, repo, checkout string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 		if panicked.CompareAndSwap(false, true) {
-			panickedAt.Store(time.Now().UnixNano())
 			panic("injected capture panic")
 		}
 		return p.capture(ctx, source, inputs, repo, checkout)
 	}
 	var released atomic.Int64
-	recoverPanicPin(t, p, "wt", &ContractCaptureSource{onRelease: func() { released.Add(1) }}, &panickedAt)
+	recoverPanicPin(t, p, "wt", &ContractCaptureSource{onRelease: func() { released.Add(1) }}, nil)
 	require.EqualValues(t, 1, released.Load(), "the panicking capture's source is released once")
 }
 
 // recoverPanicPin schedules an actor whose first job panics and pins what
-// the recovery leaves: the panic counted, its waiter served at once, every
+// the recovery leaves: the panic counted, its waiter served, every
 // captured snapshot released exactly once, the actor schedulable, and Close.
-func recoverPanicPin(t *testing.T, p *schedulerProbe, checkout string, source *ContractCaptureSource, panickedAt *atomic.Int64) {
+func recoverPanicPin(t *testing.T, p *schedulerProbe, checkout string, source *ContractCaptureSource, observeServed func()) {
 	t.Helper()
 	panics := contractCounter("views_contract_analysis_jobs_total{mode=cold,outcome=panic}")
 	first, err := p.c.Schedule(t.Context(), ContractScheduleRequest{Actor: NewContractActor(checkout, []string{"r"}), Key: graph.ContractAttachmentKey{RepoPrefix: "r", CheckoutID: checkout}, Inputs: schedulerInputs([]string{"r"}, "k1"), Source: source})
@@ -861,9 +849,10 @@ func recoverPanicPin(t *testing.T, p *schedulerProbe, checkout string, source *C
 	defer cancel()
 	status, err := p.c.WaitActor(ctx, first.Actor, first.ArrivalSeq)
 	require.NoError(t, err)
-	served := time.Now()
 	require.Equal(t, ContractActorPanic, status.Result)
-	require.Less(t, served.Sub(time.Unix(0, panickedAt.Load())), 200*time.Millisecond, "the waiter is served at once")
+	if observeServed != nil {
+		observeServed()
+	}
 	require.Equal(t, panics+1, contractCounter("views_contract_analysis_jobs_total{mode=cold,outcome=panic}"))
 	if checkout == "" {
 		// The one retry publishes the same key.

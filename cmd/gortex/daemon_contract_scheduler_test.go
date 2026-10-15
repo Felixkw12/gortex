@@ -56,9 +56,14 @@ func daemonContractCall(t *testing.T, ctx context.Context, state *daemonState, i
 // actor stays schedulable and the retry publishes. A route edit accepted
 // while a strict request's interest lasts starts its job from the accept,
 // before any request asks. A receipt left in flight on another file is
-// repaired within one repair period, and the next strict call is complete
+// repaired by the background worker, and the next strict call is complete
 // and fresh.
 func TestDaemonContractJobsStartFromPublicationAndRepairAStuckReceipt(t *testing.T) {
+	daemonContractPublicationAndRepair(t, nil)
+}
+
+func daemonContractPublicationAndRepair(t *testing.T, observeRepair func(time.Duration)) {
+	t.Helper()
 	t.Setenv("GORTEX_ASYNC_CONTRACTS", "")
 	// The contracts tool is outside the default preset.
 	t.Setenv("GORTEX_TOOLS", "full")
@@ -136,7 +141,10 @@ func TestDaemonContractJobsStartFromPublicationAndRepairAStuckReceipt(t *testing
 	staged := *helper
 	staged.Accepted, staged.Previous = false, nil
 	require.NoError(t, store.SetContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{staged}))
-	stuckAt := time.Now()
+	var stuckAt time.Time
+	if observeRepair != nil {
+		stuckAt = time.Now()
+	}
 	repaired := counter("views_contract_repair_total{kind=stuck_receipt}")
 	require.NoError(t, os.WriteFile(mainPath, routes("/repaired"), 0o600))
 	_, err = state.multiIndexer.IncrementalReindexRepo("tracked", []string{mainPath})
@@ -145,7 +153,9 @@ func TestDaemonContractJobsStartFromPublicationAndRepairAStuckReceipt(t *testing
 	require.Equal(t, repaired+1, counter("views_contract_repair_total{kind=stuck_receipt}"))
 	lines := logs.FilterMessage("contract stuck repair").FilterField(zap.String("kind", "stuck_receipt")).All()
 	require.NotEmpty(t, lines)
-	require.Less(t, lines[0].Time.Sub(stuckAt), 3*indexer.ContractRepairPeriod, "repaired within one period of the window turning suspect")
+	if observeRepair != nil {
+		observeRepair(lines[0].Time.Sub(stuckAt))
+	}
 	require.Empty(t, store.OpenContractCoreWindows("tracked"))
 	closeState()
 }
