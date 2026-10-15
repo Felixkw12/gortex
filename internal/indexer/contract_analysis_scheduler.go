@@ -684,6 +684,12 @@ func (c *ContractAnalysisCoordinator) expireLocked(now time.Time) {
 			a.retryOnInputs, a.dirty, a.cache = false, false, nil
 			c.setStateLocked(a, contractActorIdle)
 		case contractActorIdle:
+			// A stale primary capture can wait here with an unresolved
+			// promise. Preserve its suspended intent before dropping the
+			// Published retry; a fresh RPC may renew it after the TTL.
+			if a.retryOnInputs {
+				a.interestExpired = true
+			}
 			// Nothing will ask for the actor's inputs again: it keeps no
 			// delta state either.
 			a.retryOnInputs, a.dirty, a.cache = false, false, nil

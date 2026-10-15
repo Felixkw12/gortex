@@ -438,8 +438,9 @@ func TestContractSchedulerNoopIsNotAJob(t *testing.T) {
 	state, err := graph.ComposeContractInputState("repo-a", "", f.inputs)
 	require.NoError(t, err)
 	inputs := &graphview.SelectedContractInputs{State: state, Witnesses: f.inputs}
-	var captures atomic.Int64
-	options := ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Yield: func(ctx context.Context) error { return ctx.Err() },
+	var captures, noopNow atomic.Int64
+	noopBase := time.Now()
+	options := ContractAnalysisCoordinatorOptions{Now: func() time.Time { return noopBase.Add(time.Duration(noopNow.Load())) }, Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Yield: func(ctx context.Context) error { return ctx.Err() },
 		Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 			captures.Add(1)
 			snapshot := a.Snapshot
@@ -464,7 +465,14 @@ func TestContractSchedulerNoopIsNotAJob(t *testing.T) {
 	defer cancel()
 	scheduled, status := scheduleAndWait(t, ctx, restarted, cohort, "repo-a", inputs)
 	require.Equal(t, ContractScheduled, scheduled.Result)
-	require.Contains(t, []ContractActorResult{ContractActorNoop, ContractActorPublished}, status.Result)
+	require.Equal(t, ContractActorPublished, status.Result, "an attachment-backed noop satisfies publication waiters")
+	require.Equal(t, ContractActorNoop, restarted.Status(scheduled.Actor).Result, "the restarted actor actually took endNoop from stored attachments")
+	noopNow.Store(int64(contractInterestTTL + time.Second))
+	renewed, expired := scheduleAndWait(t, ctx, restarted, cohort, "repo-a", inputs)
+	require.Equal(t, scheduled.ArrivalSeq, renewed.ArrivalSeq)
+	require.Equal(t, ContractNoop, renewed.Result)
+	require.Equal(t, ContractActorPublished, expired.Result)
+	require.Equal(t, ContractActorNoop, restarted.Status(scheduled.Actor).Result)
 	require.EqualValues(t, 1, captures.Load(), "a noop captures nothing")
 	require.Equal(t, before, jobs(), "a noop is not a job")
 }
@@ -533,6 +541,69 @@ func TestContractSchedulerRenewsExpiredBaselineInterest(t *testing.T) {
 	}, 10*time.Second, time.Millisecond)
 	later := p.schedule("", []string{"r"}, "r", "accepted")
 	require.Equal(t, ContractActorPublished, p.wait(later).Result)
+}
+
+// A primary stale capture leaves its promise unresolved while awaiting an
+// input event. Expiring that wait must still permit a fresh equal-key RPC.
+func TestContractSchedulerRenewsExpiredStaleCaptureInterest(t *testing.T) {
+	var now atomic.Int64
+	base := time.Now()
+	p := newSchedulerProbe(t, func(options *ContractAnalysisCoordinatorOptions) {
+		options.Now = func() time.Time { return base.Add(time.Duration(now.Load())) }
+		options.Inputs = func(_ context.Context, repos []string, _ string) (*graphview.SelectedContractInputs, error) {
+			return schedulerInputs(repos, "k"), nil
+		}
+	})
+	p.captureErr = func(_ string, n int) error {
+		if n == 1 {
+			return graph.ErrContractProjectionStale
+		}
+		return nil
+	}
+	first := p.schedule("", []string{"r"}, "r", "k")
+	require.Eventually(t, func() bool {
+		p.c.mu.Lock()
+		defer p.c.mu.Unlock()
+		a := p.c.actors[first.Actor]
+		return a.state == contractActorIdle && a.retryOnInputs && a.resolved < first.ArrivalSeq
+	}, 10*time.Second, time.Millisecond, "the actual stale capture must suspend its unresolved promise")
+	now.Store(int64(contractInterestTTL + time.Second))
+	renewed := p.schedule("", []string{"r"}, "r", "k")
+	require.Greater(t, renewed.ArrivalSeq, first.ArrivalSeq)
+	require.Equal(t, ContractActorPublished, p.wait(renewed).Result)
+	require.Len(t, p.started(), 1, "only the renewed capture starts a job")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	require.Equal(t, 2, p.captures["r/@k"], "one stale capture and one renewed capture")
+}
+
+// Expiration only renews suspended work, not terminal equal-key results.
+func TestContractSchedulerExpiredTerminalInterestStaysResolved(t *testing.T) {
+	for _, outcome := range []string{viewmetrics.ContractJobFailed, viewmetrics.ContractJobPublished} {
+		t.Run(outcome, func(t *testing.T) {
+			var now atomic.Int64
+			base := time.Now()
+			p := newSchedulerProbe(t, func(options *ContractAnalysisCoordinatorOptions) {
+				options.Now = func() time.Time { return base.Add(time.Duration(now.Load())) }
+			})
+			p.outcome = func(string, int) string { return outcome }
+			first := p.schedule("", []string{"r"}, "r", "k")
+			result := p.wait(first).Result
+			expected := ContractActorFailed
+			if outcome == viewmetrics.ContractJobPublished {
+				expected = ContractActorPublished
+			}
+			require.Equal(t, expected, result)
+			now.Store(int64(contractInterestTTL + time.Second))
+			again := p.schedule("", []string{"r"}, "r", "k")
+			require.Equal(t, first.ArrivalSeq, again.ArrivalSeq)
+			if outcome == viewmetrics.ContractJobPublished {
+				require.Equal(t, ContractNoop, again.Result, "a published key remains an immediate noop after expiry")
+			}
+			require.Equal(t, result, p.wait(again).Result)
+			require.Len(t, p.started(), 1)
+		})
+	}
 }
 
 func TestContractSchedulerRenewsExpiredBackoffInterest(t *testing.T) {
