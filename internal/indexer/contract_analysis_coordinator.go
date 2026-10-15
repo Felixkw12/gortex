@@ -223,14 +223,14 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 	}
 	targets := make([]ContractFollowupTarget, 0, len(job.targets))
 	reserved := make([]ContractFollowupTarget, 0, len(job.targets))
-	published := make(map[graph.ContractAttachmentKey]bool)
+	published := make(map[int64]bool)
 	defer func() {
 		// Failed reservations never become core routes. Successful attachments own
 		// durable references; retirement refuses those even after a late error.
 		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		for _, target := range reserved {
-			if published[target.Key] {
+			if published[target.Payload.ViewGeneration()] {
 				continue
 			}
 			err := target.Catalog.RetirePayloadGeneration(cleanup, target.Payload.ViewGeneration(), c.options.Leases.InUse)
@@ -308,7 +308,7 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 	var targetErr error
 	for _, result := range report.Targets {
 		if result.Report.Published {
-			published[result.Key] = true
+			published[result.Report.PayloadGeneration] = true
 		}
 		if result.Err != nil {
 			targetErr = result.Err

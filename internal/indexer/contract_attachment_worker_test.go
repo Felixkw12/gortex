@@ -479,25 +479,37 @@ export class ConfigService { constructor(@Inject(DATABASE_URL) private readonly 
 	}
 }
 
-func TestContractFollowupBatchTargetFailureIsIndependent(t *testing.T) {
+func TestContractFollowupBatchTargetFailureRollsBackCohort(t *testing.T) {
 	f := newContractWorkerFixture(t)
 	a := f.request(t, "repo-a", "batch-independent-a")
 	b := f.request(t, "repo-b", "batch-independent-b")
 	bad := b.Snapshot.Work[0]
 	bad.Token = "uncaptured-token"
 	batch, err := RunContractFollowupBatch(context.Background(), ContractFollowupBatchRequest{Snapshot: a.Snapshot, Targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog}, {Key: b.Snapshot.Key, Work: []graph.ContractWork{bad}, Payload: b.Payload, Catalog: b.Catalog}}, RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config, Leases: a.Leases, Yield: a.Yield, ScratchParent: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || len(batch.Targets) != 2 {
+		t.Fatalf("invalid later target did not refuse cohort: %#v %v", batch, err)
 	}
-	if len(batch.Targets) != 2 || batch.Targets[0].Err != nil || !batch.Targets[0].Report.Published || batch.Targets[1].Err == nil || batch.Targets[1].Report.Published {
-		t.Fatalf("target failures were not independent: %#v", batch)
+	for _, target := range batch.Targets {
+		if target.Err == nil || target.Report.Published {
+			t.Fatalf("partial cohort publication: %#v", batch)
+		}
+		header, readErr := f.store.GetContractAttachmentContext(context.Background(), target.Key)
+		if readErr != nil || header != nil {
+			t.Fatalf("refused cohort installed header: %#v %v", header, readErr)
+		}
 	}
-	header, err := f.store.GetContractAttachmentContext(context.Background(), b.Snapshot.Key)
-	if err != nil || header != nil {
-		t.Fatalf("invalid work published companion header=%#v %v", header, err)
+	work, readErr := f.store.ContractWorkContext(context.Background())
+	if readErr != nil || len(work) != 2 {
+		t.Fatalf("refused cohort consumed work: %#v %v", work, readErr)
+	}
+	for _, req := range []ContractFollowupRequest{a, b} {
+		generation, found, readErr := f.store.Catalog().GetViewGeneration(context.Background(), req.Payload.ViewGeneration())
+		if readErr != nil || !found || generation.State != store_sqlite.ViewGenerationBuilding {
+			t.Fatalf("refusal sealed reservation: %#v %v", generation, readErr)
+		}
 	}
 	if f.releases != 1 || f.leases.InUse(a.Payload.ViewGeneration()) || f.leases.InUse(b.Payload.ViewGeneration()) {
-		t.Fatal("independent target failure leaked lifetime")
+		t.Fatal("atomic target failure leaked lifetime")
 	}
 }
 

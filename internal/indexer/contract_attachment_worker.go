@@ -160,12 +160,14 @@ type ContractFollowupReport struct {
 	RebuildReason                                    ContractFollowupRebuildReason
 	ExtractDuration, EnrichDuration, PublishDuration time.Duration
 	PayloadGeneration                                int64
-	ScratchNodes, ScratchEdges                       int
-	ScratchBytes                                     int64
-	PrepareDuration                                  time.Duration
-	SymbolDocuments                                  int
-	FTSDuration                                      time.Duration
-	Published                                        bool
+	// UnusedPayloadGeneration remains caller-owned after a duplicate wins.
+	UnusedPayloadGeneration    int64
+	ScratchNodes, ScratchEdges int
+	ScratchBytes               int64
+	PrepareDuration            time.Duration
+	SymbolDocuments            int
+	FTSDuration                time.Duration
+	Published                  bool
 	// Phase ledger of the job's convergence: census and stamp scans, scratch
 	// evidence opens, proof rounds and payload assembly. Iterations and
 	// Rounds count the convergence loop's passes and proof rounds.
@@ -233,17 +235,19 @@ type ContractFollowupBatchReport struct {
 }
 
 type contractFollowupPrepared struct {
-	coverage   contractCoveredWork
-	work       []graph.ContractWork
-	registry   *contracts.Registry
-	evidence   *contractFollowupEvidence
-	report     ContractFollowupReport
-	scratch    *store_sqlite.Store
-	scratchDir string
+	publications []store_sqlite.ContractAttachmentPublishTarget
+	coverage     contractCoveredWork
+	work         []graph.ContractWork
+	registry     *contracts.Registry
+	evidence     *contractFollowupEvidence
+	report       ContractFollowupReport
+	scratch      *store_sqlite.Store
+	scratchDir   string
 }
 
 // RunContractFollowupBatch extracts and enriches the captured cohort once.
-// Each target keeps its own payload, immutable work, publication CAS and result.
+// Each target keeps its own payload and immutable work; publication commits
+// every target together after all payloads and coverage candidates are ready.
 func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequest) (batch ContractFollowupBatchReport, err error) {
 	if req.Snapshot.Release != nil {
 		defer req.Snapshot.Release()
@@ -277,24 +281,39 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 		}
 	}()
 	for _, target := range req.Targets {
+		batch.Targets = append(batch.Targets, ContractFollowupTargetResult{Key: target.Key})
+	}
+	fail := func(cause error) (ContractFollowupBatchReport, error) {
+		for i := range batch.Targets {
+			batch.Targets[i].Err = cause
+		}
+		batch.Cohort = prepared.report
+		return batch, cause
+	}
+	for i, target := range req.Targets {
 		snap := req.Snapshot
-		snap.Key = target.Key
-		snap.Work = target.Work
-		snap.Release = func() {}
+		snap.Key, snap.Work, snap.Release = target.Key, target.Work, func() {}
 		single := ContractFollowupRequest{Snapshot: snap, RebuildReason: req.RebuildReason, Payload: target.Payload, Catalog: target.Catalog, Registry: req.Registry, Config: req.Config, Logger: req.Logger, Leases: req.Leases, WorkspaceID: req.WorkspaceID, ProjectID: req.ProjectID, RepoConfigs: req.RepoConfigs, ScratchParent: req.ScratchParent, Yield: req.Yield,
 			PublishedEpoch: req.PublishedEpoch, WaitPublished: req.WaitPublished, convergenceHooks: req.convergenceHooks, delta: req.delta}
-		report, targetErr := runContractFollowupPrepared(ctx, single, prepared)
-		batch.Targets = append(batch.Targets, ContractFollowupTargetResult{Key: target.Key, Report: report, Err: targetErr})
-		if prepared.registry == nil && targetErr != nil {
-			// Preparation failure invalidates the shared cohort; never replay its source
-			// census once per remaining target or publish from partial evidence.
-			for _, remaining := range req.Targets[len(batch.Targets):] {
-				batch.Targets = append(batch.Targets, ContractFollowupTargetResult{Key: remaining.Key, Err: targetErr})
-			}
-			batch.Cohort = report
-			return batch, targetErr
+		report, targetErr := buildContractFollowupPrepared(ctx, single, prepared)
+		batch.Targets[i].Report = report
+		if targetErr != nil {
+			return fail(targetErr)
 		}
 	}
+	// Every payload and exact covered-work candidate is ready before the
+	// store acquires its write gate. A refusal publishes no target.
+	started := time.Now()
+	results, publishErr := prepared.publications[0].Store.PublishContractAttachmentsWithInputsContext(ctx, prepared.publications, started.Unix())
+	if publishErr != nil {
+		return fail(publishErr)
+	}
+	elapsed := time.Since(started)
+	for i, result := range results {
+		acceptContractPublication(&batch.Targets[i].Report, result, elapsed)
+	}
+	prepared.report.PublishDuration, prepared.report.Published = elapsed, true
+
 	batch.Cohort = prepared.report
 	return batch, nil
 }
@@ -312,6 +331,38 @@ func RunContractFollowup(ctx context.Context, req ContractFollowupRequest) (repo
 }
 
 func runContractFollowupPrepared(ctx context.Context, req ContractFollowupRequest, prepared *contractFollowupPrepared) (report ContractFollowupReport, err error) {
+	// Keep the selected source lifetime and reservation lease through the
+	// transaction, including a validated duplicate's winning-payload lookup.
+	if req.Snapshot.Release != nil {
+		defer req.Snapshot.Release()
+		req.Snapshot.Release = func() {}
+	}
+	if req.Leases != nil && req.Payload != nil && req.Payload.ViewGeneration() > 0 {
+		lease := req.Leases.Acquire(req.Payload.ViewGeneration())
+		defer lease.Release()
+	}
+	before := len(prepared.publications)
+	report, err = buildContractFollowupPrepared(ctx, req, prepared)
+	if err != nil {
+		return report, err
+	}
+	candidates := prepared.publications[before:]
+	started := time.Now()
+	results, err := req.Catalog.PublishContractAttachmentsWithInputsContext(ctx, candidates, started.Unix())
+	if err != nil {
+		return report, err
+	}
+	acceptContractPublication(&report, results[0], time.Since(started))
+	return report, nil
+}
+
+func acceptContractPublication(report *ContractFollowupReport, result store_sqlite.ContractAttachmentPublication, elapsed time.Duration) {
+	report.PayloadGeneration = result.PayloadGeneration
+	report.UnusedPayloadGeneration = result.UnusedPayloadGeneration
+	report.PublishDuration, report.Published = elapsed, true
+}
+
+func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequest, prepared *contractFollowupPrepared) (report ContractFollowupReport, err error) {
 	snap := req.Snapshot
 	if snap.Release != nil {
 		defer snap.Release()
@@ -467,7 +518,6 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 		return report, graph.ErrContractProjectionLimit
 	}
 	report.PayloadDuration = time.Since(payloadStart)
-	publishStart := time.Now()
 	for start := 0; start < len(nodes); start += contractFrontierReadBatchSize {
 		if req.Yield != nil {
 			if err := req.Yield(ctx); err != nil {
@@ -560,15 +610,10 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 		tokens = append(tokens, w.Token)
 	}
 	attachment := graph.ContractAttachment{RepoPrefix: snap.Key.RepoPrefix, CheckoutID: snap.Key.CheckoutID, InputVersion: snap.Key.InputVersion, InputFingerprint: snap.Key.InputFingerprint, PayloadGeneration: generation, CompletedTokens: tokens}
-	// The job converged before the payload: every live file was accepted and
-	// proven at its final fence. Publication's own witness CAS refuses a key
-	// that moved since; body-level saves since the fence are later inputs at
-	// the same key.
-	if err := req.Catalog.PublishContractAttachmentWithInputsContext(ctx, logical, snap.Inputs, attachment, covered, time.Now().Unix()); err != nil {
-		return report, err
-	}
-	report.PublishDuration = time.Since(publishStart)
-	report.Published = true
+	report.PayloadDuration = time.Since(payloadStart)
+	prepared.publications = append(prepared.publications, store_sqlite.ContractAttachmentPublishTarget{
+		Store: req.Catalog, Expected: logical, Witnesses: snap.Inputs, Attachment: attachment, Work: covered,
+	})
 	return report, nil
 }
 
