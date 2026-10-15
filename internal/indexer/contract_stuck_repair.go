@@ -106,6 +106,10 @@ type contractRepoRepair struct {
 	pendingSince time.Time
 	// scan asks for a pass over the namespace's unaccepted rows.
 	scan bool
+	// retry keeps incomplete startup repairs on the periodic watch. It is
+	// protected by the repair's mutex; attempts and pendingKey stay private
+	// to the repository's repair goroutine.
+	retry bool
 }
 
 // NewContractStuckRepair starts the repair. Each repository it sees gets a
@@ -148,6 +152,9 @@ func (r *ContractStuckRepair) Close() {
 	}
 	r.mu.Lock()
 	r.closed = true
+	for _, state := range r.repos {
+		state.retry = false
+	}
 	r.mu.Unlock()
 	r.cancel()
 	r.workers.Wait()
@@ -202,7 +209,7 @@ func (r *ContractStuckRepair) Pending(repos []string) bool {
 		}
 		r.mu.Lock()
 		state := r.repos[repo]
-		suspect := state != nil && (len(state.suspects) > 0 || state.scan)
+		suspect := state != nil && (len(state.suspects) > 0 || state.scan || state.retry)
 		r.mu.Unlock()
 		if suspect {
 			return true
@@ -274,7 +281,7 @@ func (r *ContractStuckRepair) watch() {
 			}
 			r.mu.Lock()
 			state, seen := r.repos[repo], r.repos[repo] != nil
-			if !seen || len(stuck) > 0 || deferred || len(state.suspects) > 0 || state.scan {
+			if !seen || len(stuck) > 0 || deferred || len(state.suspects) > 0 || state.scan || state.retry {
 				state = r.repoLocked(repo)
 				if state != nil {
 					for _, path := range stuck {
@@ -365,6 +372,11 @@ func (r *ContractStuckRepair) pass(state *contractRepoRepair) {
 // whose attempts ran out, and the namespace header last, only once no window
 // is left open.
 func (r *ContractStuckRepair) repairHeld(ctx context.Context, state *contractRepoRepair) {
+	defer func() {
+		r.mu.Lock()
+		state.retry = !r.closed && (len(state.attempts) > 0 || state.pendingKey != "")
+		r.mu.Unlock()
+	}()
 	repo := state.repo
 	store := r.options.Store.AtGeneration(0)
 	r.mu.Lock()
@@ -383,6 +395,9 @@ func (r *ContractStuckRepair) repairHeld(ctx context.Context, state *contractRep
 	}
 	candidates := make(map[string]bool, len(suspects))
 	for path := range suspects {
+		candidates[path] = true
+	}
+	for path := range state.attempts {
 		candidates[path] = true
 	}
 	if scan {
@@ -448,6 +463,9 @@ func (r *ContractStuckRepair) repairHeld(ctx context.Context, state *contractRep
 		countContractRepair(viewmetrics.ContractRepairStuckEnvelope)
 		err := r.envelopePaths(ctx, repo, []string{path})
 		r.logRepair(repo, viewmetrics.ContractRepairStuckEnvelope, []string{path}, err)
+		if !r.inFlight(ctx, store, repo, path) {
+			delete(state.attempts, path)
+		}
 	}
 	for _, window := range store.OpenContractCoreWindows(repo) {
 		if window.Checkout == "" {
@@ -611,6 +629,7 @@ func (r *ContractStuckRepair) repairHeader(ctx context.Context, state *contractR
 	}
 	for _, row := range work {
 		if slices.Contains(row.Scope.Causes, contractBaselineReconcileCause) {
+			state.pendingKey = ""
 			return
 		}
 	}

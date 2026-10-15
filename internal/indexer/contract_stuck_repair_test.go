@@ -536,6 +536,34 @@ func stuckRepairPin(t *testing.T, stick func(*contractRepairFixture)) {
 	require.Equal(t, contractIDs(coldContracts(t, map[string]string{"routes.go": jobRoutes, "consts.go": jobConsts, "helper.go": jobHelper})), contractIDs(f.strict(t, 20*time.Second)))
 }
 
+func TestContractStuckRepairRetainsRestartLeftRetries(t *testing.T) {
+	job := newRouteConstantFixture(t)
+	row := job.stagedReceipt("fixture/consts.go", "restart-left")
+	require.NoError(t, job.store.SetContractBoundaryReceiptsContext(t.Context(), []graph.ContractBoundaryReceipt{row}))
+	job.store.ForgetContractReceiptWritesForTest("fixture", "", []string{row.FilePath})
+	var attempts atomic.Int64
+	envelopes := repairCount("stuck_envelope")
+	r, err := newContractStuckRepair(ContractStuckRepairOptions{Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Period: contractRepairTestPeriod}, func(r *ContractStuckRepair) {
+		r.reindex = func(context.Context, string, []string) error {
+			attempts.Add(1)
+			return errors.New("injected failure before staging")
+		}
+	})
+	require.NoError(t, err)
+	t.Cleanup(r.Close)
+	require.Eventually(t, func() bool {
+		stored, _, err := job.store.ContractBoundaryReceiptContext(t.Context(), "fixture", "", row.FilePath)
+		return err == nil && stored != nil && stored.Accepted && contractReceiptIsFailureEnvelope(stored)
+	}, 20*time.Second, 10*time.Millisecond)
+	require.EqualValues(t, contractRepairEnvelopeAfter, attempts.Load())
+	require.Equal(t, envelopes+1, repairCount("stuck_envelope"))
+	require.Eventually(t, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.repos["fixture"] != nil && !r.repos["fixture"].retry
+	}, 10*time.Second, time.Millisecond)
+}
+
 // TestContractStuckRepairRestartLeftRow: an unaccepted row no mutation of
 // this process wrote (an earlier process stopped mid-body) is found by the
 // repair's start scan and reindexed.
@@ -631,6 +659,33 @@ func TestContractHeaderRepairWaitsForOpenWindows(t *testing.T) {
 	require.False(t, header.IsZero(), "the header left pending was repaired")
 	require.False(t, header.Before(repaired), "the header is repaired only once no window is open")
 	require.Equal(t, contractIDs(coldContracts(t, map[string]string{"routes.go": jobRoutes, "consts.go": consts, "helper.go": jobHelper})), contractIDs(f.strict(t, 20*time.Second)))
+}
+
+func TestContractPendingHeaderRepairWithoutAnActor(t *testing.T) {
+	job := newRouteConstantFixture(t)
+	initial, err := job.job(nil, nil)
+	require.NoError(t, err)
+	require.True(t, initial.Published)
+	job.saveHeld("consts.go", "package fixture\nconst RoutePath = \"/held\"\n")
+	require.Empty(t, job.store.OpenContractCoreWindows("fixture"))
+	state, found, err := job.store.ContractInputStateContext(t.Context(), "fixture", "")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.False(t, state.Accepted)
+	headers := repairCount("pending_header")
+	r, err := NewContractStuckRepair(ContractStuckRepairOptions{Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Period: contractRepairTestPeriod})
+	require.NoError(t, err)
+	t.Cleanup(r.Close)
+	require.Eventually(t, func() bool {
+		state, found, err := job.store.ContractInputStateContext(t.Context(), "fixture", "")
+		return err == nil && found && state.Accepted
+	}, 20*time.Second, 10*time.Millisecond)
+	require.Equal(t, headers+1, repairCount("pending_header"))
+	require.Eventually(t, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.repos["fixture"] != nil && !r.repos["fixture"].retry
+	}, 10*time.Second, time.Millisecond)
 }
 
 // TestContractPendingHeaderRepair: an accept refused after its windows
