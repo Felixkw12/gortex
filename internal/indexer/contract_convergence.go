@@ -169,15 +169,16 @@ type contractUnit struct {
 
 // Recorded read kinds: what the ledger facade can ask again.
 const (
-	contractReadFile      = "file"
-	contractReadIDs       = "ids"
-	contractReadNames     = "names"
-	contractReadConstants = "constants"
-	contractReadRepoFiles = "repo_files"
-	contractReadSemantic  = "semantic"
-	contractReadSeeds     = "seeds"
-	contractReadLivePaths = "live_paths"
-	contractReadEndpoints = "endpoints"
+	contractReadFile            = "file"
+	contractReadIDs             = "ids"
+	contractReadNames           = "names"
+	contractReadConstCandidates = "constant_candidates"
+	contractReadConstants       = "constants"
+	contractReadRepoFiles       = "repo_files"
+	contractReadSemantic        = "semantic"
+	contractReadSeeds           = "seeds"
+	contractReadLivePaths       = "live_paths"
+	contractReadEndpoints       = "endpoints"
 )
 
 // contractRecordedRead is one read the ledger facade answered: what was
@@ -283,6 +284,12 @@ func contractAnswerOwners(answer any) []string {
 		for _, nodes := range v {
 			addNodes(nodes...)
 		}
+	case []contracts.EndpointConstantCandidate:
+		for _, candidate := range v {
+			if candidate.FilePath != "" {
+				out = append(out, candidate.FilePath)
+			}
+		}
 	}
 	return out
 }
@@ -368,6 +375,7 @@ func (m contractMoves) depends(path string, read contractRecordedRead) bool {
 		return true
 	}
 	prefix := ""
+	args := read.args
 	switch read.kind {
 	case contractReadRepoFiles, contractReadLivePaths, contractReadSemantic:
 		return false
@@ -375,6 +383,9 @@ func (m contractMoves) depends(path string, read contractRecordedRead) bool {
 		return m.unknown[path] || m.seeders[path]
 	case contractReadNames:
 		prefix = "name:"
+	case contractReadConstCandidates:
+		prefix = "name:"
+		args = args[:min(1, len(args))]
 	case contractReadIDs, contractReadConstants, contractReadEndpoints:
 		prefix = "id:"
 	case contractReadFile:
@@ -385,7 +396,7 @@ func (m contractMoves) depends(path string, read contractRecordedRead) bool {
 	if m.unknown[path] {
 		return true
 	}
-	for _, arg := range read.args {
+	for _, arg := range args {
 		if contractDeclaredHas(m.byPath[path], prefix+arg) || (prefix == "path:" && arg == path) {
 			return true
 		}
@@ -457,6 +468,7 @@ func (m contractMoves) affected(read contractRecordedRead) bool {
 		}
 	}
 	prefix := ""
+	args := read.args
 	switch read.kind {
 	case contractReadRepoFiles, contractReadLivePaths, contractReadSemantic:
 		return true
@@ -464,6 +476,9 @@ func (m contractMoves) affected(read contractRecordedRead) bool {
 		return m.seeding || !m.declaredKnown
 	case contractReadNames:
 		prefix = "name:"
+	case contractReadConstCandidates:
+		prefix = "name:"
+		args = args[:min(1, len(args))]
 	case contractReadIDs, contractReadConstants, contractReadEndpoints:
 		prefix = "id:"
 	case contractReadFile:
@@ -474,7 +489,7 @@ func (m contractMoves) affected(read contractRecordedRead) bool {
 	if !m.declaredKnown {
 		return true
 	}
-	for _, arg := range read.args {
+	for _, arg := range args {
 		if m.declared[prefix+arg] {
 			return true
 		}
@@ -515,6 +530,8 @@ func contractCanonicalAnswer(answer any) (any, error) {
 		return contractSortedJSON(v)
 	case []*graph.Edge:
 		return contractSortedEdgeJSON(v)
+	case []contracts.EndpointConstantCandidate:
+		return contractSortedJSON(v)
 	case contractFileAnswer:
 		nodes, err := contractSortedJSON(v.Nodes)
 		if err != nil {
@@ -2330,6 +2347,11 @@ func (c *contractConvergence) ask(evidence *contractFollowupEvidence, read contr
 		return c.askIDs(evidence, read.args)
 	case contractReadNames:
 		return c.askNames(evidence, read.args)
+	case contractReadConstCandidates:
+		if len(read.args) != 2 {
+			break
+		}
+		return evidence.endpointConstantCandidates(read.args[0], read.args[1])
 	case contractReadConstants:
 		return evidence.ConstantValuesByNodeIDs(read.args)
 	case contractReadRepoFiles:
