@@ -289,14 +289,24 @@ func TestAgedRetirementDrainsLeavesBeforeReferencedParents(t *testing.T) {
 	l.foregroundWork = func() (string, time.Time) { return "refresh_ticket", time.Now() }
 	l.deferredRetirementEligibleSince.Store(time.Now().Add(-3 * time.Minute).UnixNano())
 	// A fixed number of 50 ms bursts is not a convergence guarantee on a slow
-	// runner: drive the sweeps with the bounded control the debt test uses.
+	// runner: drive the sweeps with the bounded control the debt test uses. The
+	// control is a test bound, so it gets the usual allowance under the race
+	// detector, and its expiry is reported by the labelled assertion below, not
+	// as a sweep error.
 	var retired int
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	control := 10 * time.Second
+	if indexerRaceDetectorOn {
+		control *= 2
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), control)
 	defer cancel()
 	for attempt := 0; attempt < 512 && ctx.Err() == nil; attempt++ {
 		n, pending, err := l.SweepDeferredRetirements(ctx)
 		retired += n
-		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			if ctx.Err() != nil {
+				break // the control itself expired
+			}
 			continue // only a shorter internal budget may be resumed
 		}
 		require.NoError(t, err)
