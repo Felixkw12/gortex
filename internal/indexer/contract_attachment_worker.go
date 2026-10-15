@@ -149,6 +149,7 @@ type ContractFollowupRequest struct {
 	// convergenceHooks are test seams at the job's interleaving points.
 	convergenceHooks *contractConvergenceHooks
 	delta            *contractDeltaSession
+	coverageWork     []graph.ContractWork
 }
 
 type ContractFollowupReport struct {
@@ -232,6 +233,8 @@ type ContractFollowupBatchReport struct {
 }
 
 type contractFollowupPrepared struct {
+	coverage   contractCoveredWork
+	work       []graph.ContractWork
 	registry   *contracts.Registry
 	evidence   *contractFollowupEvidence
 	report     ContractFollowupReport
@@ -265,6 +268,9 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 		}
 	}
 	prepared := &contractFollowupPrepared{}
+	for _, target := range req.Targets {
+		prepared.work = append(prepared.work, target.Work...)
+	}
 	defer func() {
 		if cleanupErr := prepared.close(); err == nil {
 			err = cleanupErr
@@ -368,6 +374,10 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 			scopes[file.RepoPrefix] = [2]string{file.WorkspaceID, file.ProjectID}
 		}
 		prepareStart := time.Now()
+		req.coverageWork = prepared.work
+		if req.coverageWork == nil {
+			req.coverageWork = snap.Work
+		}
 		engine := newContractConvergence(ctx, req, fileByPath, repos, &report)
 		runErr := engine.run()
 		// The final enrichment round's store is the payload's evidence; it is
@@ -376,6 +386,7 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 		if runErr != nil {
 			return report, runErr
 		}
+		prepared.coverage = engine.coverage.sealed
 		registry, evidence = engine.registry, engine.evidence
 		report.PrepareDuration = time.Since(prepareStart)
 		report.ScratchNodes, report.ScratchEdges = evidence.writtenNodes, evidence.writtenEdges
@@ -537,11 +548,15 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 		}
 	}
 	report.FTSDuration = time.Since(ftsStart)
+	covered, coverageErr := prepared.coverage.rows(snap.Work)
+	if coverageErr != nil {
+		return report, coverageErr
+	}
 	if err := req.Payload.SetProducerState(store_sqlite.ProducerCompleteness{Producer: "graph.contracts", State: store_sqlite.ProducerStateComplete}); err != nil {
 		return report, err
 	}
-	tokens := make([]string, 0, len(snap.Work))
-	for _, w := range snap.Work {
+	tokens := make([]string, 0, len(covered))
+	for _, w := range covered {
 		tokens = append(tokens, w.Token)
 	}
 	attachment := graph.ContractAttachment{RepoPrefix: snap.Key.RepoPrefix, CheckoutID: snap.Key.CheckoutID, InputVersion: snap.Key.InputVersion, InputFingerprint: snap.Key.InputFingerprint, PayloadGeneration: generation, CompletedTokens: tokens}
@@ -549,7 +564,7 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 	// proven at its final fence. Publication's own witness CAS refuses a key
 	// that moved since; body-level saves since the fence are later inputs at
 	// the same key.
-	if err := req.Catalog.PublishContractAttachmentWithInputsContext(ctx, logical, snap.Inputs, attachment, snap.Work, time.Now().Unix()); err != nil {
+	if err := req.Catalog.PublishContractAttachmentWithInputsContext(ctx, logical, snap.Inputs, attachment, covered, time.Now().Unix()); err != nil {
 		return report, err
 	}
 	report.PublishDuration = time.Since(publishStart)

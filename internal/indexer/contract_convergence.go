@@ -781,6 +781,7 @@ type contractConvergenceHooks struct {
 }
 
 type contractConvergence struct {
+	coverage *contractWorkCoverage
 	ctx      context.Context
 	req      ContractFollowupRequest
 	snap     ContractFollowupSnapshot
@@ -882,6 +883,11 @@ func newContractConvergence(ctx context.Context, req ContractFollowupRequest, fi
 		live: make(map[string]bool), excluded: excluded, units: make(map[string]*contractUnit), suspect: make(map[string]bool),
 		retryOwners: make(map[string]map[string]bool), contentAt: make(map[string]uint64), contents: make(map[string]string),
 		guard: &contractReadGuard{}, report: report, hooks: req.convergenceHooks}
+	work := req.coverageWork
+	if work == nil {
+		work = req.Snapshot.Work
+	}
+	c.coverage = newContractWorkCoverage(work)
 	if c.hooks != nil && c.hooks.guard != nil {
 		c.hooks.guard(c.guard)
 	}
@@ -1598,6 +1604,7 @@ func (c *contractConvergence) round(paths []string, point bool) (proven []*contr
 	c.quietFrom = 0
 	var r0 ContractFollowupScan
 	var clock uint64
+	var sampled []string
 	if point {
 		scanned := append([]string(nil), paths...)
 		for _, path := range paths {
@@ -1605,7 +1612,13 @@ func (c *contractConvergence) round(paths []string, point bool) (proven []*contr
 				scanned = append(scanned, owner)
 			}
 		}
+		for _, path := range paths {
+			if unit := c.units[path]; unit != nil && c.coverage != nil {
+				scanned = append(scanned, c.coverage.bracket(c, unit)...)
+			}
+		}
 		scanned = appendUniqueSorted(nil, scanned...)
+		sampled = scanned
 		r0, err = c.scan(scanned)
 		if err != nil {
 			return nil, nil, err
@@ -1702,7 +1715,7 @@ func (c *contractConvergence) round(paths []string, point bool) (proven []*contr
 		unit.stamp = stamp
 		unit.round = clock
 		if point {
-			ok, err := c.prove([]*contractUnit{unit}, r0)
+			ok, err := c.prove([]*contractUnit{unit}, r0, sampled)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -1741,7 +1754,7 @@ func (c *contractConvergence) round(paths []string, point bool) (proven []*contr
 // prove takes one point scan R1 of the units' files and owners and returns
 // the units proven against r0 and R1. An unproven unit's owners are kept for
 // its retry round's R0.
-func (c *contractConvergence) prove(units []*contractUnit, r0 ContractFollowupScan) ([]*contractUnit, error) {
+func (c *contractConvergence) prove(units []*contractUnit, r0 ContractFollowupScan, sampled ...[]string) ([]*contractUnit, error) {
 	var pointSet []string
 	declarers := make(map[*contractUnit][]string, len(units))
 	for _, unit := range units {
@@ -1750,6 +1763,9 @@ func (c *contractConvergence) prove(units []*contractUnit, r0 ContractFollowupSc
 			pointSet = append(pointSet, owner)
 		}
 		declarers[unit] = c.keyDeclarers(unit)
+		if c.coverage != nil && len(c.coverage.work) > 0 {
+			declarers[unit] = appendUniqueSorted(declarers[unit], c.coverage.bracket(c, unit)...)
+		}
 		pointSet = append(pointSet, declarers[unit]...)
 	}
 	pointSet = appendUniqueSorted(nil, pointSet...)
@@ -1766,7 +1782,19 @@ func (c *contractConvergence) prove(units []*contractUnit, r0 ContractFollowupSc
 	c.quietFrom = c.observePoint(pointSet, r1.Stamps)
 	var proven []*contractUnit
 	for _, unit := range units {
-		if !r1.Settled || !c.unitProven(unit, r0, r1, declarers[unit]) {
+		coverageHeld := c.coverage == nil || len(c.coverage.work) == 0 || contractCoverageBracketHolds(r0, r1, declarers[unit])
+		if c.coverage != nil && len(c.coverage.work) > 0 && len(sampled) > 0 {
+			needed := append([]string{unit.path}, declarers[unit]...)
+			for owner := range unit.owners {
+				needed = append(needed, owner)
+			}
+			for _, owner := range needed {
+				if !slices.Contains(sampled[0], owner) {
+					coverageHeld = false
+				}
+			}
+		}
+		if !r1.Settled || !coverageHeld || !c.unitProven(unit, r0, r1, declarers[unit]) {
 			own := r0.Stamps[unit.path]
 			if r1.Settled && r1.Stamps[unit.path] == own && !unit.ledger.opaque {
 				// Its own receipt held across its reads, so its bytes are the
@@ -1787,6 +1815,7 @@ func (c *contractConvergence) prove(units []*contractUnit, r0 ContractFollowupSc
 						unit.torn[declarer] = r1.Stamps[declarer]
 					}
 				}
+				c.coverage.ownExtracted(unit, r0, r1, sampled...)
 				c.setUnit(unit)
 				c.suspect[unit.path] = true
 				// Extracted from the current bytes: progress, though not yet
@@ -1798,11 +1827,19 @@ func (c *contractConvergence) prove(units []*contractUnit, r0 ContractFollowupSc
 			for owner := range unit.owners {
 				owners[owner] = true
 			}
+			for _, owner := range declarers[unit] {
+				owners[owner] = true
+			}
 			c.retryOwners[unit.path] = owners
 			c.blockUnproven(unit, r0, r1, declarers[unit])
 			continue
 		}
 		delete(c.retryOwners, unit.path)
+		guards := append([]string{unit.path}, declarers[unit]...)
+		for owner := range unit.owners {
+			guards = append(guards, owner)
+		}
+		c.coverage.extracted(unit, guards...)
 		proven = append(proven, unit)
 	}
 	return proven, nil
@@ -1842,17 +1879,22 @@ func (c *contractConvergence) prove(units []*contractUnit, r0 ContractFollowupSc
 func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit, extract, unproven []string, err error) {
 	type plan struct {
 		// unit is nil for the enrichment round's plan.
-		unit    *contractUnit
-		ledger  *contractUnitLedger
-		moves   contractMoves
-		bracket []string
-		own     ContractReceiptStamp
-		equal   bool
-		askErr  error
+		unit      *contractUnit
+		ledger    *contractUnitLedger
+		moves     contractMoves
+		bracket   []string
+		own       ContractReceiptStamp
+		equal     bool
+		askErr    error
+		forced    bool
+		newOwners []string
 	}
 	var plans []*plan
 	var union []string
 	add := func(p *plan) {
+		if p.forced {
+			p.bracket = append(p.bracket, c.coverage.bracket(c, p.unit)...)
+		}
 		for source := range p.ledger.sources {
 			p.bracket = append(p.bracket, source)
 		}
@@ -1873,7 +1915,7 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 			c.dropUnit(path)
 			continue
 		}
-		add(&plan{unit: unit, ledger: unit.ledger, moves: c.movesSince(unit.round, unit.torn), bracket: []string{path}})
+		add(&plan{unit: unit, ledger: unit.ledger, moves: c.movesSince(unit.round, unit.torn), bracket: []string{path}, forced: c.coverage.needsRead(unit)})
 	}
 	var enrichment *plan
 	if c.enrichmentNeedsRecheck() {
@@ -1948,6 +1990,7 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 		return err
 	}
 	asked := make(map[string]string)
+	askedOwners := make(map[string][]string)
 	started = time.Now()
 	// What each moved file without a current unit declares now, read only
 	// while its core-write window is closed (accepted or not). A write that
@@ -2003,13 +2046,16 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 		}
 		var reads []contractRecordedRead
 		for _, read := range p.ledger.reads {
-			if p.moves.affected(read) {
+			if p.forced || p.moves.affected(read) {
 				reads = append(reads, read)
 			}
 		}
 		// What must hold across the pass: its own file, its byte reads and
 		// the moved files an asked read can depend on.
 		p.bracket = p.bracket[:0]
+		if p.forced {
+			p.bracket = append(p.bracket, c.coverage.bracket(c, p.unit)...)
+		}
 		if p.unit != nil {
 			p.bracket = append(p.bracket, path)
 		}
@@ -2080,7 +2126,11 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 			if err := ensureEvidence(); err != nil {
 				return nil, nil, nil, err
 			}
-			p.equal, p.askErr = c.replay(evidence, reads, asked)
+			if p.forced {
+				p.equal, p.askErr = c.replayObserved(evidence, reads, asked, askedOwners, func(owner string) { p.newOwners = append(p.newOwners, owner) })
+			} else {
+				p.equal, p.askErr = c.replayObserved(evidence, reads, asked, askedOwners, nil)
+			}
 			if ctxErr := c.ctx.Err(); ctxErr != nil {
 				return nil, nil, nil, ctxErr
 			}
@@ -2121,8 +2171,9 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 	// never acted on, and the round waits for that input's window to close.
 	blockMoves := func(bracket []string) {
 		for _, path := range bracket {
-			if before, ok := r0.Stamps[path]; ok && r1.Stamps[path] != before {
-				after, has := r1.Stamps[path]
+			before, had := r0.Stamps[path]
+			after, has := r1.Stamps[path]
+			if had != has || before != after {
 				stats.noteMoved(before, after, has)
 				c.block(path, r1.Stamps[path])
 			}
@@ -2144,11 +2195,30 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 			continue
 		}
 		path := p.unit.path
+		if p.forced {
+			// Newly returned owners were not necessarily in this point R0.
+			// Retain them and retry with their windows in the opening scan.
+			missing := false
+			for _, owner := range p.newOwners {
+				if !slices.Contains(p.bracket, owner) {
+					if c.coverage.extra[path] == nil {
+						c.coverage.extra[path] = map[string]bool{}
+					}
+					c.coverage.extra[path][owner] = true
+					missing = true
+				}
+			}
+			if missing {
+				c.blockMoved()
+				unproven = append(unproven, path)
+				continue
+			}
+		}
 		if c.hooks != nil && c.hooks.revalidated != nil {
 			c.hooks.revalidated(path, held)
 		}
 		switch {
-		case changedBetween(r0, r1, p.bracket):
+		case changedBetween(r0, r1, p.bracket) || (p.forced && !contractCoverageBracketHolds(r0, r1, p.bracket)):
 			// An input moved while it was asked: its answers prove nothing,
 			// equal or not, and the round is blocked.
 			moved = true
@@ -2163,6 +2233,9 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 			extract = append(extract, c.dropForExtraction(path))
 		default:
 			p.unit.round, p.unit.stamp, p.unit.torn = clock, p.own, nil
+			if p.forced {
+				c.coverage.record(p.unit, p.bracket)
+			}
 			c.report.Revalidated++
 			proven = append(proven, p.unit)
 		}
@@ -2190,6 +2263,10 @@ func (c *contractConvergence) dropForExtraction(path string) string {
 // answer's digest is the recorded one. A read that fails is an error, which
 // the caller treats as a changed answer unless its inputs moved meanwhile.
 func (c *contractConvergence) replay(evidence *contractFollowupEvidence, reads []contractRecordedRead, asked map[string]string) (bool, error) {
+	return c.replayObserved(evidence, reads, asked, nil, nil)
+}
+
+func (c *contractConvergence) replayObserved(evidence *contractFollowupEvidence, reads []contractRecordedRead, asked map[string]string, owners map[string][]string, observe func(string)) (bool, error) {
 	ledger := evidence.ledger
 	evidence.ledger = newContractUnitLedger()
 	defer func() { evidence.ledger = ledger }()
@@ -2199,12 +2276,23 @@ func (c *contractConvergence) replay(evidence *contractFollowupEvidence, reads [
 		key := read.kind + "\x00" + strings.Join(read.args, "\x00")
 		digest, done := asked[key]
 		if !done {
+			evidence.ledger = newContractUnitLedger()
 			answer, err := c.ask(evidence, read)
 			if err != nil {
 				return false, err
 			}
 			if evidence.err != nil {
 				return false, evidence.err
+			}
+			if owners != nil {
+				found := contractAnswerOwners(answer)
+				for owner := range evidence.ledger.owners {
+					found = append(found, owner)
+				}
+				for _, recorded := range evidence.ledger.reads {
+					found = append(found, recorded.owners...)
+				}
+				owners[key] = appendUniqueSorted(nil, found...)
 			}
 			encoded, ok := contractAnswerDigest(answer)
 			if !ok {
@@ -2213,6 +2301,11 @@ func (c *contractConvergence) replay(evidence *contractFollowupEvidence, reads [
 			digest = encoded
 			if asked != nil {
 				asked[key] = digest
+			}
+		}
+		if observe != nil {
+			for _, owner := range owners[key] {
+				observe(owner)
 			}
 		}
 		if digest != read.digest {
@@ -2375,6 +2468,8 @@ func (c *contractConvergence) setUnit(unit *contractUnit) {
 	if c.req.delta != nil {
 		c.req.delta.ownRaw(unit)
 	}
+	c.coverage.remember(c.units[unit.path])
+	c.coverage.remember(unit)
 	c.unindex(c.units[unit.path])
 	c.units[unit.path] = unit
 	c.declarers.add(unit)
@@ -2486,6 +2581,7 @@ func (c *contractConvergence) staleUnit(path, reason string, stale map[string]st
 }
 
 func (c *contractConvergence) dropUnit(path string) {
+	c.coverage.remember(c.units[path])
 	c.unindex(c.units[path])
 	delete(c.units, path)
 	delete(c.suspect, path)
@@ -2764,6 +2860,9 @@ func (c *contractConvergence) settle(paths []string, pending map[string]string, 
 
 // run converges the job and returns the final enrichment round.
 func (c *contractConvergence) run() error {
+	if c.coverage == nil {
+		c.coverage = newContractWorkCoverage(c.snap.Work)
+	}
 	complete := false
 	if c.req.delta != nil {
 		c.req.delta.adopt(c)
@@ -2775,14 +2874,26 @@ func (c *contractConvergence) run() error {
 	if err != nil {
 		return err
 	}
+	if !first.Settled {
+		return errContractJobKeyMoved
+	}
+	if err := c.coverage.validate(c); err != nil {
+		return err
+	}
+	c.coverage.anchored = true
 	c.loadContents(first.Stamps)
 	pending := make(map[string]string)
+	c.coverage.observe(c)
 	c.report.Mode = viewmetrics.ContractModeCold
 	if session := c.req.delta; session != nil {
+		if session.cache != nil {
+			c.coverage.receiptKeys(session.cache.receipts)
+		}
 		receipts, readErr := session.readReceipts(c, first.Stamps)
 		if readErr != nil {
 			return readErr
 		}
+		c.coverage.receiptKeys(receipts)
 		plan := session.cache.plan(session.identity, first.Census, receipts, session.membershipUnknown || contractDeltaMembershipUnknown(c.snap.Work))
 		c.report.Mode, c.report.CacheReason, c.report.ChangedFiles = plan.mode, plan.reason, slices.Clone(plan.extract)
 		frontier, _ := json.Marshal(plan.extract)
@@ -2821,6 +2932,10 @@ func (c *contractConvergence) run() error {
 	}
 	for path := range c.excluded {
 		c.installExcluded(path)
+	}
+	c.coverage.refresh(c, pending)
+	if err := c.coverage.validate(c); err != nil {
+		return err
 	}
 	defer c.noteWindowGaps()
 	for iteration := 0; ; iteration++ {
@@ -2882,6 +2997,10 @@ func (c *contractConvergence) run() error {
 		// makes it stale (TestContractStaleUnitsLeavesEveryUnpendingFileAtItsStamp).
 		// Nothing pending is therefore the publish condition for the units.
 		c.staleUnits(pending)
+		c.coverage.refresh(c, pending)
+		if err := c.coverage.validate(c); err != nil {
+			return err
+		}
 		current := c.enrichmentCurrent()
 		// What one more iteration needs of a writer's quiet gap: a re-ask's
 		// lead and span, the enrichment re-check and the fence.
@@ -2906,7 +3025,7 @@ func (c *contractConvergence) run() error {
 			zap.Duration("w_lead_p90", leadP90), zap.Int("w_leads", len(c.leads)),
 			zap.Duration("w_span_p90", spanP90), zap.Int("w_spans", len(c.spans)),
 			zap.Duration("w_pp", ppDuration), zap.Duration("w_fence", fenceDuration), zap.Duration("w_need", need))
-		if len(pending) == 0 && current {
+		if len(pending) == 0 && current && c.coverage.seal(c) {
 			complete = true
 			return nil
 		}
