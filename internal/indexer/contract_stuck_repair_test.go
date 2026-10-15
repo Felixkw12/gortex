@@ -1064,3 +1064,26 @@ func TestContractUnsettledJobRerunsWhenTheRepairFindsNothing(t *testing.T) {
 	require.Equal(t, published, f.publishedCount("fixture"), "no Published ran it again")
 	require.Equal(t, repaired, repairCount("stuck_receipt"))
 }
+
+func TestContractRepairAdmissionFailureReleasesEarlierLanes(t *testing.T) {
+	mi := &MultiIndexer{}
+	held, ok := mi.TryRepositoryMutationLanes([]string{"b"})
+	require.True(t, ok)
+	var once sync.Once
+	releaseHeld := func() { once.Do(held) }
+	defer releaseHeld()
+	release, ok := mi.TryRepositoryMutationLanes([]string{"b", "a", "a"})
+	require.False(t, ok)
+	require.Nil(t, release)
+	// b remains occupied, so retry a alone to isolate rollback of the
+	// successful first acquisition in sorted order.
+	first, ok := mi.TryRepositoryMutationLanes([]string{"a"})
+	require.True(t, ok, "a failed later lane must release the earlier lane")
+	first()
+	releaseHeld()
+	require.True(t, mi.batchMutationGate.TryLock(), "failed admission must release every batch reader")
+	mi.batchMutationGate.Unlock()
+	release, ok = mi.TryRepositoryMutationLanes([]string{"a", "b"})
+	require.True(t, ok)
+	release()
+}
