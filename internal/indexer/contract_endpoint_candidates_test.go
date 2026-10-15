@@ -85,6 +85,7 @@ func TestContractEndpointCandidatesNegativeReadTracksNewDeclarations(t *testing.
 type endpointSemanticCandidates struct {
 	graph.Reader
 	enriched bool
+	observed func(*graph.Node)
 }
 
 func (r *endpointSemanticCandidates) Unwrap() graph.Reader { return r.Reader }
@@ -94,7 +95,13 @@ func (r *endpointSemanticCandidates) VisitNodesByNameContext(ctx context.Context
 		if r.enriched && node.FilePath == "fixture/handler.go" && node.Kind != graph.KindConstant {
 			copyNode := *node
 			copyNode.Meta = map[string]any{"semantic_type": "string", "semantic_source": "go-types"}
+			if r.observed != nil {
+				r.observed(&copyNode)
+			}
 			return yield(&copyNode)
+		}
+		if r.observed != nil {
+			r.observed(node)
 		}
 		return yield(node)
 	})
@@ -108,11 +115,30 @@ func TestContractDeltaEndpointCandidateLocalityAndProducerLifecycle(t *testing.T
 	}
 	f := newContractJobFixture(t, files)
 	enriched := true
+	adjustments, enrichedRows, plainRows := 0, 0, 0
 	f.adjust = func(snapshot *ContractFollowupSnapshot) {
-		snapshot.Core = &endpointSemanticCandidates{Reader: snapshot.Core, enriched: enriched}
+		adjustments++
+		snapshot.Core = &endpointSemanticCandidates{Reader: snapshot.Core, enriched: enriched, observed: func(node *graph.Node) {
+			if node.FilePath == "fixture/handler.go" && node.Kind != graph.KindConstant {
+				if enriched {
+					require.Equal(t, "go-types", node.Meta["semantic_source"])
+					enrichedRows++
+				} else {
+					require.NotEqual(t, "go-types", node.Meta["semantic_source"])
+					plainRows++
+				}
+			}
+		}}
+		if !enriched {
+			// The warm reader may correctly avoid this unrelated query. Check
+			// the selected fixture's changed answer directly before the job.
+			require.NoError(t, snapshot.Core.(*endpointSemanticCandidates).VisitNodesByNameContext(t.Context(), "id", func(*graph.Node) bool { return true }))
+		}
 	}
 	var cache *contractDeltaCache
 	runCachedContractFixture(t, f, &cache)
+	require.Equal(t, 1, adjustments)
+	require.Positive(t, enrichedRows, "the selected reader must actually return injected semantic parameter rows")
 	reader := cache.units["fixture/routes.go"]
 	require.True(t, reader.keys["name:id"])
 	require.True(t, reader.keys["name:name"], "the unresolved route retains its negative lookup")
@@ -121,6 +147,8 @@ func TestContractDeltaEndpointCandidateLocalityAndProducerLifecycle(t *testing.T
 	enriched = false
 	f.save("handler.go", files["handler.go"])
 	report := runCachedContractFixture(t, f, &cache)
+	require.Equal(t, 2, adjustments)
+	require.Positive(t, plainRows, "the selected reader must observe the same parameter declarations without semantic enrichment")
 	require.Equal(t, 1, report.Files, "an unrelated parameter's enrichment loss must not extract the route reader")
 	require.Equal(t, contractMeta(coldContracts(t, files)), contractMeta(f.contracts()))
 	for _, change := range []struct{ path, source string }{

@@ -169,6 +169,7 @@ type contractUnit struct {
 
 // Recorded read kinds: what the ledger facade can ask again.
 const (
+	contractReadExtractionFile  = "extraction_file"
 	contractReadFile            = "file"
 	contractReadIDs             = "ids"
 	contractReadNames           = "names"
@@ -388,7 +389,7 @@ func (m contractMoves) depends(path string, read contractRecordedRead) bool {
 		args = args[:min(1, len(args))]
 	case contractReadIDs, contractReadConstants, contractReadEndpoints:
 		prefix = "id:"
-	case contractReadFile:
+	case contractReadFile, contractReadExtractionFile:
 		prefix = "path:"
 	default:
 		return true
@@ -481,7 +482,7 @@ func (m contractMoves) affected(read contractRecordedRead) bool {
 		args = args[:min(1, len(args))]
 	case contractReadIDs, contractReadConstants, contractReadEndpoints:
 		prefix = "id:"
-	case contractReadFile:
+	case contractReadFile, contractReadExtractionFile:
 		prefix = "path:"
 	default:
 		return true
@@ -1507,7 +1508,13 @@ func (c *contractConvergence) extract(idx *Indexer, evidence *contractFollowupEv
 	// its evict and add is in the round's point scan.
 	ledger.owner(file.Path)
 	ledger.key("path:", file.Path)
-	nodes, edges, err := evidence.loadFile(file.Path)
+	var nodes []*graph.Node
+	var edges []*graph.Edge
+	if projected {
+		nodes, edges, err = evidence.loadFile(file.Path)
+	} else {
+		nodes, edges, err = evidence.loadExtractionFile(file.Path)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1557,17 +1564,7 @@ func (c *contractConvergence) extract(idx *Indexer, evidence *contractFollowupEv
 	}
 	sources := make(map[string]bool)
 	for _, edge := range edges {
-		if edge == nil {
-			continue
-		}
-		seed := false
-		if edge.Kind == graph.EdgeProvides || edge.Kind == graph.EdgeConsumes {
-			_, seed = diContractFromEdge(edge)
-		}
-		if edge.Kind == graph.EdgeCalls && edge.Meta["via"] == "spring.Bean" {
-			seed = true
-		}
-		if seed {
+		if contractUnitSeedEdge(edge) {
 			unit.seedEdges = append(unit.seedEdges, edge)
 			sources[edge.From] = true
 		}
@@ -2342,6 +2339,12 @@ func (c *contractConvergence) ask(evidence *contractFollowupEvidence, read contr
 			break
 		}
 		nodes, edges, err := evidence.loadFile(read.args[0])
+		return contractFileAnswer{Nodes: nodes, Edges: edges}, err
+	case contractReadExtractionFile:
+		if len(read.args) != 1 {
+			break
+		}
+		nodes, edges, err := evidence.loadExtractionFile(read.args[0])
 		return contractFileAnswer{Nodes: nodes, Edges: edges}, err
 	case contractReadIDs:
 		return c.askIDs(evidence, read.args)
