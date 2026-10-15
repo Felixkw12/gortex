@@ -989,6 +989,7 @@ func TestContractScheduleQueueFullIsTypedAndRetryable(t *testing.T) {
 	}
 	p.release("a/@a1")
 	require.Equal(t, ContractActorPublished, p.wait(known).Result)
+	require.Greater(t, p.c.CapacityEpoch(), epoch, "leaving active work advances capacity epoch")
 	select {
 	case err := <-woke:
 		require.NoError(t, err)
