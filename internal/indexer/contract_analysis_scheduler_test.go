@@ -516,6 +516,54 @@ func TestContractSchedulerPublishedStartsAnInterestedPrimaryActor(t *testing.T) 
 	require.Len(t, p.started(), 2, "an expired interest starts nothing")
 }
 
+func TestContractSchedulerRenewsExpiredBaselineInterest(t *testing.T) {
+	var now, admissions atomic.Int64
+	base := time.Now()
+	p := newSchedulerProbe(t, func(options *ContractAnalysisCoordinatorOptions) {
+		options.Now = func() time.Time { return base.Add(time.Duration(now.Load())) }
+		options.ReconcileBaseline = func(context.Context, *graphview.RepoView, string, string) (bool, error) {
+			admissions.Add(1)
+			return true, nil
+		}
+	})
+	req := ContractScheduleRequest{Actor: NewContractActor("", []string{"r"}), Key: graph.ContractAttachmentKey{RepoPrefix: "r"}}
+	first, err := p.c.Schedule(t.Context(), req)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return admissions.Load() == 1 && p.c.Status(first.Actor).State == contractActorDeferred.String()
+	}, 10*time.Second, time.Millisecond)
+	now.Store(int64(contractInterestTTL + time.Second))
+	renewed, err := p.c.Schedule(t.Context(), req)
+	require.NoError(t, err)
+	require.Greater(t, renewed.ArrivalSeq, first.ArrivalSeq)
+	require.Eventually(t, func() bool {
+		return admissions.Load() == 2 && p.c.Status(first.Actor).State == contractActorDeferred.String()
+	}, 10*time.Second, time.Millisecond)
+	later := p.schedule("", []string{"r"}, "r", "accepted")
+	require.Equal(t, ContractActorPublished, p.wait(later).Result)
+}
+
+func TestContractSchedulerRenewsExpiredBackoffInterest(t *testing.T) {
+	var now atomic.Int64
+	base := time.Now()
+	p := newSchedulerProbe(t, func(options *ContractAnalysisCoordinatorOptions) {
+		options.Now = func() time.Time { return base.Add(time.Duration(now.Load())) }
+	})
+	p.outcome = func(_ string, n int) string {
+		if n <= 2 {
+			return viewmetrics.ContractJobSupersededPublishRefused
+		}
+		return viewmetrics.ContractJobPublished
+	}
+	first := p.schedule("", []string{"r"}, "r", "k")
+	require.Eventually(t, func() bool { return p.c.Status(first.Actor).State == contractActorBackoff.String() }, 10*time.Second, time.Millisecond)
+	now.Store(int64(contractInterestTTL + time.Second))
+	renewed := p.schedule("", []string{"r"}, "r", "k")
+	require.Greater(t, renewed.ArrivalSeq, first.ArrivalSeq)
+	require.Equal(t, ContractActorPublished, p.wait(renewed).Result)
+	require.Len(t, p.started(), 3)
+}
+
 // TestContractSchedulerRequeuesOnceThenBacksOff: a job that could not settle
 // its reads, or publish, is queued again once at the back, then retried on
 // a timer.

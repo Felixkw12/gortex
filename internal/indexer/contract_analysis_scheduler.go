@@ -308,9 +308,11 @@ type contractActor struct {
 	trigger       string
 	triggeredAt   time.Time
 	interestUntil time.Time
-	lastUsed      time.Time
-	seq           uint64
-	changed       chan struct{}
+	// interestExpired remembers work suspended when its interest ran out.
+	interestExpired bool
+	lastUsed        time.Time
+	seq             uint64
+	changed         chan struct{}
 }
 
 func (a *contractActor) primary() bool { return a.id.Checkout == "" }
@@ -528,11 +530,13 @@ func (c *ContractAnalysisCoordinator) Schedule(ctx context.Context, req Contract
 		// The actor already wants these inputs, or newer ones captured at a
 		// later epoch: the request waits on that promise.
 		result.ArrivalSeq = a.want.seq
-		if key == a.want.key && a.state == contractActorIdle && a.resolved >= a.want.seq && a.resolvedResult == ContractActorInputsStale {
-			// The promise at these inputs resolved stale: the request
-			// captured them again, so they are asked for again, at a new
-			// seq and with the request's source.
+		if key == a.want.key && a.state == contractActorIdle && (a.interestExpired || a.resolved >= a.want.seq && a.resolvedResult == ContractActorInputsStale) {
+			// Renew work whose interest expired, or whose promise resolved
+			// stale, using the inputs and source this request captured.
 			dropped, a.want.source, kept = a.want.source, req.Source, true
+			a.want.inputs = req.Inputs
+			a.want.repo, a.want.checkout = req.Key.RepoPrefix, req.Key.CheckoutID
+			a.interestExpired = false
 			a.seq++
 			a.want.seq, a.want.epoch, a.retryOnInputs = a.seq, max(a.want.epoch, req.Epoch), false
 			result.ArrivalSeq = a.seq
@@ -554,6 +558,7 @@ func (c *ContractAnalysisCoordinator) Schedule(ctx context.Context, req Contract
 	dropped = a.want.source
 	a.seq++
 	a.want = contractActorWant{key: key, seq: a.seq, epoch: req.Epoch, inputs: req.Inputs, source: req.Source, repo: req.Key.RepoPrefix, checkout: req.Key.CheckoutID}
+	a.interestExpired = false
 	kept = true
 	a.requeues, a.backoff, a.retryOnInputs = 0, 0, false
 	result.ArrivalSeq = a.seq
@@ -673,6 +678,7 @@ func (c *ContractAnalysisCoordinator) expireLocked(now time.Time) {
 		}
 		switch a.state {
 		case contractActorDeferred, contractActorBackoff:
+			a.interestExpired = true
 			a.want.source.Release()
 			a.want.source = nil
 			a.retryOnInputs, a.dirty, a.cache = false, false, nil
