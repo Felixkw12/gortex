@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -686,6 +687,98 @@ func TestContractPendingHeaderRepairWithoutAnActor(t *testing.T) {
 		defer r.mu.Unlock()
 		return r.repos["fixture"] != nil && !r.repos["fixture"].retry
 	}, 10*time.Second, time.Millisecond)
+}
+
+func TestContractHeaderRepairRetriesFailedBaselinesWithoutAnActor(t *testing.T) {
+	for _, beforeStart := range []bool{true, false} {
+		t.Run(fmt.Sprintf("failure_before_start_%t", beforeStart), func(t *testing.T) {
+			job := newRouteConstantFixture(t)
+			job.saveHeld("consts.go", "package fixture\nconst RoutePath = \"/held\"\n")
+			options := job.options
+			var failed atomic.Bool
+			options.Yield = func(ctx context.Context) error {
+				if failed.CompareAndSwap(false, true) {
+					return errors.New("injected baseline failure after its pending marker")
+				}
+				return ctx.Err()
+			}
+			if beforeStart {
+				require.ErrorContains(t, reconcilePrimaryContractBaseline(t.Context(), options, "fixture"), "injected baseline failure")
+				require.False(t, job.mi.contractBaselineActive("fixture"))
+			}
+			headers := repairCount("pending_header")
+			r, err := NewContractStuckRepair(ContractStuckRepairOptions{Store: job.store, MultiIndexer: job.mi, Baseline: options, Period: contractRepairTestPeriod})
+			require.NoError(t, err)
+			t.Cleanup(r.Close)
+			require.Eventually(t, func() bool {
+				state, found, err := job.store.ContractInputStateContext(t.Context(), "fixture", "")
+				return err == nil && found && state.Accepted
+			}, 20*time.Second, 10*time.Millisecond)
+			want := int64(2)
+			if beforeStart {
+				want = 1
+			}
+			require.Equal(t, headers+want, repairCount("pending_header"))
+			require.False(t, job.mi.contractBaselineActive("fixture"))
+		})
+	}
+}
+
+func TestContractHeaderRepairWaitsForALiveBaseline(t *testing.T) {
+	job := newRouteConstantFixture(t)
+	job.saveHeld("consts.go", "package fixture\nconst RoutePath = \"/held\"\n")
+	entered, proceed := make(chan struct{}), make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(proceed) }) }
+	t.Cleanup(release)
+	options := job.options
+	options.Yield = func(ctx context.Context) error {
+		enteredOnce.Do(func() { close(entered) })
+		select {
+		case <-proceed:
+			return ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	ended := make(chan error, 1)
+	go func() { ended <- reconcilePrimaryContractBaseline(t.Context(), options, "fixture") }()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("baseline did not reach its pending marker")
+	}
+	require.True(t, job.mi.contractBaselineActive("fixture"))
+	current, found, err := job.store.ContractInputStateContext(t.Context(), "fixture", "")
+	require.NoError(t, err)
+	require.True(t, found)
+	state := &contractRepoRepair{repo: "fixture", pendingKey: current.InputVersion + "\x00" + current.InputFingerprint, pendingSince: time.Now().Add(-2 * contractRepairTestPeriod)}
+	r := &ContractStuckRepair{options: ContractStuckRepairOptions{Store: job.store, MultiIndexer: job.mi, Baseline: job.options, Logger: zap.NewNop()}, period: contractRepairTestPeriod}
+	headers := repairCount("pending_header")
+	require.NoError(t, job.mi.withRepositoryMutationLanes(t.Context(), []string{"fixture"}, func() error {
+		r.repairHeader(withHeldRepositoryLanes(t.Context(), []string{"fixture"}), state)
+		return nil
+	}))
+	require.Equal(t, headers, repairCount("pending_header"))
+	require.NotEmpty(t, state.pendingKey, "a failed live owner must leave a later retry possible")
+	release()
+	select {
+	case err := <-ended:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("baseline did not finish")
+	}
+	require.False(t, job.mi.contractBaselineActive("fixture"))
+}
+
+func TestContractBaselineActivityRetainsOverlappingOwners(t *testing.T) {
+	mi := &MultiIndexer{}
+	first, second := mi.beginContractBaseline("fixture"), mi.beginContractBaseline("fixture")
+	require.True(t, mi.contractBaselineActive("fixture"))
+	first()
+	require.True(t, mi.contractBaselineActive("fixture"))
+	second()
+	require.False(t, mi.contractBaselineActive("fixture"))
 }
 
 // TestContractPendingHeaderRepair: an accept refused after its windows

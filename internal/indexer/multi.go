@@ -84,6 +84,8 @@ type MultiIndexer struct {
 	// by source fingerprint, for contract analysis reads.
 	contractSources     *contractAcceptedSourceCache
 	contractSourcesOnce sync.Once
+	contractBaselineMu  sync.Mutex
+	contractBaselines   map[string]int
 	registry            *parser.Registry
 	search              search.Backend
 	embedder            embedding.Provider

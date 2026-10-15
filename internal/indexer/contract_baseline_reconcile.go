@@ -108,6 +108,8 @@ func NewContractBaselineReconciler(options ContractFollowupCaptureOptions) func(
 }
 
 func reconcilePrimaryContractBaseline(ctx context.Context, options ContractFollowupCaptureOptions, repo string) error {
+	end := options.MultiIndexer.beginContractBaseline(repo)
+	defer end()
 	store := options.Store.AtGeneration(0)
 	var pending graph.ContractInputState
 	var snapshot ContractFollowupSnapshot
@@ -295,6 +297,31 @@ func reconcilePrimaryContractBaseline(ctx context.Context, options ContractFollo
 			return store.AcceptContractInputMutationWithBaselineContext(ctx, next, graph.ContractBoundaryReceiptBaseline{RepoPrefix: repo, Version: contractBoundaryReceiptVersion, Fingerprint: hex.EncodeToString(digest.Sum(nil))})
 		})
 	})
+}
+
+// beginContractBaseline records a live reconstruction before it asks for a
+// repository lane. Overlapping reconstructions each retain their own claim.
+func (mi *MultiIndexer) beginContractBaseline(repo string) func() {
+	mi.contractBaselineMu.Lock()
+	if mi.contractBaselines == nil {
+		mi.contractBaselines = make(map[string]int)
+	}
+	mi.contractBaselines[repo]++
+	mi.contractBaselineMu.Unlock()
+	return func() {
+		mi.contractBaselineMu.Lock()
+		defer mi.contractBaselineMu.Unlock()
+		mi.contractBaselines[repo]--
+		if mi.contractBaselines[repo] == 0 {
+			delete(mi.contractBaselines, repo)
+		}
+	}
+}
+
+func (mi *MultiIndexer) contractBaselineActive(repo string) bool {
+	mi.contractBaselineMu.Lock()
+	defer mi.contractBaselineMu.Unlock()
+	return mi.contractBaselines[repo] > 0
 }
 
 // Durable core rows include resolver and enrichment output and may be ordered

@@ -54,7 +54,7 @@ const contractRepairLanePoll = 100 * time.Millisecond
 // before the repair excludes it with a failure envelope.
 const contractRepairEnvelopeAfter = 3
 
-// contractBaselineReconcileCause names a pending header a baseline job owns.
+// contractBaselineReconcileCause names persisted baseline reconstruction work.
 const contractBaselineReconcileCause = "namespace_baseline_reconciliation"
 
 // ContractStuckRepairOptions wires the repair to the runtime it repairs.
@@ -613,7 +613,7 @@ func (r *ContractStuckRepair) realEvict(repo, rel string) error {
 // closed and every row complete (an accept refused after its windows
 // closed): once it stayed pending for a period, or an actor waited on it for
 // one, the baseline is rebuilt with its current short-circuit bypassed and
-// the accepted header is announced. A header a baseline job owns is that
+// the accepted header is announced. A header a live baseline job owns is that
 // job's.
 func (r *ContractStuckRepair) repairHeader(ctx context.Context, state *contractRepoRepair) {
 	repo := state.repo
@@ -627,16 +627,15 @@ func (r *ContractStuckRepair) repairHeader(ctx context.Context, state *contractR
 	if err != nil {
 		return
 	}
-	for _, row := range work {
-		if slices.Contains(row.Scope.Causes, contractBaselineReconcileCause) {
-			state.pendingKey = ""
-			return
-		}
-	}
 	key := current.InputVersion + "\x00" + current.InputFingerprint
 	now := time.Now()
 	if state.pendingKey != key {
 		state.pendingKey, state.pendingSince = key, now
+	}
+	for _, row := range work {
+		if slices.Contains(row.Scope.Causes, contractBaselineReconcileCause) && r.options.MultiIndexer.contractBaselineActive(repo) {
+			return
+		}
 	}
 	waited := now.Sub(state.pendingSince) >= r.period
 	if c := r.options.Coordinator; c != nil {
@@ -652,10 +651,10 @@ func (r *ContractStuckRepair) repairHeader(ctx context.Context, state *contractR
 	options.Context = ctx
 	err = reconcilePrimaryContractBaseline(ctx, options, repo)
 	r.logRepair(repo, viewmetrics.ContractRepairPendingHeader, nil, err)
-	state.pendingKey = ""
 	if err != nil {
 		return
 	}
+	state.pendingKey = ""
 	if hooks := r.options.MultiIndexer.contractCoreRuntime.Load(); hooks != nil && hooks.Published != nil {
 		hooks.Published(ctx, repo, "")
 	}
