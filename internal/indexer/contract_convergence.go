@@ -2800,6 +2800,8 @@ func (c *contractConvergence) run() error {
 		}
 		plan := session.cache.plan(session.identity, first.Census, receipts, session.membershipUnknown || contractDeltaMembershipUnknown(c.snap.Work))
 		c.report.Mode, c.report.CacheReason, c.report.ChangedFiles = plan.mode, plan.reason, slices.Clone(plan.extract)
+		frontier, _ := json.Marshal(plan.extract)
+		c.logger.Info("contract delta plan", zap.String("mode", plan.mode), zap.String("reason", plan.reason), zap.Int("extract_count", len(plan.extract)), zap.Strings("extract_paths", plan.extract[:min(16, len(plan.extract))]), zap.String("extract_digest", contractInputHash(frontier)), zap.Int("revalidate_count", len(plan.revalidate)), zap.Strings("revalidate_paths", plan.revalidate[:min(16, len(plan.revalidate))]), zap.Int("removed_count", len(plan.removed)))
 		if plan.mode == viewmetrics.ContractModeDelta {
 			c.report.RebuildReason = ContractFollowupChangedBoundary
 		} else {

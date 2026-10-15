@@ -453,7 +453,19 @@ func (l *contractDeltaLRU) recount() {
 		l.bytes += entry.bytes
 	}
 }
-func (l *contractDeltaLRU) put(actor ContractActor, p *contractDeltaCache) {
+
+type contractDeltaAdmission struct {
+	reason                      string
+	requested, budget, retained int64
+	evicted                     int
+}
+
+func (l *contractDeltaLRU) put(actor ContractActor, p *contractDeltaCache) (result contractDeltaAdmission) {
+	result.budget = l.budget
+	if result.budget <= 0 {
+		result.budget = contractDeltaCacheBudget
+	}
+	defer func() { result.retained = l.bytes }()
 	for i, entry := range l.entries {
 		if entry.actor == actor {
 			l.remove(i)
@@ -461,6 +473,7 @@ func (l *contractDeltaLRU) put(actor ContractActor, p *contractDeltaCache) {
 		}
 	}
 	if p == nil {
+		result.reason = "discarded"
 		return
 	}
 	actor.Checkout, actor.cohort = strings.Clone(actor.Checkout), strings.Clone(actor.cohort)
@@ -471,11 +484,10 @@ func (l *contractDeltaLRU) put(actor ContractActor, p *contractDeltaCache) {
 	size := retained + 256 + contractDeltaAllocation(int64(len(actor.Checkout))) + contractDeltaAllocation(int64(len(actor.cohort)))
 	entrySize := int64(reflect.TypeOf(contractDeltaCacheEntry{}).Size())
 	arrayCharge := func(n int) int64 { return contractDeltaAllocation(int64(n) * entrySize) }
-	budget := l.budget
-	if budget <= 0 {
-		budget = contractDeltaCacheBudget
-	}
+	budget := result.budget
+	result.requested = size + arrayCharge(1)
 	if size+arrayCharge(1) > budget {
+		result.reason = "over_budget"
 		return
 	}
 	for len(l.entries) > 0 && l.bytes+size+arrayCharge(len(l.entries)+1)-arrayCharge(cap(l.entries)) > budget {
@@ -487,9 +499,11 @@ func (l *contractDeltaLRU) put(actor ContractActor, p *contractDeltaCache) {
 			}
 		}
 		if victim < 0 {
+			result.reason = "pinned_pressure"
 			return
 		}
 		l.remove(victim)
+		result.evicted++
 	}
 	// Exact capacity prevents historical growth from surviving actor removal.
 	entries := make([]contractDeltaCacheEntry, len(l.entries)+1)
@@ -498,6 +512,8 @@ func (l *contractDeltaLRU) put(actor ContractActor, p *contractDeltaCache) {
 	entries[len(entries)-1] = contractDeltaCacheEntry{actor: actor, cache: p, bytes: size}
 	l.entries = entries
 	l.recount()
+	result.reason = "admitted"
+	return
 }
 
 // Count backing storage conservatively: repeated references count repeatedly,

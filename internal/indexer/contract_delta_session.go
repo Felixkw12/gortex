@@ -2,6 +2,8 @@ package indexer
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -9,18 +11,20 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/viewmetrics"
+	"go.uber.org/zap"
 )
 
 // A session owns the actor's values exclusively while its LRU reservation
 // remains charged. Fresh evidence, postpasses and seeds belong only to the job.
 type contractDeltaSession struct {
-	cache             *contractDeltaCache
-	identity          contractDeltaIdentity
-	knownRaw          map[*contractUnit]int64
-	disabled          bool
-	membershipUnknown bool
-	receiptStamps     map[string]ContractReceiptStamp
-	receipts          map[string]contractDeltaReceipt
+	cache                                                        *contractDeltaCache
+	identity                                                     contractDeltaIdentity
+	knownRaw                                                     map[*contractUnit]int64
+	disabled                                                     bool
+	disabledPath, disabledReason, disabledMetaPath, disabledType string
+	membershipUnknown                                            bool
+	receiptStamps                                                map[string]ContractReceiptStamp
+	receipts                                                     map[string]contractDeltaReceipt
 }
 
 func newContractDeltaSession(p *contractDeltaCache, snap ContractFollowupSnapshot, cfg config.IndexConfig) (*contractDeltaSession, error) {
@@ -112,8 +116,17 @@ func (s *contractDeltaSession) ownRaw(unit *contractUnit) {
 		return
 	}
 	for _, raw := range unit.raw {
-		if _, err := json.Marshal(raw.Meta); err != nil || !contractDeltaMetaValue(reflect.ValueOf(raw.Meta)) {
-			s.disabled = true
+		if _, err := json.Marshal(raw.Meta); err != nil {
+			s.disabled, s.disabledPath, s.disabledReason, s.disabledType = true, unit.path, "invalid_metadata_json", fmt.Sprintf("%T", err)
+			var unsupported *json.UnsupportedTypeError
+			if errors.As(err, &unsupported) {
+				s.disabledType = unsupported.Type.String()
+			}
+			return
+		}
+		if !contractDeltaMetaValue(reflect.ValueOf(raw.Meta)) {
+			s.disabled, s.disabledPath, s.disabledReason = true, unit.path, "unsupported_metadata"
+			s.disabledMetaPath, s.disabledType = contractDeltaUnsupportedMeta(reflect.ValueOf(raw.Meta), "meta")
 			return
 		}
 	}
@@ -127,6 +140,7 @@ func (s *contractDeltaSession) ownRaw(unit *contractUnit) {
 // still copy/normalize linearly here; their cost remains a profiling gate.
 func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 	if s.disabled {
+		c.logger.Info("contract cache checkpoint", zap.String("reason", s.disabledReason), zap.String("file", s.disabledPath), zap.String("metadata_path", s.disabledMetaPath), zap.String("metadata_type", s.disabledType), zap.Bool("cache_present", false))
 		s.cache = nil
 		return
 	}
@@ -153,9 +167,13 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 	withoutUnits := *p
 	withoutUnits.units = nil
 	p.retainedBytes = contractRetainedSize(reflect.ValueOf(&withoutUnits)) + contractRetainedSize(reflect.ValueOf(proofUnits))
+	proofBytes := p.retainedBytes
+	rawBytes := int64(0)
 	for _, size := range p.rawBytes {
 		p.retainedBytes += size
+		rawBytes += size
 	}
+	c.logger.Info("contract cache checkpoint", zap.String("reason", "prepared"), zap.Bool("cache_present", true), zap.Bool("complete", p.complete), zap.Int("units", len(p.units)), zap.Int64("retained_bytes", p.retainedBytes), zap.Int64("raw_bytes", rawBytes), zap.Int64("proof_bytes", proofBytes), zap.Int("receipts", len(p.receipts)), zap.Int("deltas", p.deltas))
 	s.cache = p
 }
 
@@ -171,4 +189,39 @@ func contractDeltaMembershipUnknown(work []graph.ContractWork) bool {
 		}
 	}
 	return false
+}
+
+// Called only after shape rejection; reports field/type, never metadata values.
+func contractDeltaUnsupportedMeta(v reflect.Value, path string) (string, string) {
+	if !v.IsValid() {
+		return "", ""
+	}
+	switch v.Kind() {
+	case reflect.Interface:
+		if !v.IsNil() {
+			return contractDeltaUnsupportedMeta(v.Elem(), path)
+		}
+		return "", ""
+	case reflect.Map:
+		if v.Type().Key().Kind() != reflect.String {
+			return path, v.Type().String()
+		}
+		iter := v.MapRange()
+		for iter.Next() {
+			if p, kind := contractDeltaUnsupportedMeta(iter.Value(), path+"."+iter.Key().String()); p != "" {
+				return p, kind
+			}
+		}
+		return "", ""
+	case reflect.Slice:
+		for i := 0; i < v.Len(); i++ {
+			if p, kind := contractDeltaUnsupportedMeta(v.Index(i), path+"[]"); p != "" {
+				return p, kind
+			}
+		}
+		return "", ""
+	case reflect.Bool, reflect.String, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Float32, reflect.Float64:
+		return "", ""
+	}
+	return path, v.Type().String()
 }

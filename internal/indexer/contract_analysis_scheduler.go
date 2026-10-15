@@ -592,6 +592,7 @@ func (c *ContractAnalysisCoordinator) registerLocked(id ContractActor, now time.
 		}
 		if victim != nil {
 			c.deltaCaches.put(victim.id, nil)
+			c.deltaRegistryEvictions++
 			delete(c.actors, victim.id)
 			victim.ring.actors = slices.DeleteFunc(victim.ring.actors, func(a *contractActor) bool { return a == victim })
 			victim.notifyLocked()
@@ -1290,7 +1291,15 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	job := &contractAnalysisJob{id: id, snapshot: snapshot, targets: targets, trigger: trigger, queuedAt: triggeredAt, capture: captureDuration}
 	c.mu.Lock()
 	cached := c.deltaCaches.borrow(a.id)
+	retainedBytes := c.deltaCaches.bytes
+	cacheComplete, cacheBytes := false, int64(0)
+	if cached != nil {
+		cacheComplete, cacheBytes = cached.complete, cached.retainedBytes
+	}
+	registryEvictions := c.deltaRegistryEvictions
+	interestExpired := a.interestExpired
 	c.mu.Unlock()
+
 	session, sessionErr := newContractDeltaSession(cached, snapshot, c.options.Config)
 	if sessionErr != nil {
 		c.mu.Lock()
@@ -1307,9 +1316,10 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	returnCache := func(p *contractDeltaCache) {
 		if !returnedCache {
 			c.mu.Lock()
-			c.deltaCaches.put(a.id, p)
+			admission := c.deltaCaches.put(a.id, p)
 			c.mu.Unlock()
 			returnedCache = true
+			c.options.Logger.Info("contract cache admission", zap.String("actor", a.id.String()), zap.String("reason", admission.reason), zap.Int64("requested_bytes", admission.requested), zap.Int64("budget_bytes", admission.budget), zap.Int64("retained_bytes", admission.retained), zap.Int("evicted", admission.evicted), zap.Bool("checkpoint_present", p != nil))
 		}
 	}
 	defer func() {
@@ -1323,6 +1333,8 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 			panic(recovered)
 		}
 	}()
+
+	c.options.Logger.Info("contract cache borrow", zap.String("actor", a.id.String()), zap.Bool("cache_present", cached != nil), zap.Bool("complete", cacheComplete), zap.Int64("checkpoint_bytes", cacheBytes), zap.Int64("retained_bytes", retainedBytes), zap.Uint64("registry_evictions", registryEvictions), zap.Bool("interest_expired", interestExpired))
 
 	c.mu.Lock()
 	c.setStateLocked(a, contractActorRunning)

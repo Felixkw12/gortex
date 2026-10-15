@@ -73,10 +73,11 @@ const contractJobTriggerInterest = "interest"
 // ordinary tools never capture, read or wait on contract payloads through
 // this component.
 type ContractAnalysisCoordinator struct {
-	deltaCaches contractDeltaLRU
-	options     ContractAnalysisCoordinatorOptions
-	ctx         context.Context
-	cancel      context.CancelFunc
+	deltaCaches            contractDeltaLRU
+	deltaRegistryEvictions uint64
+	options                ContractAnalysisCoordinatorOptions
+	ctx                    context.Context
+	cancel                 context.CancelFunc
 	// workers joins every dispatcher and job goroutine.
 	workers   sync.WaitGroup
 	mu        sync.Mutex

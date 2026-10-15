@@ -11,7 +11,7 @@ import (
 func runCachedContractFixture(t *testing.T, f *contractJobFixture, p **contractDeltaCache) ContractFollowupReport {
 	t.Helper()
 	f.layers++
-	report, err := runFixtureContractJob(t, f.options, contractFixtureJob{layer: f.layers, cache: p, epoch: f.epoch.Load, wait: f.waitPublished})
+	report, err := runFixtureContractJob(t, f.options, contractFixtureJob{layer: f.layers, cache: p, logger: f.logger, epoch: f.epoch.Load, wait: f.waitPublished})
 	require.NoError(t, err)
 	require.True(t, report.Published)
 	require.NotNil(t, *p)
