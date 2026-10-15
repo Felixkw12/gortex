@@ -62,8 +62,8 @@ func TestContractAnalysisCountsRequestsAndJobs(t *testing.T) {
 
 	admittedBefore := contractCounter("views_contract_analysis_requests_total{result=admitted}")
 	attachedBefore := contractCounter("views_contract_analysis_requests_total{result=attached}")
-	publishedBefore := contractCounter("views_contract_analysis_jobs_total{mode=cold,outcome=published}")
-	secondsBefore := viewmetrics.Default().Snapshot().Durations["views_contract_analysis_job_seconds{mode=cold}"].Count
+	publishedBefore := contractCounter("views_contract_analysis_jobs_total{mode=fill,outcome=published}")
+	secondsBefore := viewmetrics.Default().Snapshot().Durations["views_contract_analysis_job_seconds{mode=fill}"].Count
 
 	inputs := &graphview.SelectedContractInputs{State: graph.ContractInputState{Accepted: true, InputVersion: a.Snapshot.Key.InputVersion, InputFingerprint: a.Snapshot.Key.InputFingerprint}}
 	// The cohort's repository announced an accepted mutation before the
@@ -79,7 +79,7 @@ func TestContractAnalysisCountsRequestsAndJobs(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, header)
 	require.Eventually(t, func() bool {
-		return contractCounter("views_contract_analysis_jobs_total{mode=cold,outcome=published}") > publishedBefore
+		return contractCounter("views_contract_analysis_jobs_total{mode=fill,outcome=published}") > publishedBefore
 	}, 30*time.Second, 10*time.Millisecond, "the published job is counted once its body returns")
 	again, status := scheduleAndWait(t, ctx, c, []string{"repo-a"}, "repo-a", inputs)
 	require.Equal(t, ContractNoop, again.Result, "a request at the published inputs is answered at once")
@@ -87,10 +87,10 @@ func TestContractAnalysisCountsRequestsAndJobs(t *testing.T) {
 
 	require.Greater(t, contractCounter("views_contract_analysis_requests_total{result=admitted}"), admittedBefore)
 	require.Greater(t, contractCounter("views_contract_analysis_requests_total{result=attached}"), attachedBefore)
-	require.Greater(t, viewmetrics.Default().Snapshot().Durations["views_contract_analysis_job_seconds{mode=cold}"].Count, secondsBefore)
+	require.Greater(t, viewmetrics.Default().Snapshot().Durations["views_contract_analysis_job_seconds{mode=fill}"].Count, secondsBefore)
 	starts := logs.FilterMessage("contract analysis job started").All()
 	require.NotEmpty(t, starts, "every job leaves a start line")
-	require.Equal(t, viewmetrics.ContractModeCold, starts[0].ContextMap()["mode"])
+	require.Equal(t, viewmetrics.ContractModeFill, starts[0].ContextMap()["mode"])
 	require.Equal(t, "repo-a", starts[0].ContextMap()["repo"])
 	require.True(t, starts[0].Time.Compare(logs.FilterMessage("contract analysis job").All()[0].Time) <= 0, "the start line precedes the end line")
 	start := starts[0].ContextMap()
@@ -106,7 +106,7 @@ func TestContractAnalysisCountsRequestsAndJobs(t *testing.T) {
 	for _, name := range []string{"w_need_sum", "w_iterations", "window_p10", "window_p50", "window_p90", "window_n"} {
 		require.Contains(t, fields, name)
 	}
-	require.Equal(t, viewmetrics.ContractModeCold, fields["mode"])
+	require.Equal(t, viewmetrics.ContractModeFill, fields["mode"])
 	require.Equal(t, viewmetrics.ContractJobPublished, fields["outcome"])
 	for _, phase := range []string{"census", "stamps", "scratch", "extract", "rounds", "pp", "payload", "publish"} {
 		require.Contains(t, fields, phase, "the phase line names every phase")

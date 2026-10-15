@@ -1070,8 +1070,17 @@ func (c *contractConvergence) loadContents(stamps map[string]ContractReceiptStam
 	if c.contents == nil {
 		c.contents = make(map[string]string, len(stamps))
 	}
+	missing := make(map[string]ContractReceiptStamp)
+	for path, stamp := range stamps {
+		if c.contents[stamp.Fingerprint] == "" {
+			missing[path] = stamp
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
 	start := time.Now()
-	if read, err := c.snap.ReceiptContents(c.ctx, stamps); err == nil {
+	if read, err := c.snap.ReceiptContents(c.ctx, missing); err == nil {
 		maps.Copy(c.contents, read)
 	}
 	c.report.StampsDuration += time.Since(start)
@@ -2361,6 +2370,9 @@ func (c *contractConvergence) movedUnder(path string, r0, r1 ContractFollowupSca
 
 // setUnit installs a unit for its path and indexes its declarations.
 func (c *contractConvergence) setUnit(unit *contractUnit) {
+	if c.req.delta != nil {
+		c.req.delta.ownRaw(unit)
+	}
 	c.unindex(c.units[unit.path])
 	c.units[unit.path] = unit
 	if c.declarers == nil {
@@ -2767,6 +2779,11 @@ func (c *contractConvergence) settle(paths []string, pending map[string]string, 
 
 // run converges the job and returns the final enrichment round.
 func (c *contractConvergence) run() error {
+	complete := false
+	if c.req.delta != nil {
+		c.req.delta.adopt(c)
+		defer func() { c.req.delta.finish(c, complete) }()
+	}
 	// A full scan first, so changes since the last job are on the clock
 	// before the first round.
 	first, _, err := c.fullScan()
@@ -2775,8 +2792,45 @@ func (c *contractConvergence) run() error {
 	}
 	c.loadContents(first.Stamps)
 	pending := make(map[string]string)
-	for path := range c.live {
-		pending[path] = viewmetrics.ContractFilesCold
+	c.report.Mode = viewmetrics.ContractModeCold
+	if session := c.req.delta; session != nil {
+		receipts, readErr := session.readReceipts(c, first.Stamps)
+		if readErr != nil {
+			return readErr
+		}
+		plan := session.cache.plan(session.identity, first.Census, receipts, session.membershipUnknown || contractDeltaMembershipUnknown(c.snap.Work))
+		c.report.Mode, c.report.CacheReason, c.report.ChangedFiles = plan.mode, plan.reason, slices.Clone(plan.extract)
+		if plan.mode == viewmetrics.ContractModeDelta {
+			c.report.RebuildReason = ContractFollowupChangedBoundary
+		} else {
+			c.report.RebuildReason = ContractFollowupColdBaseline
+		}
+		for _, path := range plan.removed {
+			c.dropUnit(path)
+		}
+		for _, path := range plan.revalidate {
+			c.staleUnit(path, viewmetrics.ContractFilesKeyCheck, pending)
+		}
+		reason := viewmetrics.ContractFilesDelta
+		if plan.mode == viewmetrics.ContractModeFill {
+			reason = viewmetrics.ContractFilesFill
+		}
+		if plan.mode == viewmetrics.ContractModeCold {
+			reason = viewmetrics.ContractFilesCold
+		}
+		for _, path := range plan.extract {
+			if c.live[path] {
+				c.dropUnit(path)
+				pending[path] = reason
+			}
+		}
+		// Candidate deltas never replace clock/byte/query proof, including source
+		// changes whose boundary and ProducedInputs digest stayed equal.
+		c.staleUnits(pending)
+	} else {
+		for path := range c.live {
+			pending[path] = viewmetrics.ContractFilesCold
+		}
 	}
 	for path := range c.excluded {
 		c.installExcluded(path)
@@ -2866,6 +2920,7 @@ func (c *contractConvergence) run() error {
 			zap.Duration("w_span_p90", spanP90), zap.Int("w_spans", len(c.spans)),
 			zap.Duration("w_pp", ppDuration), zap.Duration("w_fence", fenceDuration), zap.Duration("w_need", need))
 		if len(pending) == 0 && current {
+			complete = true
 			return nil
 		}
 		// An iteration that gets here made progress, so this only resets the
@@ -3262,6 +3317,14 @@ func (c *contractConvergence) seed(evidence *contractFollowupEvidence) error {
 	}
 	sort.Strings(repos)
 	for _, repo := range repos {
+		if c.snap.Seeds == nil && c.req.delta != nil {
+			for _, path := range c.livePathsOf(repo) {
+				if _, _, err := evidence.loadFile(path); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if c.snap.Seeds == nil {
 			for _, path := range c.livePathsOf(repo) {
 				unit := c.units[path]

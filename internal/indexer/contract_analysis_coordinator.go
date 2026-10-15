@@ -54,6 +54,7 @@ type ContractAnalysisCoordinatorOptions struct {
 
 type contractAnalysisJob struct {
 	id       string
+	delta    *contractDeltaSession
 	snapshot ContractFollowupSnapshot
 	targets  []ContractFollowupTarget
 	// trigger is what queued the job and queuedAt when; capture is how long
@@ -72,9 +73,10 @@ const contractJobTriggerInterest = "interest"
 // ordinary tools never capture, read or wait on contract payloads through
 // this component.
 type ContractAnalysisCoordinator struct {
-	options ContractAnalysisCoordinatorOptions
-	ctx     context.Context
-	cancel  context.CancelFunc
+	deltaCaches contractDeltaLRU
+	options     ContractAnalysisCoordinatorOptions
+	ctx         context.Context
+	cancel      context.CancelFunc
 	// workers joins every dispatcher and job goroutine.
 	workers   sync.WaitGroup
 	mu        sync.Mutex
@@ -276,12 +278,29 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 		sinceAccept = contractMillis(started.Sub(accepted))
 	}
 	dispatch := started.Sub(job.queuedAt)
-	c.options.Logger.Info("contract analysis job started", zap.String("mode", viewmetrics.ContractModeCold), zap.String("job", job.id),
+	startMode := viewmetrics.ContractModeCold
+	if job.delta != nil {
+		startMode = viewmetrics.ContractModeFill
+		if p := job.delta.cache; p != nil {
+			startMode = viewmetrics.ContractModeDelta
+			if p.identity != job.delta.identity || p.deltas+1 >= contractDeltaRefresh {
+				startMode = viewmetrics.ContractModeCold
+			} else if !p.complete {
+				startMode = viewmetrics.ContractModeFill
+			}
+		}
+		for _, target := range targets {
+			if contractDeltaMembershipUnknown(target.Work) {
+				startMode = viewmetrics.ContractModeCold
+			}
+		}
+	}
+	c.options.Logger.Info("contract analysis job started", zap.String("mode", startMode), zap.String("job", job.id),
 		zap.String("repo", targets[0].Key.RepoPrefix), zap.String("checkout", targets[0].Key.CheckoutID), zap.Int("targets", len(targets)),
 		zap.String("trigger", job.trigger), zap.Float64("since_trigger_ms", contractMillis(dispatch)),
 		zap.Float64("since_accept_ms", sinceAccept), zap.Float64("capture_ms", contractMillis(job.capture)))
 	report, err := RunContractFollowupBatch(c.ctx, ContractFollowupBatchRequest{Snapshot: job.snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: c.options.Registry, Config: c.options.Config, RepoConfigs: job.snapshot.RepoConfigs, Logger: c.options.Logger, Leases: c.options.Leases, ScratchParent: c.options.ScratchParent, Yield: c.options.Yield,
-		PublishedEpoch: c.publishedEpoch, WaitPublished: c.waitPublished})
+		PublishedEpoch: c.publishedEpoch, WaitPublished: c.waitPublished, delta: job.delta})
 	if err != nil {
 		c.options.Logger.Warn("contract cohort analysis failed", zap.Error(err))
 	}
@@ -303,8 +322,12 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 	if c.ctx.Err() != nil && err != nil {
 		outcome = viewmetrics.ContractJobPreempted
 	}
-	countContractJob(viewmetrics.ContractModeCold, outcome, elapsed)
-	logContractJob(c.options.Logger, viewmetrics.ContractModeCold, outcome, elapsed, report,
+	mode := report.Cohort.Mode
+	if mode == "" {
+		mode = viewmetrics.ContractModeCold
+	}
+	countContractJob(mode, outcome, elapsed)
+	logContractJob(c.options.Logger, mode, outcome, elapsed, report,
 		zap.Float64("dispatch_ms", contractMillis(dispatch)), zap.Float64("capture_ms", contractMillis(job.capture)))
 	return outcome
 }

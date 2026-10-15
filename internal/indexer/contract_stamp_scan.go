@@ -358,6 +358,22 @@ func (s *contractStampScanner) scan(ctx context.Context, paths []string) (Contra
 // the bytes between them. A row that no longer carries its stamp's identity
 // yields nothing for it.
 func (s *contractStampScanner) contents(ctx context.Context, stamps map[string]ContractReceiptStamp) (map[string]string, error) {
+	rows, err := s.selectedReceiptRows(ctx, stamps)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(rows))
+	for _, row := range rows {
+		for _, receipt := range []*graph.ContractBoundaryReceipt{row, row.Previous} {
+			if receipt != nil && !receipt.Deleted && receipt.Fingerprint == contractInputHash(receipt.Payload) {
+				out[receipt.Fingerprint] = contractReceiptContent(receipt.Payload, receipt.SourceFingerprint)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s *contractStampScanner) selectedReceiptRows(ctx context.Context, stamps map[string]ContractReceiptStamp) (map[string]*graph.ContractBoundaryReceipt, error) {
 	type group struct {
 		repo  string
 		gen   int64
@@ -373,7 +389,7 @@ func (s *contractStampScanner) contents(ctx context.Context, stamps map[string]C
 			}
 		}
 	}
-	out := make(map[string]string, len(stamps))
+	out := make(map[string]*graph.ContractBoundaryReceipt, len(stamps))
 	for g, paths := range groups {
 		var handle *store_sqlite.Store
 		for _, layer := range s.chains[g.repo] {
@@ -396,15 +412,47 @@ func (s *contractStampScanner) contents(ctx context.Context, stamps map[string]C
 				if row == nil || row.Fingerprint != stamp.Fingerprint || row.SourceFingerprint != stamp.SourceFingerprint {
 					continue
 				}
-				for _, receipt := range []*graph.ContractBoundaryReceipt{row, row.Previous} {
-					if receipt != nil && !receipt.Deleted && receipt.Fingerprint == contractInputHash(receipt.Payload) {
-						out[receipt.Fingerprint] = contractReceiptContent(receipt.Payload, receipt.SourceFingerprint)
-					}
-				}
+				out[path] = row
 			}
 		}
 	}
 	return out, ctx.Err()
+}
+
+// deltaReceipts reads exact winning payloads selected by stamps, then closes
+// their stamp bracket. Missing/torn rows remain unknown local deltas; no work
+// row or accepted/latest lookup substitutes for this selected-view evidence.
+func (s *contractStampScanner) deltaReceipts(ctx context.Context, stamps map[string]ContractReceiptStamp) (map[string]contractDeltaReceipt, error) {
+	out := make(map[string]contractDeltaReceipt)
+	rows, err := s.selectedReceiptRows(ctx, stamps)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(stamps))
+	for path := range stamps {
+		paths = append(paths, path)
+	}
+	for path, row := range rows {
+		stamp := stamps[path]
+		if !stamp.quiescent() || row.Deleted || row.Fingerprint != contractInputHash(row.Payload) {
+			continue
+		}
+		var receipt contractBoundaryReceipt
+		if json.Unmarshal(row.Payload, &receipt) != nil || receipt.Version != contractBoundaryReceiptVersion || receipt.FilePath != path {
+			continue
+		}
+		out[path] = contractDeltaReceipt{boundary: contractReceiptContent(row.Payload, row.SourceFingerprint), produced: cloneContractDeltaMap(receipt.ProducedInputs)}
+	}
+	closing, err := s.scan(ctx, paths)
+	if err != nil {
+		return nil, err
+	}
+	for path := range out {
+		if closing.Stamps[path] != stamps[path] || !closing.Stamps[path].quiescent() {
+			delete(out, path)
+		}
+	}
+	return out, nil
 }
 
 // contractReceiptContent digests a stored receipt payload with its source

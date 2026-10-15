@@ -547,6 +547,7 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 		scanner := newContractStampScanner(options.selectedInputs, handlesByRepo, census)
 		snapshot.Scan = scanner.scan
 		snapshot.ReceiptContents = scanner.contents
+		snapshot.deltaReceipts = scanner.deltaReceipts
 		for _, repo := range repos {
 			if handles := handlesByRepo[repo]; len(handles) > 0 {
 				// Every handle shares one store core, and with it the receipt

@@ -279,8 +279,8 @@ type contractActor struct {
 	}
 	// lastPublished is the key and seq the actor last published.
 	lastPublished contractActorKeySeq
-	// cache is the actor's delta state; unused until jobs keep any.
-	cache any
+	// Delta state lives in the coordinator LRU; this actor never owns a
+	// second pointer that could bypass global eviction.
 	// resolved is the latest seq a non-publishing end resolved, and how.
 	resolved       uint64
 	resolvedResult ContractActorResult
@@ -591,6 +591,7 @@ func (c *ContractAnalysisCoordinator) registerLocked(id ContractActor, now time.
 			}
 		}
 		if victim != nil {
+			c.deltaCaches.put(victim.id, nil)
 			delete(c.actors, victim.id)
 			victim.ring.actors = slices.DeleteFunc(victim.ring.actors, func(a *contractActor) bool { return a == victim })
 			victim.notifyLocked()
@@ -681,7 +682,7 @@ func (c *ContractAnalysisCoordinator) expireLocked(now time.Time) {
 			a.interestExpired = true
 			a.want.source.Release()
 			a.want.source = nil
-			a.retryOnInputs, a.dirty, a.cache = false, false, nil
+			a.retryOnInputs, a.dirty = false, false
 			c.setStateLocked(a, contractActorIdle)
 		case contractActorIdle:
 			// A stale primary capture can wait here with an unresolved
@@ -690,9 +691,9 @@ func (c *ContractAnalysisCoordinator) expireLocked(now time.Time) {
 			if a.retryOnInputs {
 				a.interestExpired = true
 			}
-			// Nothing will ask for the actor's inputs again: it keeps no
-			// delta state either.
-			a.retryOnInputs, a.dirty, a.cache = false, false, nil
+			// Interest expiry stops scheduling; cache eviction has its own
+			// independent global memory budget.
+			a.retryOnInputs, a.dirty = false, false
 		}
 	}
 }
@@ -1288,6 +1289,42 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	}
 	job := &contractAnalysisJob{id: id, snapshot: snapshot, targets: targets, trigger: trigger, queuedAt: triggeredAt, capture: captureDuration}
 	c.mu.Lock()
+	cached := c.deltaCaches.borrow(a.id)
+	c.mu.Unlock()
+	session, sessionErr := newContractDeltaSession(cached, snapshot, c.options.Config)
+	if sessionErr != nil {
+		c.mu.Lock()
+		c.deltaCaches.put(a.id, cached)
+		c.mu.Unlock()
+		release()
+		c.endCapture(a, want, ContractActorPending)
+		return
+	}
+	job.delta = session
+	// Registered after capture succeeds and before the body starts. Returning
+	// cache custody precedes panic recovery; a panic discards its unproven state.
+	returnedCache := false
+	returnCache := func(p *contractDeltaCache) {
+		if !returnedCache {
+			c.mu.Lock()
+			c.deltaCaches.put(a.id, p)
+			c.mu.Unlock()
+			returnedCache = true
+		}
+	}
+	defer func() {
+		recovered := recover()
+		returned := session.cache
+		if recovered != nil {
+			returned = nil
+		}
+		returnCache(returned)
+		if recovered != nil {
+			panic(recovered)
+		}
+	}()
+
+	c.mu.Lock()
 	c.setStateLocked(a, contractActorRunning)
 	c.mu.Unlock()
 	run := c.execute
@@ -1296,6 +1333,7 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	}
 	body := time.Now()
 	outcome := run(job)
+	returnCache(session.cache)
 	release()
 	c.endJob(a, want, outcome, time.Since(body))
 }

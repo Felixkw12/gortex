@@ -98,6 +98,7 @@ type ContractFollowupSnapshot struct {
 	// fingerprint. Nil means no move is known to keep a file's contract
 	// content.
 	ReceiptContents func(context.Context, map[string]ContractReceiptStamp) (map[string]string, error)
+	deltaReceipts   func(context.Context, map[string]ContractReceiptStamp) (map[string]contractDeltaReceipt, error)
 	// WindowGaps returns the quiet gaps a writer left between the core-write
 	// windows of the named paths that opened at or after since. Nil records
 	// none.
@@ -147,9 +148,12 @@ type ContractFollowupRequest struct {
 	WaitPublished  func(context.Context, uint64, time.Time) bool
 	// convergenceHooks are test seams at the job's interleaving points.
 	convergenceHooks *contractConvergenceHooks
+	delta            *contractDeltaSession
 }
 
 type ContractFollowupReport struct {
+	Mode, CacheReason                                string
+	ChangedFiles                                     []string
 	Files, Records, Nodes, Edges, Shapes             int
 	SourceReads, SourceBytes                         int
 	RebuildReason                                    ContractFollowupRebuildReason
@@ -213,6 +217,7 @@ type ContractFollowupBatchRequest struct {
 	PublishedEpoch         func() uint64
 	WaitPublished          func(context.Context, uint64, time.Time) bool
 	convergenceHooks       *contractConvergenceHooks
+	delta                  *contractDeltaSession
 }
 
 type ContractFollowupTargetResult struct {
@@ -254,6 +259,11 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 		lease := req.Leases.Acquire(target.Payload.ViewGeneration())
 		defer lease.Release()
 	}
+	if req.delta != nil {
+		for _, target := range req.Targets {
+			req.delta.membershipUnknown = req.delta.membershipUnknown || contractDeltaMembershipUnknown(target.Work)
+		}
+	}
 	prepared := &contractFollowupPrepared{}
 	defer func() {
 		if cleanupErr := prepared.close(); err == nil {
@@ -266,7 +276,7 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 		snap.Work = target.Work
 		snap.Release = func() {}
 		single := ContractFollowupRequest{Snapshot: snap, RebuildReason: req.RebuildReason, Payload: target.Payload, Catalog: target.Catalog, Registry: req.Registry, Config: req.Config, Logger: req.Logger, Leases: req.Leases, WorkspaceID: req.WorkspaceID, ProjectID: req.ProjectID, RepoConfigs: req.RepoConfigs, ScratchParent: req.ScratchParent, Yield: req.Yield,
-			PublishedEpoch: req.PublishedEpoch, WaitPublished: req.WaitPublished, convergenceHooks: req.convergenceHooks}
+			PublishedEpoch: req.PublishedEpoch, WaitPublished: req.WaitPublished, convergenceHooks: req.convergenceHooks, delta: req.delta}
 		report, targetErr := runContractFollowupPrepared(ctx, single, prepared)
 		batch.Targets = append(batch.Targets, ContractFollowupTargetResult{Key: target.Key, Report: report, Err: targetErr})
 		if prepared.registry == nil && targetErr != nil {
@@ -550,6 +560,7 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 // contractPreparedReport carries the shared cohort's preparation figures into
 // a later target's report.
 func contractPreparedReport(report, prepared ContractFollowupReport) ContractFollowupReport {
+	report.Mode, report.CacheReason, report.ChangedFiles, report.RebuildReason = prepared.Mode, prepared.CacheReason, prepared.ChangedFiles, prepared.RebuildReason
 	report.Files = prepared.Files
 	report.SourceReads = prepared.SourceReads
 	report.SourceBytes = prepared.SourceBytes
