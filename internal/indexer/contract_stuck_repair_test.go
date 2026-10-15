@@ -1087,3 +1087,21 @@ func TestContractRepairAdmissionFailureReleasesEarlierLanes(t *testing.T) {
 	require.True(t, ok)
 	release()
 }
+
+func TestContractRepairOrphanCandidateStartsAtItsGraceBoundary(t *testing.T) {
+	f := newRouteConstantFixture(t)
+	const path = "fixture/consts.go"
+	f.stageInFlight(path)
+	windows := f.store.OpenContractCoreWindows("fixture")
+	require.Len(t, windows, 1)
+	f.store.OrphanContractCoreWrites("fixture", "", map[string]uint64{path: windows[0].OpenerSeq})
+	windows = f.store.OrphanedContractCoreWindows("fixture")
+	require.Len(t, windows, 1)
+	mark := windows[0].MarkedAt
+	require.False(t, mark.IsZero())
+	r := &ContractStuckRepair{options: ContractStuckRepairOptions{Store: f.store}, period: time.Hour}
+	boundary := mark.Add(contractRepairOrphanGrace)
+	require.Less(t, boundary.Sub(windows[0].OpenedAt), r.period, "ordinary age eligibility must not mask orphan grace")
+	require.Empty(t, r.stuckWindows("fixture", boundary.Add(-time.Nanosecond)))
+	require.Equal(t, []string{path}, r.stuckWindows("fixture", boundary))
+}
