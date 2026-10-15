@@ -317,10 +317,12 @@ const (
 )
 
 // Contract repair kinds: a pending input-state header no save will accept,
-// and a receipt left unaccepted by a failed apply.
+// a receipt a failed apply left in flight, reindexed, and one whose
+// reindexes kept failing, excluded by a failure envelope.
 const (
 	ContractRepairPendingHeader = "pending_header"
 	ContractRepairStuckReceipt  = "stuck_receipt"
+	ContractRepairStuckEnvelope = "stuck_envelope"
 )
 
 // Committed-base generation shapes: self-contained, or composed over a parent.
@@ -817,6 +819,6 @@ var catalog = map[string]spec{
 		}},
 	}},
 	ContractRepairTotal: {kind: kindCounter, labels: []labelSpec{
-		{name: LabelKind, values: []string{ContractRepairPendingHeader, ContractRepairStuckReceipt}},
+		{name: LabelKind, values: []string{ContractRepairPendingHeader, ContractRepairStuckReceipt, ContractRepairStuckEnvelope}},
 	}},
 }

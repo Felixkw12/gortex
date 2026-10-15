@@ -68,6 +68,18 @@ const (
 // contractPanicRetry is how long after a panicking job its one retry runs.
 const contractPanicRetry = time.Second
 
+// contractRepairWait is where an actor that deferred an unsettled requeue to
+// the stuck repair is in the repair's passes.
+type contractRepairWait uint8
+
+const (
+	contractRepairWaitNone contractRepairWait = iota
+	// contractRepairWaitAsked: the actor waits for the next pass.
+	contractRepairWaitAsked
+	// contractRepairWaitSeen: a pass started after the actor deferred.
+	contractRepairWaitSeen
+)
+
 // Job triggers: what queued a job.
 const (
 	contractJobTriggerPublished = "published"
@@ -284,6 +296,9 @@ type contractActor struct {
 	// its key did not move: a capture refused stale, or a job ended
 	// unsettled once its requeue was spent.
 	retryOnInputs bool
+	// repairWait is set while an idle actor waits on a repair pass instead
+	// of a timer, and records once a pass of its cohort started since.
+	repairWait contractRepairWait
 	// dirty asks the dispatcher to capture a primary actor's inputs again,
 	// at dirtyEpoch, for a Published at dirtyAt.
 	dirty      bool
@@ -621,6 +636,9 @@ func (c *ContractAnalysisCoordinator) setStateLocked(a *contractActor, state con
 	}
 	if state != contractActorBackoff {
 		a.nextAttempt = time.Time{}
+	}
+	if state != contractActorIdle {
+		a.repairWait = contractRepairWaitNone
 	}
 	if had && !a.hasWork() {
 		c.capacityEpoch++
@@ -1309,23 +1327,29 @@ func (c *ContractAnalysisCoordinator) endJob(a *contractActor, want contractActo
 		}
 	case viewmetrics.ContractJobSupersededReadUnsettled, viewmetrics.ContractJobSupersededPublishRefused:
 		a.failures++
+		// A repair already due for the cohort is asked for before this end
+		// asks for its own scan.
+		due := !rerun && a.requeues > 0 && c.repairPending != nil && c.repairPending(a.repos)
+		if outcome == viewmetrics.ContractJobSupersededReadUnsettled && c.unsettled != nil {
+			// An apply that never completes leaves reads unsettled: the
+			// repair looks for rows an earlier process left in flight.
+			c.unsettled(a.repos)
+		}
 		if !rerun && !c.stallLocked(a, want.seq, outcome, now) {
 			switch {
 			case a.requeues == 0:
 				a.requeues++
 				countContractRequeue()
 				c.enqueueLocked(a, contractJobTriggerRequeue, now)
-			case c.repairPending != nil && c.repairPending(a.repos):
+			case due:
 				// A repair of what the job waited on is due: its accept
-				// announces itself, and the actor runs again then.
+				// announces itself, and the actor runs again then. A pass
+				// that repairs nothing backs the actor off instead.
 				a.retryOnInputs = true
 				c.setStateLocked(a, contractActorIdle)
+				a.repairWait = contractRepairWaitAsked
 			default:
-				a.retryOnInputs = true
-				c.setStateLocked(a, contractActorBackoff)
-				a.nextAttempt = now.Add(min(contractBackoffBase<<a.backoff, contractBackoffMax))
-				a.backoff++
-				a.ring.signal()
+				c.backoffLocked(a, now)
 			}
 		}
 	case viewmetrics.ContractJobPreempted:
@@ -1385,4 +1409,74 @@ func (c *ContractAnalysisCoordinator) stallLocked(a *contractActor, seq uint64, 
 	}
 	c.options.Logger.Info("contract analysis actor stalled", zap.String("actor", a.id.String()), zap.String("reason", reason), zap.Int("ends", a.failures))
 	return true
+}
+
+// backoffLocked retries an actor on the 1, 2, 4 … 30 s timer, or at the next
+// cohort Published, whichever comes first.
+func (c *ContractAnalysisCoordinator) backoffLocked(a *contractActor, now time.Time) {
+	a.retryOnInputs = true
+	c.setStateLocked(a, contractActorBackoff)
+	a.nextAttempt = now.Add(min(contractBackoffBase<<a.backoff, contractBackoffMax))
+	a.backoff++
+	a.ring.signal()
+}
+
+// attachRepair wires a stuck-input repair to the scheduler: an unsettled
+// job's actor waits for a due repair instead of a timer, and an unsettled
+// end asks the repair to scan the cohort's unaccepted rows.
+func (c *ContractAnalysisCoordinator) attachRepair(r *ContractStuckRepair) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.repairPending = r.Pending
+	c.unsettled = r.Scan
+}
+
+// repairPassStarted marks the actors of repo's cohort waiting on a repair
+// pass as seen by the pass starting now.
+func (c *ContractAnalysisCoordinator) repairPassStarted(repo string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, a := range c.actors {
+		if a.repairWait == contractRepairWaitAsked && a.inCohort(repo) {
+			a.repairWait = contractRepairWaitSeen
+		}
+	}
+}
+
+// repairPassEnded backs off the actors of repo's cohort a pass saw waiting
+// on it and that are waiting still: a pass that repaired announced a
+// Published, which queued them, so one still waiting was waiting on a pass
+// that found nothing to repair, or found the lane busy, and announces
+// nothing.
+func (c *ContractAnalysisCoordinator) repairPassEnded(repo string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	for _, a := range c.actors {
+		if a.repairWait != contractRepairWaitSeen || !a.inCohort(repo) {
+			continue
+		}
+		a.repairWait = contractRepairWaitNone
+		if a.state == contractActorIdle && a.retryOnInputs {
+			c.backoffLocked(a, now)
+		}
+	}
+}
+
+// deferredOnInputsSince is when the earliest actor of repo's cohort began
+// waiting on inputs not yet accepted with a current baseline, zero when
+// none waits.
+func (c *ContractAnalysisCoordinator) deferredOnInputsSince(repo string) time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var since time.Time
+	for _, a := range c.actors {
+		if a.state != contractActorDeferred || a.deferred != contractDeferredInputsAccepting || !a.inCohort(repo) {
+			continue
+		}
+		if since.IsZero() || a.deferredAt.Before(since) {
+			since = a.deferredAt
+		}
+	}
+	return since
 }

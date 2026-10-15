@@ -199,6 +199,43 @@ func contractReceiptWriteAt(stage string, keys []contractReceiptWriteKey) {
 	(*hook)(stage, paths)
 }
 
+// contractCoreWindowOpenHook, when set by a test, observes each primary
+// core-write window as it opens, under the write sequence's lock.
+var contractCoreWindowOpenHook atomic.Pointer[func(repo, checkout, path string)]
+
+// SetContractCoreWindowOpenHookForTest installs a hook called as each primary
+// core-write window opens, so a test can check what holds it open.
+func SetContractCoreWindowOpenHookForTest(hook func(repo, checkout, path string)) (restore func()) {
+	previous := contractCoreWindowOpenHook.Swap(&hook)
+	return func() { contractCoreWindowOpenHook.Store(previous) }
+}
+
+// ForgetContractReceiptWritesForTest drops what this process knows of the
+// receipt writes of paths, as a restarted process starts: their rows read
+// as written by an earlier one (seq 0, no window). Tests only.
+func (s *Store) ForgetContractReceiptWritesForTest(repo, checkout string, paths []string) {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, path := range paths {
+		key := contractReceiptWriteKey{repo, checkout, path}
+		delete(w.seq, key)
+		delete(w.settled, key)
+		delete(w.writing, key)
+		delete(w.openedAt, key)
+		delete(w.closed, key)
+		delete(w.gaps, key)
+		delete(w.orphaned, key)
+	}
+	w.notifyLocked()
+}
+
+func contractCoreWindowOpenedAt(key contractReceiptWriteKey) {
+	if hook := contractCoreWindowOpenHook.Load(); hook != nil && *hook != nil {
+		(*hook)(key.repo, key.checkout, key.path)
+	}
+}
+
 type contractReceiptWriteBracket struct{ begun, done uint64 }
 
 // beginContractReceiptWrites bumps the begun counter of every repository
@@ -236,6 +273,9 @@ func (s *Store) beginContractReceiptWrites(rows []graph.ContractBoundaryReceipt,
 		bump(key)
 		if window == contractCoreWindowOpened && !row.Accepted {
 			w.openLocked(key, w.seq[key], opened)
+			if s.viewGen == 0 {
+				contractCoreWindowOpenedAt(key)
+			}
 		}
 	}
 	for _, source := range sources {

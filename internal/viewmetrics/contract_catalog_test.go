@@ -67,7 +67,7 @@ func contractSeries() []struct {
 		rows = append(rows, row{viewmetrics.ContractBaselineTotal, []string{outcome},
 			"views_contract_baseline_total{outcome=" + outcome + "}"})
 	}
-	for _, kind := range []string{viewmetrics.ContractRepairPendingHeader, viewmetrics.ContractRepairStuckReceipt} {
+	for _, kind := range []string{viewmetrics.ContractRepairPendingHeader, viewmetrics.ContractRepairStuckReceipt, viewmetrics.ContractRepairStuckEnvelope} {
 		rows = append(rows, row{viewmetrics.ContractRepairTotal, []string{kind},
 			"views_contract_repair_total{kind=" + kind + "}"})
 	}

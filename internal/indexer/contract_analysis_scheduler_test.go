@@ -594,6 +594,65 @@ func TestContractSchedulerDefersRequeueToAPendingRepair(t *testing.T) {
 	require.Len(t, p.started(), 3)
 }
 
+// TestContractSchedulerBacksOffWhenARepairPassRepairsNothing: an actor that
+// deferred its unsettled requeue to a due repair is backed off on the timer
+// once a pass that started after the deferral ends without a Published; a
+// pass that started before it does not count.
+func TestContractSchedulerBacksOffWhenARepairPassRepairsNothing(t *testing.T) {
+	p := newSchedulerProbe(t, func(options *ContractAnalysisCoordinatorOptions) {
+		options.Inputs = func(_ context.Context, repos []string, repo string) (*graphview.SelectedContractInputs, error) {
+			return schedulerInputs(repos, "k"), nil
+		}
+	})
+	p.c.repairPending = func([]string) bool { return true }
+	p.outcome = func(_ string, n int) string {
+		if n <= 2 {
+			return viewmetrics.ContractJobSupersededReadUnsettled
+		}
+		return viewmetrics.ContractJobPublished
+	}
+	// A pass already running when the actor defers.
+	p.c.repairPassStarted("r")
+	first := p.schedule("", []string{"r"}, "r", "k")
+	p.waitStarts(2)
+	require.Eventually(t, func() bool { return p.c.Status(first.Actor).State == contractActorIdle.String() }, 10*time.Second, time.Millisecond)
+	p.c.repairPassEnded("r")
+	time.Sleep(1500 * time.Millisecond)
+	require.Len(t, p.started(), 2, "a pass that started before the deferral does not back the actor off")
+	p.c.repairPassStarted("r")
+	p.c.repairPassEnded("r")
+	require.Equal(t, contractActorBackoff.String(), p.c.Status(first.Actor).State, "a pass that repaired nothing backs the actor off")
+	require.Equal(t, ContractActorPublished, p.wait(first).Result, "the timer runs it again without a Published")
+	require.Len(t, p.started(), 3)
+}
+
+// TestContractSchedulerDoesNotDeferToTheScanItsOwnEndAsks: the scan an
+// unsettled end asks the repair for is not a repair already due; with none
+// due, the actor backs off on the timer at once.
+func TestContractSchedulerDoesNotDeferToTheScanItsOwnEndAsks(t *testing.T) {
+	p := newSchedulerProbe(t, func(options *ContractAnalysisCoordinatorOptions) {
+		options.Inputs = func(_ context.Context, repos []string, repo string) (*graphview.SelectedContractInputs, error) {
+			return schedulerInputs(repos, "k"), nil
+		}
+	})
+	// The repair is pending exactly while a scan it was asked for is.
+	var scans atomic.Int64
+	p.c.unsettled = func([]string) { scans.Add(1) }
+	p.c.repairPending = func([]string) bool { return scans.Load() > 1 }
+	p.outcome = func(_ string, n int) string {
+		if n <= 2 {
+			return viewmetrics.ContractJobSupersededReadUnsettled
+		}
+		return viewmetrics.ContractJobPublished
+	}
+	first := p.schedule("", []string{"r"}, "r", "k")
+	require.Equal(t, ContractActorPublished, p.wait(first).Result, "the timer runs it again")
+	require.Len(t, p.started(), 3)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	require.Equal(t, []string{contractJobTriggerInterest, contractJobTriggerRequeue, contractJobTriggerTimer}, p.triggers)
+}
+
 // TestContractSchedulerStallsAfterThreeNonPublishingEnds: three consecutive
 // jobs that did not publish flag the actor stalled and resolve its waiters;
 // the next Published schedules it again.

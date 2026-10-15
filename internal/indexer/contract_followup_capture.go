@@ -574,6 +574,21 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 			}
 			return out
 		}
+		if options.SuspectStuck != nil {
+			snapshot.Suspect = func(paths []string) {
+				for _, repo := range repos {
+					var own []string
+					for _, path := range paths {
+						if contractPathInRepo(path, repo, repos) {
+							own = append(own, path)
+						}
+					}
+					if len(own) > 0 {
+						options.SuspectStuck(repo, own)
+					}
+				}
+			}
+		}
 		snapshot.CensusFile = func(ctx context.Context, path string) (ContractFollowupFile, bool, error) {
 			for _, repo := range repos {
 				if contractPathInRepo(path, repo, repos) {

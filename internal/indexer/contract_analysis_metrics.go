@@ -97,3 +97,8 @@ func logContractJob(logger *zap.Logger, mode, outcome string, elapsed time.Durat
 	fields = append(fields, extra...)
 	logger.Info("contract analysis job", fields...)
 }
+
+// countContractRepair records one stuck-input repair by kind.
+func countContractRepair(kind string) {
+	viewmetrics.Count(viewmetrics.ContractRepairTotal, kind)
+}

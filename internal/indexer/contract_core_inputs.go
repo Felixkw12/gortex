@@ -228,12 +228,20 @@ func (j *contractCoreInputJournal) priorFailureEnvelope(ctx context.Context, pat
 // whose prior receipt is not already one. The caller's outer acceptance
 // accepts them with the rest of the pass.
 func (j *contractCoreInputJournal) stageFailureEnvelopes(ctx context.Context, paths []string) error {
+	return j.stageFailureEnvelopesOver(ctx, paths, false)
+}
+
+// stageFailureEnvelopesOver is stageFailureEnvelopes; with over it stages an
+// envelope even where the receipt under the path's row is one already. The
+// stuck-input repair excludes a row left in flight over an envelope that
+// way: only its own staging opens the window its accept then closes.
+func (j *contractCoreInputJournal) stageFailureEnvelopesOver(ctx context.Context, paths []string, over bool) error {
 	var staged []string
 	for _, path := range appendUniqueSorted(nil, paths...) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if j.priorFailureEnvelope(ctx, path) && !j.coldNamespace() {
+		if !over && j.priorFailureEnvelope(ctx, path) && !j.coldNamespace() {
 			continue
 		}
 		change := contractCoreInputChange{FilePath: path, SourceFingerprint: contractFailureEnvelopeSource(path), Uncertainty: contractFileIndexFailed}

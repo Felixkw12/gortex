@@ -97,6 +97,9 @@ type ContractAnalysisCoordinator struct {
 	// repairPending, when set, reports whether a stuck-input repair is due
 	// for a cohort: an unsettled job's actor then waits for its accept.
 	repairPending func(repos []string) bool
+	// unsettled, when set, asks the repair to scan a cohort a job could not
+	// settle its reads in.
+	unsettled func(repos []string)
 }
 
 func NewContractAnalysisCoordinator(options ContractAnalysisCoordinatorOptions) (*ContractAnalysisCoordinator, error) {

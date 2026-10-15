@@ -830,6 +830,10 @@ type contractConvergence struct {
 	blocks  int
 	waitOn  map[string]ContractReceiptStamp
 	waitAny bool
+	// stuck holds, per path a read was refused on with its window open,
+	// the stamp it was refused on and since when: a stamp no core write
+	// moved for a repair period is reported to the stuck-input repair once.
+	stuck map[string]contractStuckSample
 	// quietFrom is the clock of a point scan taken after the last read the
 	// job made, or 0 once a read may have followed it: a stamp that scan
 	// observed and a later scan finds moved moved after every read.
@@ -1112,6 +1116,7 @@ func (c *contractConvergence) block(path string, stamp ContractReceiptStamp) {
 		c.waitAny = true
 		return
 	}
+	c.noteStuck(path, stamp)
 	if c.waitOn == nil {
 		c.waitOn = make(map[string]ContractReceiptStamp)
 	}
@@ -3422,4 +3427,35 @@ func (c *contractConvergence) livePathsOf(repo string) []string {
 func (c *contractConvergence) closeEnrichment() {
 	closeContractEvidence(c.scratch, c.scratchDir)
 	c.evidence, c.scratch, c.scratchDir, c.registry = nil, nil, "", nil
+}
+
+// contractStuckSample is one path's refused stamp and since when.
+type contractStuckSample struct {
+	stamp    ContractReceiptStamp
+	since    time.Time
+	reported bool
+}
+
+// noteStuck tracks a read refused on path's open core-write window. A window
+// no core write moved for a repair period was left by a mutation that will
+// not close it: it is reported once, and the repair checks it again under
+// the repository's lane.
+func (c *contractConvergence) noteStuck(path string, stamp ContractReceiptStamp) {
+	if c.snap.Suspect == nil {
+		return
+	}
+	now := time.Now()
+	seen, ok := c.stuck[path]
+	if !ok || seen.stamp != stamp {
+		if c.stuck == nil {
+			c.stuck = make(map[string]contractStuckSample)
+		}
+		c.stuck[path] = contractStuckSample{stamp: stamp, since: now}
+		return
+	}
+	if !seen.reported && now.Sub(seen.since) >= ContractRepairPeriod {
+		seen.reported = true
+		c.stuck[path] = seen
+		c.snap.Suspect([]string{path})
+	}
 }

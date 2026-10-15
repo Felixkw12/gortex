@@ -96,7 +96,10 @@ type ContractFollowupSnapshot struct {
 	// windows of the named paths that opened at or after since. Nil records
 	// none.
 	WindowGaps func(paths []string, since time.Time) []time.Duration
-	Release    func()
+	// Suspect reports paths whose open core-write window a job was refused
+	// on, unmoved, for a repair period. Nil reports nothing.
+	Suspect func(paths []string)
+	Release func()
 }
 
 // errContractSourceMoved reports that a file's accepted bytes are no longer
