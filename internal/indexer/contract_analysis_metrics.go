@@ -8,9 +8,21 @@ import (
 )
 
 // countContractRequest records what one scheduling request did. Every return
-// path of the coordinator's Request records exactly one result.
+// path of the coordinator's Schedule records exactly one result; a worker
+// capture that fails other than stale records one error.
 func countContractRequest(result string) {
 	viewmetrics.Count(viewmetrics.ContractAnalysisRequestsTotal, result)
+}
+
+// countContractCapture records one scheduler capture of an actor's inputs.
+func countContractCapture(result string) {
+	viewmetrics.Count(viewmetrics.ContractAnalysisCapturesTotal, result)
+}
+
+// countContractRequeue records one job put back on its ring after an end
+// that left its key current and unpublished.
+func countContractRequeue() {
+	viewmetrics.Count(viewmetrics.ContractAnalysisRequeuedTotal)
 }
 
 // countContractJob records one finished attachment job and its body time.

@@ -194,6 +194,10 @@ const (
 	// ContractAnalysisRequestsTotal counts scheduling requests by what the
 	// request did: the answer every strict consumer's wait loop starts from.
 	ContractAnalysisRequestsTotal = "views_contract_analysis_requests_total"
+	// ContractAnalysisCapturesTotal counts the scheduler's census captures of
+	// an actor's inputs by result: a capture refused stale waits for the next
+	// input epoch, never retries at once.
+	ContractAnalysisCapturesTotal = "views_contract_analysis_captures_total"
 	// ContractAnalysisFilesTotal counts per-file extractions a job ran, by why
 	// the file was extracted. Its cold share is the whole-cohort cost.
 	ContractAnalysisFilesTotal = "views_contract_analysis_files_total"
@@ -279,6 +283,13 @@ const (
 	ContractRequestRefused          = "refused"
 	ContractRequestQueueFull        = "queue_full"
 	ContractRequestError            = "error"
+)
+
+// Contract analysis capture results.
+const (
+	ContractCaptureOK    = "ok"
+	ContractCaptureStale = "stale"
+	ContractCaptureError = "error"
 )
 
 // Why a job extracted one file.
@@ -780,6 +791,9 @@ var catalog = map[string]spec{
 			ContractRequestInputsPending, ContractRequestBaselineAdmitted,
 			ContractRequestRefused, ContractRequestQueueFull, ContractRequestError,
 		}},
+	}},
+	ContractAnalysisCapturesTotal: {kind: kindCounter, labels: []labelSpec{
+		{name: LabelResult, values: []string{ContractCaptureOK, ContractCaptureStale, ContractCaptureError}},
 	}},
 	ContractAnalysisFilesTotal: {kind: kindCounter, labels: []labelSpec{
 		{name: LabelReason, values: []string{

@@ -1334,7 +1334,7 @@ func TestContractJobProvesRetriedUnitsOneByOneUnderAWriter(t *testing.T) {
 // its deadline.
 func TestContractAnalysisCoordinatorPublishedIsLevelTriggered(t *testing.T) {
 	f := newContractWorkerFixture(t)
-	capture := func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+	capture := func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 		return ContractFollowupSnapshot{}, nil, graph.ErrContractProjectionStale
 	}
 	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: func(ctx context.Context) error { return ctx.Err() }})

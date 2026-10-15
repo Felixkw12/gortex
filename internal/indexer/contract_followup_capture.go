@@ -48,6 +48,8 @@ type ContractCaptureSource struct {
 	composesBase bool
 	sources      []graphview.GenerationSource
 	once         sync.Once
+	// onRelease, set only by tests, observes the release.
+	onRelease func()
 }
 
 // PrepareContractCaptureSource joins the view's lease and copies what the
@@ -70,7 +72,12 @@ func PrepareContractCaptureSource(view *graphview.RepoView) (*ContractCaptureSou
 // for a source no capture took. A nil source releases nothing.
 func (s *ContractCaptureSource) Release() {
 	if s != nil {
-		s.once.Do(s.handoff.Close)
+		s.once.Do(func() {
+			s.handoff.Close()
+			if s.onRelease != nil {
+				s.onRelease()
+			}
+		})
 	}
 }
 

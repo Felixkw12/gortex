@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,28 +82,17 @@ func TestContractDependencyBaselineSchedulesTheMissingPhysicalNamespace(t *testi
 			return ctx.Err()
 		}
 	}
-	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: store, Leases: leases, Registry: first.registry, Config: first.config, Capture: NewContractFollowupCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
+	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: store, Leases: leases, Registry: first.registry, Config: first.config, Capture: NewContractFollowupSourceCapture(options), Inputs: NewContractPrimaryInputCapture(materializer), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, coordinator.Close()); jobs.Wait() })
 	mi.SetContractCoreRuntime(ContractCoreRuntimeHooks{Published: coordinator.Published})
-	capture := func() *graphview.SelectedContractInputs {
-		var dependencies []*graphview.SelectedContractInputs
-		for _, repo := range []string{"a-certified", "b-missing", "c-missing", "d-missing"} {
-			input, err := materializer.CaptureContractInputs(ctx, nil, repo, "")
-			require.NoError(t, err)
-			dependencies = append(dependencies, input)
-		}
-		require.True(t, dependencies[0].State.Accepted)
-		input, err := graphview.ComposeSelectedContractInputs("a-certified", "", dependencies...)
-		require.NoError(t, err)
-		return input
-	}
-	pending := capture()
-	require.False(t, pending.State.Accepted)
-	admitted, err := coordinator.Request(ctx, nil, pending, "a-certified", "")
+	repos := []string{"a-certified", "b-missing", "c-missing", "d-missing"}
+	pending, err := NewContractPrimaryInputCapture(materializer)(ctx, repos, "a-certified")
 	require.NoError(t, err)
-	require.True(t, admitted)
-	key := graph.ContractAttachmentKey{RepoPrefix: "a-certified", InputVersion: pending.State.InputVersion, InputFingerprint: pending.State.InputFingerprint}
+	require.False(t, pending.State.Accepted)
+	scheduled, err := coordinator.Schedule(ctx, ContractScheduleRequest{Actor: NewContractActor("", repos), Key: graph.ContractAttachmentKey{RepoPrefix: "a-certified", InputVersion: pending.State.InputVersion, InputFingerprint: pending.State.InputFingerprint}, Inputs: pending, Epoch: coordinator.InputEpoch()})
+	require.NoError(t, err)
+	require.Equal(t, ContractDeferred, scheduled.Result)
 	for range 2 {
 		select {
 		case <-entered:
@@ -110,56 +100,31 @@ func TestContractDependencyBaselineSchedulesTheMissingPhysicalNamespace(t *testi
 			t.Fatal("missing physical namespaces had no baseline producer", ctx.Err())
 		}
 	}
-	// Both slots are occupied by witnessed producers. Register a separate
-	// missing dependency before releasing them; completion must wake it after
-	// capacity is available, even though this request cannot start a third job.
-	saturated, err := coordinator.Request(ctx, nil, nil, "d-missing", "")
-	require.NoError(t, err)
-	require.True(t, saturated)
+	// Both baseline slots are occupied by witnessed producers; the third
+	// missing namespace could not start. Their completion announces itself,
+	// the actor captures its inputs again, and the namespace still pending
+	// gets its producer once capacity is available.
 	resumeOnce.Do(func() { close(resume) })
-	require.NoError(t, coordinator.WaitChange(ctx, graph.ContractAttachmentKey{RepoPrefix: "d-missing"}))
-	require.NoError(t, coordinator.WaitChange(ctx, key), "the missing dependency must have an actual producer")
-	var complete *graphview.SelectedContractInputs
-	for {
-		complete = capture()
-		if complete.State.Accepted {
-			break
-		}
-		admitted, err = coordinator.Request(ctx, nil, complete, "a-certified", "")
-		if errors.Is(err, graph.ErrContractProjectionStale) {
-			continue
-		}
-		require.NoError(t, err)
-		require.True(t, admitted)
-		key.InputVersion, key.InputFingerprint = complete.State.InputVersion, complete.State.InputFingerprint
-		require.NoError(t, coordinator.WaitChange(ctx, key))
-	}
+	complete := scheduleUntilAttached(t, ctx, coordinator, materializer, repos, "a-certified")
+	require.True(t, complete.State.Accepted)
 	jobs.Wait()
-	baseline, err := store.ContractBoundaryReceiptBaselineContext(ctx, "b-missing", "")
-	require.NoError(t, err)
-	require.NotNil(t, baseline)
-	require.Equal(t, contractBoundaryReceiptVersion, baseline.Version)
-	admitted, err = coordinator.Request(ctx, nil, complete, "a-certified", "")
-	require.NoError(t, err)
-	require.True(t, admitted)
-	key.InputVersion, key.InputFingerprint = complete.State.InputVersion, complete.State.InputFingerprint
-	for {
-		analysis, err := materializer.OpenContractAnalysisForInputs(ctx, nil, complete)
-		if err == nil {
-			nodes, readErr := analysis.NodesByKindsContext(ctx, []graph.NodeKind{graph.KindContract})
-			require.NoError(t, readErr)
-			var ids []string
-			for _, node := range nodes {
-				ids = append(ids, node.ID)
-			}
-			require.Contains(t, ids, "http::GET::/dependency-route")
-			require.NoError(t, analysis.Validate(ctx))
-			analysis.Close()
-			break
-		}
-		require.Equal(t, graphview.CodeRequiredCapabilityIncomplete, graphview.CodeOf(err))
-		require.NoError(t, coordinator.WaitChange(ctx, key))
+	for _, repo := range repos[1:] {
+		baseline, err := store.ContractBoundaryReceiptBaselineContext(ctx, repo, "")
+		require.NoError(t, err)
+		require.NotNil(t, baseline, repo)
+		require.Equal(t, contractBoundaryReceiptVersion, baseline.Version)
 	}
+	analysis, err := materializer.OpenContractAnalysisForInputs(ctx, nil, complete)
+	require.NoError(t, err)
+	nodes, err := analysis.NodesByKindsContext(ctx, []graph.NodeKind{graph.KindContract})
+	require.NoError(t, err)
+	var ids []string
+	for _, node := range nodes {
+		ids = append(ids, node.ID)
+	}
+	require.Contains(t, ids, "http::GET::/dependency-route")
+	require.NoError(t, analysis.Validate(ctx))
+	analysis.Close()
 }
 
 func TestContractDependencyBaselineDoesNotInventAProducer(t *testing.T) {
@@ -182,40 +147,50 @@ func TestContractDependencyBaselineDoesNotInventAProducer(t *testing.T) {
 			require.NoError(t, err)
 			input, err := graphview.ComposeSelectedContractInputs("repo-a", "", a, b, b)
 			require.NoError(t, err)
-			calls := 0
-			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+			var calls atomic.Int64
+			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 				t.Error("unaccepted input reached attachment capture")
 				return ContractFollowupSnapshot{}, nil, errors.New("unexpected capture")
 			}, ReconcileBaseline: func(ctx context.Context, view *graphview.RepoView, repo, checkout string) (bool, error) {
-				calls++
-				require.Nil(t, view)
-				require.Equal(t, "repo-b", repo)
-				require.Empty(t, checkout)
+				calls.Add(1)
+				if view != nil || repo != "repo-b" || checkout != "" {
+					t.Errorf("baseline admission for view=%v repo=%q checkout=%q", view, repo, checkout)
+				}
 				if mode == "canceled" {
+					// The request gives up; the worker's admission is not
+					// the request's to cancel.
 					cancel()
-					return false, ctx.Err()
 				}
 				if mode == "changed" {
-					require.NoError(t, f.store.AcceptContractInputMutationContext(ctx, pending))
+					if err := f.store.AcceptContractInputMutationContext(ctx, pending); err != nil {
+						t.Error(err)
+					}
 				}
 				return false, nil
 			}, Yield: ContractAnalysisYield(nil)})
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, coordinator.Close()) })
-			admitted, err := coordinator.Request(ctx, nil, input, "repo-a", "")
-			require.False(t, admitted)
-			require.Equal(t, 1, calls, "duplicate physical witnesses must not duplicate repair admission")
+			actor := NewContractActor("", []string{"repo-a", "repo-b"})
+			scheduled, err := coordinator.Schedule(ctx, ContractScheduleRequest{Actor: actor, Key: graph.ContractAttachmentKey{RepoPrefix: "repo-a", InputVersion: input.State.InputVersion, InputFingerprint: input.State.InputFingerprint}, Inputs: input, Epoch: coordinator.InputEpoch()})
+			require.NoError(t, err)
+			require.Equal(t, ContractDeferred, scheduled.Result)
+			// No producer was admitted: the actor waits on the inputs'
+			// acceptance, or on their recapture once they moved.
+			require.Eventually(t, func() bool {
+				return coordinator.Status(actor).State == contractActorDeferred.String() || coordinator.Status(actor).Result == ContractActorInputsStale
+			}, 5*time.Second, time.Millisecond)
+			require.EqualValues(t, 1, calls.Load(), "duplicate physical witnesses must not duplicate repair admission")
+			wait, stop := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			defer stop()
+			status, err := coordinator.WaitActor(wait, actor, scheduled.ArrivalSeq)
 			switch mode {
-			case "refused":
-				require.NoError(t, err)
-			case "canceled":
-				require.ErrorIs(t, err, context.Canceled)
+			case "refused", "canceled":
+				require.ErrorIs(t, err, context.DeadlineExceeded, "no producer means no false progress: %+v", status)
+				require.Equal(t, contractActorDeferred.String(), coordinator.Status(actor).State)
 			case "changed":
-				require.ErrorIs(t, err, graph.ErrContractProjectionStale)
+				require.NoError(t, err)
+				require.Equal(t, ContractActorInputsStale, status.Result, "the accepted inputs are captured again")
 			}
-			coordinator.mu.Lock()
-			require.Empty(t, coordinator.baselines, "no false progress-only waiter may survive refusal")
-			coordinator.mu.Unlock()
 		})
 	}
 }
@@ -228,7 +203,16 @@ func TestContractDependencyBaselineAdmitsWhileAPrimarySourceApplies(t *testing.T
 	var admission sync.Mutex
 	var jobs sync.WaitGroup
 	options.BaselineAdmissionMu, options.BaselineJobs = &admission, &jobs
-	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: options.Store, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
+	reconcile := NewContractBaselineReconciler(options)
+	admittedBaseline := make(chan bool, 1)
+	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: options.Store, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: func(ctx context.Context, view *graphview.RepoView, repo, checkout string) (bool, error) {
+		started, err := reconcile(ctx, view, repo, checkout)
+		select {
+		case admittedBaseline <- started && err == nil:
+		default:
+		}
+		return started, err
+	}, Yield: options.Yield})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, coordinator.Close()); jobs.Wait() })
 	options.MultiIndexer.SetContractCoreRuntime(ContractCoreRuntimeHooks{Published: coordinator.Published})
@@ -242,19 +226,28 @@ func TestContractDependencyBaselineAdmitsWhileAPrimarySourceApplies(t *testing.T
 	// cold store's consumers waiting on a producer that never started. The
 	// job's census and writes serialize with core writes on the repository
 	// lanes and fence on the pending input state instead.
-	admitted, err := coordinator.Request(ctx, nil, input, "fixture", "")
+	actor := NewContractActor("", []string{"fixture"})
+	scheduled, err := coordinator.Schedule(ctx, ContractScheduleRequest{Actor: actor, Key: graph.ContractAttachmentKey{RepoPrefix: "fixture", InputVersion: input.State.InputVersion, InputFingerprint: input.State.InputFingerprint}, Inputs: input, Epoch: coordinator.InputEpoch()})
 	require.NoError(t, err)
-	require.True(t, admitted, "the baseline is admitted while a raw-source mutation applies")
+	require.Equal(t, ContractDeferred, scheduled.Result)
+	select {
+	case started := <-admittedBaseline:
+		require.True(t, started, "the baseline is admitted while a raw-source mutation applies")
+	case <-ctx.Done():
+		t.Fatal("no baseline admission")
+	}
 	require.NoError(t, mutation.Complete("accepted-after-apply"))
 	mutation.Release()
 	coordinator.Published(ctx, "fixture", "")
-	require.NoError(t, coordinator.WaitChange(ctx, graph.ContractAttachmentKey{RepoPrefix: "fixture", InputVersion: input.State.InputVersion, InputFingerprint: input.State.InputFingerprint}))
+	status, err := coordinator.WaitActor(ctx, actor, scheduled.ArrivalSeq)
+	require.NoError(t, err)
+	require.Equal(t, ContractActorInputsStale, status.Result)
 	jobs.Wait()
 	input, err = options.Materializer.CaptureContractInputs(ctx, nil, "fixture", "")
 	require.NoError(t, err)
 	require.True(t, input.State.Accepted)
 	reconciler := NewContractBaselineReconciler(options)
-	admitted, err = reconciler(ctx, nil, "fixture", "")
+	admitted, err := reconciler(ctx, nil, "fixture", "")
 	require.NoError(t, err)
 	require.False(t, admitted, "already certified primary input has no baseline repair producer")
 	admitted, err = reconciler(ctx, &graphview.RepoView{}, "fixture", "historical")

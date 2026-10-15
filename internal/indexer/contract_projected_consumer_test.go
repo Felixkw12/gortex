@@ -57,17 +57,16 @@ func TestContractProjectedConsumerPublishesTheMixedAcceptedAttachment(t *testing
 	var admission sync.Mutex
 	var jobs sync.WaitGroup
 	options := ContractFollowupCaptureOptions{Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }, BaselineAdmissionMu: &admission, BaselineJobs: &jobs}
-	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: store, Leases: leases, Registry: idx.registry, Config: idx.config, Capture: NewContractFollowupCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
+	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: store, Leases: leases, Registry: idx.registry, Config: idx.config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, coordinator.Close()); jobs.Wait() })
 	mi.SetContractCoreRuntime(ContractCoreRuntimeHooks{Published: coordinator.Published})
 	pending, err := materializer.CaptureContractInputs(ctx, nil, "fixture", "")
 	require.NoError(t, err)
 	require.False(t, pending.State.Accepted)
-	admitted, err := coordinator.Request(ctx, nil, pending, "fixture", "")
-	require.NoError(t, err)
-	require.True(t, admitted)
-	require.NoError(t, coordinator.WaitChange(ctx, graph.ContractAttachmentKey{RepoPrefix: "fixture", InputVersion: pending.State.InputVersion, InputFingerprint: pending.State.InputFingerprint}))
+	scheduled, status := scheduleAndWait(t, ctx, coordinator, []string{"fixture"}, "fixture", pending)
+	require.Equal(t, ContractDeferred, scheduled.Result)
+	require.Equal(t, ContractActorInputsStale, status.Result, "the baseline's Published resolves the pending promise")
 	jobs.Wait()
 	accepted, err := materializer.CaptureContractInputs(ctx, nil, "fixture", "")
 	require.NoError(t, err)
@@ -83,27 +82,21 @@ func TestContractProjectedConsumerPublishesTheMixedAcceptedAttachment(t *testing
 	require.NotEmpty(t, receipt.ProducedInputs[contractBoundaryLookupKey("fixture", "symbol_name", "tree_sitter_demo")])
 	require.Equal(t, true, store.GetNode("fixture/src/parser.c").Meta[generatedParserProjectionMetaKey], "repair must retain the actual accepted core projection")
 
-	admitted, err = coordinator.Request(ctx, nil, accepted, "fixture", "")
-	require.NoError(t, err, "capture must recognize the actual accepted projected receipt policy")
-	require.True(t, admitted)
-	key := graph.ContractAttachmentKey{RepoPrefix: "fixture", InputVersion: accepted.State.InputVersion, InputFingerprint: accepted.State.InputFingerprint}
-	for {
-		analysis, openErr := materializer.OpenContractAnalysisForInputs(ctx, nil, accepted)
-		if openErr == nil {
-			contracts, readErr := analysis.NodesByKindsContext(ctx, []graph.NodeKind{graph.KindContract})
-			require.NoError(t, readErr)
-			var ids []string
-			for _, contract := range contracts {
-				ids = append(ids, contract.ID)
-			}
-			require.Contains(t, ids, "http::GET::/with-generated-parser")
-			require.NoError(t, analysis.Validate(ctx))
-			analysis.Close()
-			break
-		}
-		require.Equal(t, graphview.CodeRequiredCapabilityIncomplete, graphview.CodeOf(openErr))
-		require.NoError(t, coordinator.WaitChange(ctx, key))
+	// The capture must recognize the actual accepted projected receipt
+	// policy: the job publishes.
+	_, status = scheduleAndWait(t, ctx, coordinator, []string{"fixture"}, "fixture", accepted)
+	require.Equal(t, ContractActorPublished, status.Result)
+	analysis, openErr := materializer.OpenContractAnalysisForInputs(ctx, nil, accepted)
+	require.NoError(t, openErr)
+	contracts, readErr := analysis.NodesByKindsContext(ctx, []graph.NodeKind{graph.KindContract})
+	require.NoError(t, readErr)
+	var ids []string
+	for _, contract := range contracts {
+		ids = append(ids, contract.ID)
 	}
+	require.Contains(t, ids, "http::GET::/with-generated-parser")
+	require.NoError(t, analysis.Validate(ctx))
+	analysis.Close()
 	require.NotNil(t, store.GetNode("fixture/src/parser.c::tree_sitter_demo"), "selected public declaration evidence remains in the core")
 }
 

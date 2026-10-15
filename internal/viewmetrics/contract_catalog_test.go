@@ -46,6 +46,10 @@ func contractSeries() []struct {
 		rows = append(rows, row{viewmetrics.ContractAnalysisRequestsTotal, []string{result},
 			"views_contract_analysis_requests_total{result=" + result + "}"})
 	}
+	for _, result := range []string{viewmetrics.ContractCaptureOK, viewmetrics.ContractCaptureStale, viewmetrics.ContractCaptureError} {
+		rows = append(rows, row{viewmetrics.ContractAnalysisCapturesTotal, []string{result},
+			"views_contract_analysis_captures_total{result=" + result + "}"})
+	}
 	for _, reason := range []string{
 		viewmetrics.ContractFilesCold, viewmetrics.ContractFilesFill, viewmetrics.ContractFilesDelta,
 		viewmetrics.ContractFilesRetry, viewmetrics.ContractFilesStale, viewmetrics.ContractFilesKeyCheck,

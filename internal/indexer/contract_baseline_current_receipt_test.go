@@ -109,32 +109,24 @@ func TestContractBaselineReusesCurrentAcceptedReceiptThroughAttachment(t *testin
 			var admission sync.Mutex
 			var jobs sync.WaitGroup
 			options.BaselineAdmissionMu, options.BaselineJobs = &admission, &jobs
-			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: options.Store, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
+			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: options.Store, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), Inputs: NewContractPrimaryInputCapture(options.Materializer), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 			require.NoError(t, err)
 			defer coordinator.Close()
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			admitted, err := coordinator.Request(ctx, nil, inputs, "fixture", "")
+			attached := scheduleUntilAttached(t, ctx, coordinator, options.Materializer, []string{"fixture"}, "fixture")
+			require.Equal(t, inputs.State, attached.State)
+			analysis, err := options.Materializer.OpenContractAnalysisForInputs(ctx, nil, inputs)
 			require.NoError(t, err)
-			require.True(t, admitted)
-			key := graph.ContractAttachmentKey{RepoPrefix: "fixture", InputVersion: inputs.State.InputVersion, InputFingerprint: inputs.State.InputFingerprint}
-			for {
-				analysis, err := options.Materializer.OpenContractAnalysisForInputs(ctx, nil, inputs)
-				if err == nil {
-					nodes, err := analysis.NodesByKindsContext(ctx, []graph.NodeKind{graph.KindContract})
-					require.NoError(t, err)
-					var ids []string
-					for _, node := range nodes {
-						ids = append(ids, node.ID)
-					}
-					require.Contains(t, ids, "http::GET::/reused-current")
-					require.NoError(t, analysis.Validate(ctx))
-					analysis.Close()
-					break
-				}
-				require.Equal(t, graphview.CodeRequiredCapabilityIncomplete, graphview.CodeOf(err))
-				require.NoError(t, coordinator.WaitChange(ctx, key))
+			nodes, err := analysis.NodesByKindsContext(ctx, []graph.NodeKind{graph.KindContract})
+			require.NoError(t, err)
+			var ids []string
+			for _, node := range nodes {
+				ids = append(ids, node.ID)
 			}
+			require.Contains(t, ids, "http::GET::/reused-current")
+			require.NoError(t, analysis.Validate(ctx))
+			analysis.Close()
 			require.Zero(t, spy.reads.Load(), "worker must use accepted core evidence and the frozen helper policy")
 		})
 	}

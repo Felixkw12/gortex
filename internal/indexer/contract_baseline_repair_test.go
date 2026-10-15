@@ -65,7 +65,7 @@ func TestContractBaselineRepairsStaleReceiptsFromAcceptedCore(t *testing.T) {
 			var jobs sync.WaitGroup
 			options.BaselineAdmissionMu = &admission
 			options.BaselineJobs = &jobs
-			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: store, Leases: leases, Registry: idx.registry, Config: idx.config, Capture: NewContractFollowupCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
+			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: store, Leases: leases, Registry: idx.registry, Config: idx.config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 			require.NoError(t, err)
 			defer coordinator.Close()
 			mi.SetContractCoreRuntime(ContractCoreRuntimeHooks{Published: coordinator.Published})
@@ -74,10 +74,11 @@ func TestContractBaselineRepairsStaleReceiptsFromAcceptedCore(t *testing.T) {
 			require.False(t, pendingInputs.State.Accepted)
 			requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			admitted, err := coordinator.Request(requestCtx, nil, pendingInputs, "fixture", "")
-			require.NoError(t, err)
-			require.True(t, admitted)
-			require.NoError(t, coordinator.WaitChange(requestCtx, graph.ContractAttachmentKey{RepoPrefix: "fixture", InputVersion: pendingInputs.State.InputVersion, InputFingerprint: pendingInputs.State.InputFingerprint}))
+			// The pending inputs admit their baseline on the worker; the
+			// baseline's Published resolves the request's promise.
+			scheduled, status := scheduleAndWait(t, requestCtx, coordinator, []string{"fixture"}, "fixture", pendingInputs)
+			require.Equal(t, ContractDeferred, scheduled.Result)
+			require.Equal(t, ContractActorInputsStale, status.Result)
 			jobs.Wait()
 			stats := authority.Stats()
 			require.Equal(t, uint64(3), stats.Entries[OutputEntryContractBaseline], "begin, receipt chunk, and final acceptance each name their real output")

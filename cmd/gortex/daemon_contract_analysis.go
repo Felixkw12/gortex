@@ -51,7 +51,7 @@ func installDaemonContractAnalysis(state *daemonState, logger *zap.Logger) (*dae
 	}
 	cfg := primaryConfig.Index
 	captureOptions := indexer.ContractFollowupCaptureOptions{Context: ctx, Store: store, Materializer: materializer, MultiIndexer: state.multiIndexer, Registry: state.indexer.Registry(), Config: cfg, Logger: logger, BaselineAdmissionMu: &runtime.baselineAdmissionMu, BaselineJobs: &runtime.baselineJobs, Yield: contractAnalysisYield(state.mcpServer.ContractAnalysisShouldYield)}
-	coordinator, err := indexer.NewContractAnalysisCoordinator(indexer.ContractAnalysisCoordinatorOptions{RequireRepoConfigs: true, Store: store, Leases: materializer.Leases, Registry: state.indexer.Registry(), Config: cfg, Logger: logger, Capture: indexer.NewContractFollowupCapture(captureOptions), ReconcileBaseline: indexer.NewContractBaselineReconciler(captureOptions), Yield: contractAnalysisYield(state.mcpServer.ContractAnalysisShouldYield)})
+	coordinator, err := indexer.NewContractAnalysisCoordinator(indexer.ContractAnalysisCoordinatorOptions{RequireRepoConfigs: true, Store: store, Leases: materializer.Leases, Registry: state.indexer.Registry(), Config: cfg, Logger: logger, Capture: indexer.NewContractFollowupSourceCapture(captureOptions), Inputs: indexer.NewContractPrimaryInputCapture(materializer), ReconcileBaseline: indexer.NewContractBaselineReconciler(captureOptions), Yield: contractAnalysisYield(state.mcpServer.ContractAnalysisShouldYield)})
 	if err != nil {
 		cancel()
 		return nil, err
