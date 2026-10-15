@@ -282,6 +282,29 @@ func TestContractStuckRepairWaitsForABusyLane(t *testing.T) {
 	require.Less(t, busyLaneRepair(t), contractRepairLanePoll+time.Second, "repaired once the lane was free, without waiting for another period")
 }
 
+func TestContractStuckRepairBusyPassSchedulesAnotherPass(t *testing.T) {
+	mi := &MultiIndexer{}
+	release, ok := mi.TryRepositoryMutationLanes([]string{"fixture"})
+	require.True(t, ok)
+	defer release()
+	core, logs := observer.New(zapcore.InfoLevel)
+	r := &ContractStuckRepair{
+		options: ContractStuckRepairOptions{MultiIndexer: mi, Logger: zap.New(core)},
+		// Expire the pass budget so the first failed lane acquisition takes
+		// the busy branch, with no poll or background watcher to wake it.
+		period: -time.Nanosecond,
+		ctx:    t.Context(),
+	}
+	state := &contractRepoRepair{repo: "fixture", wake: make(chan struct{}, 1)}
+	r.pass(state)
+	require.Len(t, logs.FilterMessage("contract stuck repair").FilterField(zap.String("outcome", "busy")).All(), 1)
+	select {
+	case <-state.wake:
+	default:
+		t.Fatal("a busy pass must schedule another pass without a watcher event")
+	}
+}
+
 // busyLaneRepair holds the fixture repository's lane over a stuck window for
 // longer than a repair period, checking that the repair waits and the
 // dispatcher does not, releases it and returns how long after the release
