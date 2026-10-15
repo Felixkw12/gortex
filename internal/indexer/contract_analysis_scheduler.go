@@ -279,6 +279,9 @@ type contractActor struct {
 	}
 	// lastPublished is the key and seq the actor last published.
 	lastPublished contractActorKeySeq
+	// lastCohort is immutable after installation; readers retain its pointer
+	// under mu and copy owned values only after releasing mu.
+	lastCohort *ContractPublishedCohort
 	// Delta state lives in the coordinator LRU; this actor never owns a
 	// second pointer that could bypass global eviction.
 	// resolved is the latest seq a non-publishing end resolved, and how.
@@ -1347,11 +1350,18 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	outcome := run(job)
 	returnCache(session.cache)
 	release()
-	c.endJob(a, want, outcome, time.Since(body))
+	c.endJob(a, want, outcome, time.Since(body), job.publication)
 }
 
 // endJob moves an actor out of its job by how the job ended.
-func (c *ContractAnalysisCoordinator) endJob(a *contractActor, want contractActorWant, outcome string, elapsed time.Duration) {
+func (c *ContractAnalysisCoordinator) endJob(a *contractActor, want contractActorWant, outcome string, elapsed time.Duration, publication ...*ContractPublishedCohort) {
+	// Job-owned proof is immutable once installed. Clone corpus-sized values
+	// before taking the scheduler mutex; Schedule/status never wait on that copy.
+	var owned *ContractPublishedCohort
+	if outcome == viewmetrics.ContractJobPublished && len(publication) > 0 && contractPublishedCohortComplete(publication[0]) {
+		owned = cloneContractPublishedCohort(publication[0])
+		owned.Seq = want.seq
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	a.running = struct {
@@ -1374,6 +1384,9 @@ func (c *ContractAnalysisCoordinator) endJob(a *contractActor, want contractActo
 		a.resolveLocked(want.seq, ContractActorNoop)
 		c.setStateLocked(a, contractActorIdle)
 	case viewmetrics.ContractJobPublished:
+		if owned != nil {
+			a.lastCohort = owned
+		}
 		a.lastPublished = contractActorKeySeq{want.key, want.seq}
 		a.failures, a.requeues, a.backoff, a.panicked, a.failedKey = 0, 0, 0, false, ""
 		a.stalled.cycles, a.stalled.reason = 0, ""

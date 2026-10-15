@@ -53,10 +53,11 @@ type ContractAnalysisCoordinatorOptions struct {
 }
 
 type contractAnalysisJob struct {
-	id       string
-	delta    *contractDeltaSession
-	snapshot ContractFollowupSnapshot
-	targets  []ContractFollowupTarget
+	id          string
+	publication *ContractPublishedCohort
+	delta       *contractDeltaSession
+	snapshot    ContractFollowupSnapshot
+	targets     []ContractFollowupTarget
 	// trigger is what queued the job and queuedAt when; capture is how long
 	// capturing its snapshot took.
 	trigger  string
@@ -317,6 +318,12 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 	}
 	if err == nil {
 		err = targetErr
+	}
+	// Only the plural transaction's complete target vector proves this cohort.
+	// Previously attached targets skipped above have their own historical proof;
+	// never invent it from this job's current source witnesses or stamps.
+	if err == nil && len(targets) == len(job.targets) && contractPublishedCohortComplete(report.Publication) {
+		job.publication = cloneContractPublishedCohort(report.Publication)
 	}
 	elapsed := time.Since(started)
 	outcome := contractJobOutcome(err)

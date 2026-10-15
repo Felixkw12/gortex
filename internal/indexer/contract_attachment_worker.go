@@ -230,12 +230,14 @@ type ContractFollowupTargetResult struct {
 }
 
 type ContractFollowupBatchReport struct {
-	Cohort  ContractFollowupReport
-	Targets []ContractFollowupTargetResult
+	Publication *ContractPublishedCohort
+	Cohort      ContractFollowupReport
+	Targets     []ContractFollowupTargetResult
 }
 
 type contractFollowupPrepared struct {
 	publications []store_sqlite.ContractAttachmentPublishTarget
+	proof        *ContractPublishedCohort
 	coverage     contractCoveredWork
 	work         []graph.ContractWork
 	registry     *contracts.Registry
@@ -313,6 +315,7 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 		acceptContractPublication(&batch.Targets[i].Report, result, elapsed)
 	}
 	prepared.report.PublishDuration, prepared.report.Published = elapsed, true
+	batch.Publication = contractPublishedResults(prepared.proof, prepared.publications, results)
 
 	batch.Cohort = prepared.report
 	return batch, nil
@@ -438,6 +441,7 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 			return report, runErr
 		}
 		prepared.coverage = engine.coverage.sealed
+		prepared.proof = contractPublishedProof(snap.Inputs, engine.clock, snap.Key.CheckoutID)
 		registry, evidence = engine.registry, engine.evidence
 		report.PrepareDuration = time.Since(prepareStart)
 		report.ScratchNodes, report.ScratchEdges = evidence.writtenNodes, evidence.writtenEdges

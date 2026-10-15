@@ -56,7 +56,9 @@ func TestContractCoordinatorRetiresDuplicateLoserAndKeepsWinner(t *testing.T) {
 	}, Yield: func(ctx context.Context) error { return ctx.Err() }})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, c.Close()) }()
-	outcome := c.execute(&contractAnalysisJob{id: "atomic-duplicate", snapshot: snapshot, targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Catalog: f.store}, {Key: b.Snapshot.Key, Work: b.Snapshot.Work, Catalog: f.store}}, queuedAt: time.Now()})
+	job := &contractAnalysisJob{id: "atomic-duplicate", snapshot: snapshot, targets: []ContractFollowupTarget{{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Catalog: f.store}, {Key: b.Snapshot.Key, Work: b.Snapshot.Work, Catalog: f.store}}, queuedAt: time.Now()}
+	outcome := c.execute(job)
+	require.Nil(t, job.publication, "an older race winner has no newly certified historical receipt stamps")
 	require.Equal(t, viewmetrics.ContractJobPublished, outcome)
 	require.True(t, raced)
 	header, err := f.store.GetContractAttachmentContext(t.Context(), a.Snapshot.Key)

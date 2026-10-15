@@ -155,6 +155,31 @@ func TestContractAnalysisCoordinatorCoalescesOwnedCohortAndPublishesBothTargets(
 			t.Fatalf("attachment %v: %v %v", key, header, err)
 		}
 	}
+	cohort, releaseCohort, readErr := c.AcquireLastPublishedCohort(ctx, actor)
+	require.NoError(t, readErr)
+	require.Equal(t, first.ArrivalSeq, cohort.Seq)
+	require.Equal(t, f.inputs, cohort.Witnesses)
+	require.Len(t, cohort.Stamps, len(f.files))
+	require.Len(t, cohort.Targets, 2)
+	for _, target := range cohort.Targets {
+		header, readErr := f.store.GetContractAttachmentContext(ctx, target.Key)
+		require.NoError(t, readErr)
+		require.Equal(t, header.PayloadGeneration, target.PayloadGeneration)
+		require.True(t, f.leases.InUse(target.PayloadGeneration))
+	}
+	cohort.Witnesses[0].State.InputFingerprint = "caller mutation"
+	cohort.Targets[0].Key.InputFingerprint = "caller target mutation"
+	cohort.ExpectedTargets[0].InputFingerprint = "caller expected mutation"
+	clear(cohort.Stamps)
+	releaseCohort()
+	again, releaseAgain, readErr := c.AcquireLastPublishedCohort(ctx, actor)
+	require.NoError(t, readErr)
+	require.Equal(t, f.inputs, again.Witnesses)
+	require.Len(t, again.Targets, 2)
+	require.Equal(t, contractPublishedExpectedTargets(f.inputs, ""), again.ExpectedTargets)
+	require.NotEqual(t, "caller target mutation", again.Targets[0].Key.InputFingerprint)
+	require.Len(t, again.Stamps, len(f.files))
+	releaseAgain()
 	if err := c.CloseContext(ctx); err != nil {
 		t.Fatal(err)
 	}
