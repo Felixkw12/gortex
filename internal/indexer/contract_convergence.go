@@ -171,6 +171,7 @@ type contractUnit struct {
 const (
 	contractReadExtractionFile  = "extraction_file"
 	contractReadFile            = "file"
+	contractReadFileNodes       = "file_nodes"
 	contractReadIDs             = "ids"
 	contractReadNames           = "names"
 	contractReadConstCandidates = "constant_candidates"
@@ -389,7 +390,7 @@ func (m contractMoves) depends(path string, read contractRecordedRead) bool {
 		args = args[:min(1, len(args))]
 	case contractReadIDs, contractReadConstants, contractReadEndpoints:
 		prefix = "id:"
-	case contractReadFile, contractReadExtractionFile:
+	case contractReadFile, contractReadFileNodes, contractReadExtractionFile:
 		prefix = "path:"
 	default:
 		return true
@@ -482,7 +483,7 @@ func (m contractMoves) affected(read contractRecordedRead) bool {
 		args = args[:min(1, len(args))]
 	case contractReadIDs, contractReadConstants, contractReadEndpoints:
 		prefix = "id:"
-	case contractReadFile, contractReadExtractionFile:
+	case contractReadFile, contractReadFileNodes, contractReadExtractionFile:
 		prefix = "path:"
 	default:
 		return true
@@ -2349,6 +2350,11 @@ func (c *contractConvergence) ask(evidence *contractFollowupEvidence, read contr
 		}
 		nodes, edges, err := evidence.loadFile(read.args[0])
 		return contractFileAnswer{Nodes: nodes, Edges: edges}, err
+	case contractReadFileNodes:
+		if len(read.args) != 1 {
+			break
+		}
+		return evidence.loadFileNodes(read.args[0])
 	case contractReadExtractionFile:
 		if len(read.args) != 1 {
 			break

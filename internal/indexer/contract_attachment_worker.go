@@ -844,10 +844,11 @@ type contractFollowupEvidence struct {
 	// guard brackets every read the facade answers from the core.
 	guard *contractReadGuard
 	// semantic answers binding-type lookups from the selected core.
-	semantic     graph.SemanticBindingTypeReader
-	readCore     func(context.Context, ContractFollowupFile) (ContractFollowupCoreFile, error)
-	allowedRepos map[string]bool
-	loaded       map[string]bool
+	semantic        graph.SemanticBindingTypeReader
+	readCore        func(context.Context, ContractFollowupFile) (ContractFollowupCoreFile, error)
+	allowedRepos    map[string]bool
+	loaded          map[string]bool
+	loadedFileNodes map[string]bool
 	// Completed names belong to this private, single-worker captured evidence.
 	// Keep raw row counts so cached names still consume the request's budget;
 	// scratch results and final accepted-source fences remain live.
@@ -1101,28 +1102,9 @@ func (e *contractFollowupEvidence) loadFileRows(path string) ([]*graph.Node, []*
 		e.fail(graph.ErrContractProjectionLimit)
 		return nil, nil, e.err
 	}
-	var nodes []*graph.Node
-	fileFound := false
-	for _, node := range rows.Nodes {
-		if node == nil || node.FilePath != path || node.RepoPrefix != file.RepoPrefix {
-			e.fail(fmt.Errorf("contract followup: selected file identity mismatch %q", path))
-			return nil, nil, e.err
-		}
-		if node.Kind == graph.KindContract || node.Kind == graph.KindContractBridge || node.Kind == graph.KindConfigKey {
-			continue
-		}
-		copyNode := e.detach(node)
-		if copyNode == nil {
-			return nil, nil, e.err
-		}
-		nodes = append(nodes, copyNode)
-		if node.Kind == graph.KindFile || (node.Kind == graph.KindFixture && node.ID == path && fixtures.IsFixturePath(path) && node.Meta["fixture"] == true) {
-			fileFound = true
-		}
-	}
-	if !fileFound {
-		e.fail(fmt.Errorf("contract followup: accepted census file has no selected core owner %q", path))
-		return nil, nil, e.err
+	nodes, err := e.detachFileNodes(path, file, rows.Nodes)
+	if err != nil {
+		return nil, nil, err
 	}
 	var edges []*graph.Edge
 	for _, edge := range rows.Edges {
@@ -1145,14 +1127,104 @@ func (e *contractFollowupEvidence) loadFileRows(path string) ([]*graph.Node, []*
 		}
 		edges = append(edges, &copyEdge)
 	}
-	e.AddBatch(nodes, edges)
+	if e.loadedFileNodes[path] {
+		// Node-only consumers may already have enriched these private rows.
+		// Extend their edge evidence without replacing scratch mutations or
+		// derived nodes with the original selected-core declarations.
+		current, readErr := graph.ContractFileNodesContext(e.ctx, e.scratch, file.RepoPrefix, []string{path})
+		if readErr != nil {
+			e.fail(readErr)
+			return nil, nil, readErr
+		}
+		nodes = current[path]
+		e.AddBatch(nil, edges)
+	} else {
+		e.AddBatch(nodes, edges)
+	}
 	e.loaded[path] = true
 	return nodes, edges, e.err
 }
+
+func (e *contractFollowupEvidence) detachFileNodes(path string, file ContractFollowupFile, raw []*graph.Node) ([]*graph.Node, error) {
+	var nodes []*graph.Node
+	fileFound := false
+	for _, node := range raw {
+		if node == nil || node.FilePath != path || node.RepoPrefix != file.RepoPrefix {
+			e.fail(fmt.Errorf("contract followup: selected file identity mismatch %q", path))
+			return nil, e.err
+		}
+		if node.Kind == graph.KindContract || node.Kind == graph.KindContractBridge || node.Kind == graph.KindConfigKey {
+			continue
+		}
+		copyNode := e.detach(node)
+		if copyNode == nil {
+			return nil, e.err
+		}
+		nodes = append(nodes, copyNode)
+		if node.Kind == graph.KindFile || (node.Kind == graph.KindFixture && node.ID == path && fixtures.IsFixturePath(path) && node.Meta["fixture"] == true) {
+			fileFound = true
+		}
+	}
+	if !fileFound {
+		e.fail(fmt.Errorf("contract followup: accepted census file has no selected core owner %q", path))
+		return nil, e.err
+	}
+	return nodes, nil
+}
+
+// loadFileNodes answers node-only consumers without importing outgoing edges.
+// A later full file load still reads every edge through loadFileRows.
+func (e *contractFollowupEvidence) loadFileNodes(path string) ([]*graph.Node, error) {
+	e.ledger.owner(path)
+	e.ledger.key("path:", path)
+	defer e.guard.enter()()
+	nodes, err := e.loadFileNodeRows(path)
+	if err == nil {
+		e.ledger.read(contractReadFileNodes, []string{path}, nodes, path)
+	}
+	return nodes, err
+}
+
+func (e *contractFollowupEvidence) loadFileNodeRows(path string) ([]*graph.Node, error) {
+	file, ok := e.files[path]
+	if !ok {
+		if e.excluded[path] {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("contract followup: selected file outside accepted census %q", path)
+	}
+	reader := e.core
+	loaded := e.loaded[path] || e.loadedFileNodes[path]
+	if loaded {
+		reader = e.scratch
+	}
+	rows, err := graph.ContractFileNodesContext(e.ctx, reader, file.RepoPrefix, []string{path})
+	if err != nil {
+		e.fail(err)
+		return nil, err
+	}
+	if loaded {
+		return rows[path], nil
+	}
+	nodes, err := e.detachFileNodes(path, file, rows[path])
+	if err != nil {
+		return nil, err
+	}
+	e.AddBatch(nodes, nil)
+	if e.err != nil {
+		return nil, e.err
+	}
+	if e.loadedFileNodes == nil {
+		e.loadedFileNodes = make(map[string]bool)
+	}
+	e.loadedFileNodes[path] = true
+	return nodes, nil
+}
+
 func (e *contractFollowupEvidence) GetFileNodesByPaths(paths []string) map[string][]*graph.Node {
 	out := make(map[string][]*graph.Node, len(paths))
 	for _, path := range paths {
-		nodes, _, err := e.loadFile(path)
+		nodes, err := e.loadFileNodes(path)
 		if err != nil {
 			e.fail(err)
 			return nil
