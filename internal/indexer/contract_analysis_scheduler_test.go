@@ -1047,3 +1047,45 @@ func TestContractCaptureStaleRetriesOnTheNextEventOnly(t *testing.T) {
 	require.Equal(t, events+1, captures(), "one capture per event")
 	require.Equal(t, stale+events+1, contractCounter("views_contract_analysis_captures_total{result=stale}"))
 }
+
+func TestContractSchedulerRegistryEvictsOnlyTheLeastRecentIdleActor(t *testing.T) {
+	require.Equal(t, 64, contractSchedulerMaxActors)
+	// The registry helper runs under the coordinator mutex. Supplying its
+	// ring directly isolates bookkeeping without starting dispatch workers.
+	ring := &contractRing{repo: "r", wake: make(chan struct{}, 1)}
+	c := &ContractAnalysisCoordinator{actors: make(map[ContractActor]*contractActor), rings: map[string]*contractRing{"r": ring}}
+	base := time.Now()
+	var active, oldestIdle ContractActor
+	for i := 0; i < contractSchedulerMaxActors; i++ {
+		id := NewContractActor(fmt.Sprintf("checkout-%d", i), []string{"r"})
+		a := c.registerLocked(id, base.Add(time.Duration(i)*time.Second))
+		if i == 0 {
+			active, a.state = id, contractActorRunning
+		} else if i == 1 {
+			oldestIdle = id
+		}
+	}
+	// Refresh the earliest idle actor before overflowing: FIFO would evict
+	// it, whereas LRU must preserve it and remove the next oldest idle.
+	refreshed := oldestIdle
+	c.actors[refreshed].lastUsed = base.Add(2 * time.Hour)
+	oldestIdle = NewContractActor("checkout-2", []string{"r"})
+	old := c.actors[oldestIdle]
+	changed := old.changed
+	newID := NewContractActor("new", []string{"r"})
+	c.registerLocked(newID, base.Add(time.Hour))
+	require.Len(t, c.actors, contractSchedulerMaxActors)
+	require.Contains(t, c.actors, active, "even the oldest active actor retains custody")
+	require.Contains(t, c.actors, refreshed, "recent use protects an older idle actor from FIFO eviction")
+	require.NotContains(t, c.actors, oldestIdle)
+	require.Contains(t, c.actors, newID)
+	require.Len(t, ring.actors, contractSchedulerMaxActors)
+	for _, a := range ring.actors {
+		require.NotSame(t, old, a, "eviction removes the old dispatch entry")
+	}
+	select {
+	case <-changed:
+	default:
+		t.Fatal("eviction must notify waiters on the removed actor")
+	}
+}
