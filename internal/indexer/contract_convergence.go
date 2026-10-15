@@ -2269,6 +2269,15 @@ func (c *contractConvergence) dropForExtraction(path string) string {
 		for owner := range unit.owners {
 			owners[owner] = true
 		}
+		// A changed answer requires fresh extraction, but its already-known
+		// proof frontier still belongs in that extraction's opening scan.
+		// Point R0 must sample read owners and declarers too; otherwise the
+		// new raw unit is needlessly retained for another coverage replay.
+		if c.coverage != nil && len(c.coverage.work) > 0 {
+			for _, owner := range c.coverage.bracket(c, unit) {
+				owners[owner] = true
+			}
+		}
 		c.retryOwners[path] = owners
 	}
 	c.dropUnit(path)
