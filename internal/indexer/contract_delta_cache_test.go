@@ -44,7 +44,7 @@ func TestContractDeltaPlanFindsProducerAndDepartedOwnerReaders(t *testing.T) {
 	p.indexReaders()
 	now := cloneContractDeltaReceipts(old)
 	delete(now, "owner")
-	now["producer"] = contractDeltaReceipt{boundary: "new", produced: map[string]string{`["repo","symbol_name","Missing"]`: "digest"}}
+	now["producer"] = newContractDeltaReceipt("new", map[string]string{`["repo","symbol_name","Missing"]`: "digest"})
 	now["go.mod"] = contractDeltaReceipt{boundary: "module"}
 	census := map[string]bool{"reader": true, "negative": true, "producer": true, "go.mod": true}
 	plan := p.plan(identity, census, now, false)
@@ -123,28 +123,28 @@ func TestContractDeltaCheckpointRejectsResourceMetadata(t *testing.T) {
 
 func TestContractDeltaProducedChangeInvalidatesNegativeLookupWithoutBoundaryMove(t *testing.T) {
 	identity := contractDeltaIdentity{}
-	producer := contractDeltaReceipt{boundary: "same", produced: map[string]string{`["repo","constant_id","id"]`: "old"}}
+	producer := newContractDeltaReceipt("same", map[string]string{`["repo","constant_id","id"]`: "old"})
 	p := &contractDeltaCache{identity: identity, complete: true, live: map[string]bool{"producer": true, "reader": true}, receipts: map[string]contractDeltaReceipt{"producer": producer, "reader": {boundary: "reader"}}, units: map[string]*contractUnit{"producer": {}, "reader": {keys: map[string]bool{"id:id": true}}}}
 	p.indexReaders()
 	now := cloneContractDeltaReceipts(p.receipts)
-	now["producer"].produced[`["repo","constant_id","id"]`] = "new"
+	now["producer"] = newContractDeltaReceipt("same", map[string]string{`["repo","constant_id","id"]`: "new"})
 	plan := p.plan(identity, p.live, now, false)
 	require.Equal(t, []string{"producer"}, plan.extract)
 	require.Equal(t, []string{"reader"}, plan.revalidate)
-	delete(now["producer"].produced, `["repo","constant_id","id"]`)
+	now["producer"] = newContractDeltaReceipt("same", nil)
 	require.Equal(t, []string{"reader"}, p.plan(identity, p.live, now, false).revalidate)
 }
 
 func TestContractDeltaOwnerRenameUsesInverseReaders(t *testing.T) {
 	old := map[string]contractDeltaReceipt{"owner": {boundary: "B"}, "reader": {boundary: "reader"}, "unrelated": {boundary: "other"}}
 	p := &contractDeltaCache{complete: true, live: map[string]bool{"owner": true, "reader": true, "unrelated": true}, receipts: old, units: map[string]*contractUnit{
-		"owner":     {declared: map[string]bool{"name:B": true}},
+		"owner":     {declared: []string{"name:B"}},
 		"reader":    {owners: map[string]bool{"owner": true}, keys: map[string]bool{"name:B": true}},
 		"unrelated": {keys: map[string]bool{"name:Other": true}},
 	}}
 	p.indexReaders()
 	now := cloneContractDeltaReceipts(old)
-	now["owner"] = contractDeltaReceipt{boundary: "B2", produced: map[string]string{`["repo","symbol_name","B2"]`: "new"}}
+	now["owner"] = newContractDeltaReceipt("B2", map[string]string{`["repo","symbol_name","B2"]`: "new"})
 	plan := p.plan(contractDeltaIdentity{}, p.live, now, false)
 	require.Equal(t, []string{"owner"}, plan.extract)
 	require.Equal(t, []string{"reader"}, plan.revalidate)
@@ -161,8 +161,8 @@ func TestContractDeltaCheckpointOwnsSubstringBacking(t *testing.T) {
 	backing := strings.Repeat("x", 4096)
 	short := backing[:1]
 	stamp := ContractReceiptStamp{Actor: short, Fingerprint: short, SourceFingerprint: short}
-	c := &contractConvergence{units: map[string]*contractUnit{short: {path: short, stamp: stamp, rawDigest: short, raw: []contracts.Contract{{ID: short, Type: contracts.ContractType(short), Role: contracts.Role(short), SymbolID: short, FilePath: short, RepoPrefix: short, WorkspaceID: short, ProjectID: short, Meta: map[string]any{short: []any{short}}}}, owners: map[string]bool{short: true}, keys: map[string]bool{short: true}, declared: map[string]bool{short: true}, torn: map[string]ContractReceiptStamp{short: stamp}, ledger: &contractUnitLedger{sources: map[string]string{short: short}, reads: []contractRecordedRead{{kind: short, digest: short, args: []string{short}, owners: []string{short}}}}}}, live: map[string]bool{short: true}, clock: contractChangeClock{last: map[string]ContractReceiptStamp{short: stamp}}, contents: map[string]string{short: short}}
-	receipts := map[string]contractDeltaReceipt{short: {boundary: short, produced: map[string]string{short: short}}}
+	c := &contractConvergence{units: map[string]*contractUnit{short: {path: short, stamp: stamp, rawDigest: short, raw: []contracts.Contract{{ID: short, Type: contracts.ContractType(short), Role: contracts.Role(short), SymbolID: short, FilePath: short, RepoPrefix: short, WorkspaceID: short, ProjectID: short, Meta: map[string]any{short: []any{short}}}}, owners: map[string]bool{short: true}, keys: map[string]bool{short: true}, declared: []string{short}, torn: map[string]ContractReceiptStamp{short: stamp}, ledger: &contractUnitLedger{sources: map[string]string{short: short}, reads: []contractRecordedRead{{kind: short, digest: short, args: []string{short}, owners: []string{short}}}}}}, live: map[string]bool{short: true}, clock: contractChangeClock{last: map[string]ContractReceiptStamp{short: stamp}}, contents: map[string]string{short: short}}
+	receipts := map[string]contractDeltaReceipt{short: newContractDeltaReceipt(short, map[string]string{short: short})}
 	p := checkpointContractDelta(c, contractDeltaIdentity{selection: short, config: short, modules: short, receiptVersion: short}, receipts, 0, false)
 	require.NotNil(t, p)
 	checked := 0

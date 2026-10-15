@@ -3120,7 +3120,7 @@ func TestContractStaleUnitsLeavesEveryUnpendingFileAtItsStamp(t *testing.T) {
 			owners[r.owner] = true
 		}
 		c.setUnit(&contractUnit{path: path, stamp: r.at, round: round, owners: owners, keys: map[string]bool{},
-			declared: map[string]bool{"path:" + path: true}, ledger: newContractUnitLedger()})
+			declared: []string{"path:" + path}, ledger: newContractUnitLedger()})
 	}
 	pending := make(map[string]string)
 	c.staleUnits(pending)

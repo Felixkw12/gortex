@@ -140,14 +140,15 @@ func contractJobOutcomeOf(err error) string {
 
 // contractUnit is one file's proven extraction.
 type contractUnit struct {
-	path     string
-	stamp    ContractReceiptStamp
-	round    uint64
-	raw      []contracts.Contract
-	owners   map[string]bool
-	keys     map[string]bool
-	declared map[string]bool
-	excluded bool
+	path          string
+	stamp         ContractReceiptStamp
+	round         uint64
+	raw           []contracts.Contract
+	owners        map[string]bool
+	keys          map[string]bool
+	declared      []string
+	excluded      bool
+	ledgerAliases bool
 	// rawDigest is the digest of raw, what the enrichment round consumed.
 	rawDigest string
 	// ledger holds the unit's recorded reads and byte reads, asked again to
@@ -296,7 +297,7 @@ type contractMoves struct {
 	seeding       bool
 	// byPath holds what each moved file with a known current unit or core
 	// load declares, and seeders the moved files carrying seed rows.
-	byPath  map[string]map[string]bool
+	byPath  map[string][]string
 	seeders map[string]bool
 }
 
@@ -304,7 +305,7 @@ type contractMoves struct {
 // read torn, which count as moved whatever their content did.
 func (c *contractConvergence) movesSince(round uint64, torn map[string]ContractReceiptStamp) contractMoves {
 	m := contractMoves{moved: make(map[string]bool), declared: make(map[string]bool), unknown: make(map[string]bool), declaredKnown: true,
-		byPath: make(map[string]map[string]bool), seeders: make(map[string]bool)}
+		byPath: make(map[string][]string), seeders: make(map[string]bool)}
 	add := func(path string) {
 		if m.moved[path] {
 			return
@@ -321,7 +322,7 @@ func (c *contractConvergence) movesSince(round uint64, torn map[string]ContractR
 			return
 		}
 		m.byPath[path] = unit.declared
-		for key := range unit.declared {
+		for _, key := range unit.declared {
 			m.declared[key] = true
 		}
 		if len(unit.seedNodes) > 0 || len(unit.seedEdges) > 0 {
@@ -346,7 +347,7 @@ func (m *contractMoves) resolve(path string, declared contractDeclaration) {
 		return
 	}
 	delete(m.unknown, path)
-	m.byPath[path] = declared.keys
+	m.byPath[path] = slices.Sorted(maps.Keys(declared.keys))
 	for key := range declared.keys {
 		m.declared[key] = true
 	}
@@ -383,7 +384,7 @@ func (m contractMoves) depends(path string, read contractRecordedRead) bool {
 		return true
 	}
 	for _, arg := range read.args {
-		if m.byPath[path][prefix+arg] || (prefix == "path:" && arg == path) {
+		if contractDeclaredHas(m.byPath[path], prefix+arg) || (prefix == "path:" && arg == path) {
 			return true
 		}
 	}
@@ -799,7 +800,7 @@ type contractConvergence struct {
 	retryOwners map[string]map[string]bool
 	// declarers indexes the units' declared keys: the files whose current
 	// unit answers a key a lookup can ask.
-	declarers map[string]map[string]bool
+	declarers contractDeclarerIndex
 	clock     contractChangeClock
 	// contentAt is the clock of each path's last observed move that did not
 	// keep its contract content (a new or departed row, a census join or
@@ -1468,7 +1469,7 @@ func (c *contractConvergence) indexers(evidence *contractFollowupEvidence, read 
 
 // extract runs one file's per-file extraction on the round's evidence.
 func (c *contractConvergence) extract(idx *Indexer, evidence *contractFollowupEvidence, reader *contractPinnedReader, file ContractFollowupFile, ledger *contractUnitLedger) (*contractUnit, error) {
-	unit := &contractUnit{path: file.Path, owners: ledger.owners, keys: ledger.keys, declared: map[string]bool{"path:" + file.Path: true}, ledger: ledger}
+	unit := &contractUnit{path: file.Path, owners: ledger.owners, keys: ledger.keys, declared: []string{"path:" + file.Path}, ledger: ledger}
 	projected, err := idx.contractFollowupPolicyMode(file.Language, file.Policy)
 	if err != nil {
 		return nil, err
@@ -1524,8 +1525,7 @@ func (c *contractConvergence) extract(idx *Indexer, evidence *contractFollowupEv
 		if node == nil {
 			continue
 		}
-		unit.declared["name:"+node.Name] = true
-		unit.declared["id:"+node.ID] = true
+		unit.declared = append(unit.declared, "name:"+node.Name, "id:"+node.ID)
 		if _, spring := node.Meta["spring_config_keys"]; spring || (node.Kind == graph.KindMethod && node.Language == "java") {
 			unit.seedNodes = append(unit.seedNodes, node)
 		}
@@ -1553,6 +1553,8 @@ func (c *contractConvergence) extract(idx *Indexer, evidence *contractFollowupEv
 		}
 	}
 	c.report.Files++
+	slices.Sort(unit.declared)
+	unit.declared = slices.Compact(unit.declared)
 	return unit, evidence.err
 }
 
@@ -2353,7 +2355,7 @@ func changedBetween(r0, r1 ContractFollowupScan, paths []string) bool {
 func (c *contractConvergence) keyDeclarers(unit *contractUnit) []string {
 	var out []string
 	for key := range unit.keys {
-		for path := range c.declarers[key] {
+		for _, path := range c.declarers.lookup(key, c.units) {
 			if path != unit.path {
 				out = append(out, path)
 			}
@@ -2375,31 +2377,14 @@ func (c *contractConvergence) setUnit(unit *contractUnit) {
 	}
 	c.unindex(c.units[unit.path])
 	c.units[unit.path] = unit
-	if c.declarers == nil {
-		c.declarers = make(map[string]map[string]bool)
-	}
-	for key := range unit.declared {
-		set := c.declarers[key]
-		if set == nil {
-			set = make(map[string]bool)
-			c.declarers[key] = set
-		}
-		set[unit.path] = true
-	}
+	c.declarers.add(unit)
 }
 
 func (c *contractConvergence) unindex(unit *contractUnit) {
 	if unit == nil {
 		return
 	}
-	for key := range unit.declared {
-		if set := c.declarers[key]; set != nil {
-			delete(set, unit.path)
-			if len(set) == 0 {
-				delete(c.declarers, key)
-			}
-		}
-	}
+	c.declarers.remove(unit)
 }
 
 // unitProven: every owner of the unit, every file declaring a key it looked
@@ -2451,14 +2436,14 @@ func (c *contractConvergence) blockUnproven(unit *contractUnit, r0, r1 ContractF
 // the lookup missed is either new or was torn by an apply of path. It runs
 // on proofs of path, which a move that keeps path's contract content does not
 // cause; a lookup a later such move tears is the proving unit's own check.
-func (c *contractConvergence) keyCheck(path string, declared map[string]bool, stale map[string]string) {
+func (c *contractConvergence) keyCheck(path string, declared []string, stale map[string]string) {
 	movedAt := c.clock.changedAt[path]
 	for other, unit := range c.units {
 		if other == path || unit.round >= movedAt {
 			continue
 		}
 		for key := range unit.keys {
-			if declared[key] {
+			if contractDeclaredHas(declared, key) {
 				// The lookups path's declarations answer are asked again
 				// whatever path's content did.
 				if unit.torn == nil {
@@ -2530,7 +2515,7 @@ func (c *contractConvergence) staleUnits(stale map[string]string) {
 	for path := range c.units {
 		if !c.live[path] && !c.excluded[path] {
 			c.dropUnit(path)
-			c.keyCheck(path, map[string]bool{"path:" + path: true}, stale)
+			c.keyCheck(path, []string{"path:" + path}, stale)
 		}
 	}
 	for path, unit := range c.units {
@@ -2569,7 +2554,7 @@ func (c *contractConvergence) staleUnits(stale map[string]string) {
 		delete(stale, path)
 		if _, ok := c.units[path]; !ok {
 			c.installExcluded(path)
-			c.keyCheck(path, map[string]bool{"path:" + path: true}, stale)
+			c.keyCheck(path, []string{"path:" + path}, stale)
 		}
 	}
 }
@@ -2578,7 +2563,7 @@ func (c *contractConvergence) staleUnits(stale map[string]string) {
 // records and no reads, proven at the current clock.
 func (c *contractConvergence) installExcluded(path string) {
 	c.setUnit(&contractUnit{path: path, stamp: c.clock.last[path], round: c.clock.clock, excluded: true,
-		owners: map[string]bool{}, keys: map[string]bool{}, declared: map[string]bool{"path:" + path: true}})
+		owners: map[string]bool{}, keys: map[string]bool{}, declared: []string{"path:" + path}})
 }
 
 // rounds proves every pending path. A path's first attempt runs in a full
@@ -3294,7 +3279,7 @@ func (c *contractConvergence) enrichmentReadFiles(ledger *contractUnitLedger) ma
 		seeds = seeds || read.kind == contractReadSeeds
 	}
 	for key := range ledger.keys {
-		for path := range c.declarers[key] {
+		for _, path := range c.declarers.lookup(key, c.units) {
 			out[path] = true
 		}
 	}

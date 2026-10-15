@@ -441,7 +441,7 @@ func (s *contractStampScanner) deltaReceipts(ctx context.Context, stamps map[str
 		if json.Unmarshal(row.Payload, &receipt) != nil || receipt.Version != contractBoundaryReceiptVersion || receipt.FilePath != path {
 			continue
 		}
-		out[path] = contractDeltaReceipt{boundary: contractReceiptContent(row.Payload, row.SourceFingerprint), produced: cloneContractDeltaMap(receipt.ProducedInputs)}
+		out[path] = newContractDeltaReceipt(contractReceiptContent(row.Payload, row.SourceFingerprint), receipt.ProducedInputs)
 	}
 	closing, err := s.scan(ctx, paths)
 	if err != nil {

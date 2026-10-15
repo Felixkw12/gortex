@@ -6,6 +6,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/viewmetrics"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func runCachedContractFixture(t *testing.T, f *contractJobFixture, p **contractDeltaCache) ContractFollowupReport {
@@ -22,6 +25,8 @@ func runCachedContractFixture(t *testing.T, f *contractJobFixture, p **contractD
 func TestContractDeltaWorkerRouteReplayEqualsIndependentCold(t *testing.T) {
 	files := map[string]string{"routes.go": jobRoutes, "consts.go": jobConsts, "helper.go": jobHelper}
 	f := newContractJobFixture(t, files)
+	core, logs := observer.New(zapcore.InfoLevel)
+	f.logger = zap.New(core)
 	var p *contractDeltaCache
 	first := runCachedContractFixture(t, f, &p)
 	require.Equal(t, viewmetrics.ContractModeFill, first.Mode)
@@ -43,6 +48,9 @@ func TestContractDeltaWorkerRouteReplayEqualsIndependentCold(t *testing.T) {
 		require.Equal(t, contractMeta(coldContracts(t, files)), contractMeta(f.contracts()))
 		require.Equal(t, beforeRaw, heldRaw)
 		require.Equal(t, i+1, p.deltas)
+		checkpoints := logs.FilterMessage("contract cache checkpoint").All()
+		require.EqualValues(t, 1, checkpoints[len(checkpoints)-1].ContextMap()["normalized_raw_units"], "warm work only normalizes newly extracted raw")
+		require.LessOrEqual(t, p.retainedBytes, contractDeltaCacheBudget)
 		previousClock = p.clock.clock
 	}
 	// A postpass must never mutate the original raw unit across later jobs.

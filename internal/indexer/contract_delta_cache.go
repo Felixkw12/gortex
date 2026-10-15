@@ -25,8 +25,21 @@ type contractDeltaIdentity struct {
 // source-only changes; produced includes every producer key, including those
 // from files that extract no contracts. Unknown syntax remains a local delta.
 type contractDeltaReceipt struct {
-	boundary string
-	produced map[string]string
+	boundary       string
+	producedDigest string
+	producedKeys   []string
+}
+
+// Aggregate identity preserves every produced value change; only keys are
+// required to reach old/new dependent queries, so per-key values need not live
+// beyond selected receipt decoding.
+func newContractDeltaReceipt(boundary string, produced map[string]string) contractDeltaReceipt {
+	encoded, _ := json.Marshal(produced)
+	keys := make(map[string]bool)
+	for key := range produced {
+		contractDeltaProducedKeys(keys, key)
+	}
+	return contractDeltaReceipt{boundary: boundary, producedDigest: contractInputHash(encoded), producedKeys: slices.Sorted(maps.Keys(keys))}
 }
 
 // contractDeltaCache contains only values owned by this actor. No evidence,
@@ -36,7 +49,8 @@ type contractDeltaCache struct {
 	identity                 contractDeltaIdentity
 	units                    map[string]*contractUnit
 	live, excluded, suspect  map[string]bool
-	retryOwners, declarers   map[string]map[string]bool
+	retryOwners              map[string]map[string]bool
+	declarers                contractDeclarerIndex
 	clock                    contractChangeClock
 	contentAt                map[string]uint64
 	maxContent               uint64
@@ -44,10 +58,12 @@ type contractDeltaCache struct {
 	receipts                 map[string]contractDeltaReceipt
 	ownerReaders, keyReaders map[string]map[string]bool
 	// deltas counts completed delta jobs since the last cold/fill baseline.
-	deltas        int
-	complete      bool
-	retainedBytes int64
-	rawBytes      map[string]int64
+	deltas           int
+	complete         bool
+	retainedBytes    int64
+	rawBytes         map[string]int64
+	proofStringBytes int64
+	proofStringCount int
 }
 
 // checkpointContractDelta snapshots a proven round boundary. Complete is an
@@ -64,7 +80,7 @@ func checkpointContractDelta(c *contractConvergence, identity contractDeltaIdent
 			}
 		}
 	}
-	p := &contractDeltaCache{identity: contractDeltaIdentity{selection: strings.Clone(identity.selection), config: strings.Clone(identity.config), modules: strings.Clone(identity.modules), receiptVersion: strings.Clone(identity.receiptVersion)}, units: cloneContractUnits(c.units), live: cloneContractDeltaMap(c.live), excluded: cloneContractDeltaMap(c.excluded), suspect: cloneContractDeltaMap(c.suspect), retryOwners: cloneContractIndex(c.retryOwners), declarers: cloneContractIndex(c.declarers), clock: cloneContractClock(c.clock), contentAt: cloneContractDeltaMap(c.contentAt), maxContent: c.maxContent, contents: cloneContractDeltaMap(c.contents), receipts: cloneContractDeltaReceipts(receipts), deltas: deltas, complete: complete}
+	p := &contractDeltaCache{identity: contractDeltaIdentity{selection: strings.Clone(identity.selection), config: strings.Clone(identity.config), modules: strings.Clone(identity.modules), receiptVersion: strings.Clone(identity.receiptVersion)}, units: cloneContractUnits(c.units), live: cloneContractDeltaMap(c.live), excluded: cloneContractDeltaMap(c.excluded), suspect: cloneContractDeltaMap(c.suspect), retryOwners: cloneContractIndex(c.retryOwners), declarers: c.declarers.clone(), clock: cloneContractClock(c.clock), contentAt: cloneContractDeltaMap(c.contentAt), maxContent: c.maxContent, contents: cloneContractDeltaMap(c.contents), receipts: cloneContractDeltaReceipts(receipts), deltas: deltas, complete: complete}
 	p.indexReaders()
 	if len(p.suspect) != 0 {
 		p.complete = false
@@ -85,7 +101,7 @@ func checkpointContractDelta(c *contractConvergence, identity contractDeltaIdent
 func (p *contractDeltaCache) restore(c *contractConvergence) {
 	c.units = cloneContractUnits(p.units)
 	c.live, c.excluded, c.suspect = cloneContractDeltaMap(p.live), cloneContractDeltaMap(p.excluded), cloneContractDeltaMap(p.suspect)
-	c.retryOwners, c.declarers = cloneContractIndex(p.retryOwners), cloneContractIndex(p.declarers)
+	c.retryOwners, c.declarers = cloneContractIndex(p.retryOwners), p.declarers.clone()
 	c.clock, c.contentAt, c.maxContent, c.contents = cloneContractClock(p.clock), cloneContractDeltaMap(p.contentAt), p.maxContent, cloneContractDeltaMap(p.contents)
 	c.quietFrom = 0
 }
@@ -127,7 +143,7 @@ func contractDeltaMetaValue(v reflect.Value) bool {
 // Fresh maps avoid retaining historical bucket capacity after growth/deletion.
 // Every string retained from a job owns exactly its visible bytes; header-only
 // copies of substrings would invalidate length-based backing-storage charges.
-func cloneContractDeltaMap[V any](in map[string]V) map[string]V {
+func cloneContractDeltaMap[V any](in map[string]V, pool ...*contractProofStrings) map[string]V {
 	if in == nil {
 		return nil
 	}
@@ -135,25 +151,25 @@ func cloneContractDeltaMap[V any](in map[string]V) map[string]V {
 	for key, value := range in {
 		switch v := any(value).(type) {
 		case string:
-			value = any(strings.Clone(v)).(V)
+			value = any(contractProofString(v, pool...)).(V)
 		case ContractReceiptStamp:
-			value = any(cloneContractDeltaStamp(v)).(V)
+			value = any(cloneContractDeltaStamp(v, pool...)).(V)
 		}
-		out[strings.Clone(key)] = value
+		out[contractProofString(key, pool...)] = value
 	}
 	return out
 }
-func cloneContractDeltaStamp(s ContractReceiptStamp) ContractReceiptStamp {
-	s.Actor, s.Fingerprint, s.SourceFingerprint = strings.Clone(s.Actor), strings.Clone(s.Fingerprint), strings.Clone(s.SourceFingerprint)
+func cloneContractDeltaStamp(s ContractReceiptStamp, pool ...*contractProofStrings) ContractReceiptStamp {
+	s.Actor, s.Fingerprint, s.SourceFingerprint = contractProofString(s.Actor, pool...), contractProofString(s.Fingerprint, pool...), contractProofString(s.SourceFingerprint, pool...)
 	return s
 }
-func cloneContractDeltaStrings(in []string) []string {
+func cloneContractDeltaStrings(in []string, pool ...*contractProofStrings) []string {
 	if in == nil {
 		return nil
 	}
 	out := make([]string, len(in))
 	for i, value := range in {
-		out[i] = strings.Clone(value)
+		out[i] = contractProofString(value, pool...)
 	}
 	return out
 }
@@ -214,64 +230,79 @@ func cloneContractDeltaValue(v reflect.Value) reflect.Value {
 	return v
 }
 
-func cloneContractClock(c contractChangeClock) contractChangeClock {
-	c.last, c.lastCensus = cloneContractDeltaMap(c.last), cloneContractDeltaMap(c.lastCensus)
-	c.changedAt, c.seenAt = cloneContractDeltaMap(c.changedAt), cloneContractDeltaMap(c.seenAt)
+func cloneContractClock(c contractChangeClock, pool ...*contractProofStrings) contractChangeClock {
+	c.last, c.lastCensus = cloneContractDeltaMap(c.last, pool...), cloneContractDeltaMap(c.lastCensus, pool...)
+	c.changedAt, c.seenAt = cloneContractDeltaMap(c.changedAt, pool...), cloneContractDeltaMap(c.seenAt, pool...)
 	return c
 }
-func cloneContractIndex(in map[string]map[string]bool) map[string]map[string]bool {
+func cloneContractIndex(in map[string]map[string]bool, pool ...*contractProofStrings) map[string]map[string]bool {
 	if in == nil {
 		return nil
 	}
 	out := make(map[string]map[string]bool, len(in))
 	for key, paths := range in {
-		out[strings.Clone(key)] = cloneContractDeltaMap(paths)
+		out[contractProofString(key, pool...)] = cloneContractDeltaMap(paths, pool...)
 	}
 	return out
 }
-func cloneContractDeltaReceipts(in map[string]contractDeltaReceipt) map[string]contractDeltaReceipt {
+func cloneContractDeltaReceipts(in map[string]contractDeltaReceipt, pool ...*contractProofStrings) map[string]contractDeltaReceipt {
 	out := make(map[string]contractDeltaReceipt, len(in))
 	for path, r := range in {
-		r.produced = cloneContractDeltaMap(r.produced)
-		r.boundary = strings.Clone(r.boundary)
-		out[strings.Clone(path)] = r
+		r.producedKeys = cloneContractDeltaStrings(r.producedKeys, pool...)
+		r.producedDigest = contractProofString(r.producedDigest, pool...)
+		r.boundary = contractProofString(r.boundary, pool...)
+		out[contractProofString(path, pool...)] = r
 	}
 	return out
 }
 func cloneContractUnits(in map[string]*contractUnit) map[string]*contractUnit {
 	return cloneContractUnitsMode(in, true)
 }
-func cloneContractUnitsMode(in map[string]*contractUnit, copyRaw bool) map[string]*contractUnit {
+func cloneContractUnitsMode(in map[string]*contractUnit, copyRaw bool, pool ...*contractProofStrings) map[string]*contractUnit {
 	out := make(map[string]*contractUnit, len(in))
 	for path, u := range in {
 		if u == nil {
 			continue
 		}
 		v := *u
-		v.path = strings.Clone(u.path)
-		v.rawDigest = strings.Clone(u.rawDigest)
-		v.stamp = cloneContractDeltaStamp(u.stamp)
+		v.path = contractProofString(u.path, pool...)
+		v.rawDigest = contractProofString(u.rawDigest, pool...)
+		v.stamp = cloneContractDeltaStamp(u.stamp, pool...)
 		if copyRaw {
 			v.raw = cloneContractDeltaRaw(u.raw)
 		}
-		v.owners, v.keys, v.declared, v.torn = cloneContractDeltaMap(u.owners), cloneContractDeltaMap(u.keys), cloneContractDeltaMap(u.declared), cloneContractDeltaMap(u.torn)
+		v.owners, v.keys, v.torn = cloneContractDeltaMap(u.owners, pool...), cloneContractDeltaMap(u.keys, pool...), cloneContractDeltaMap(u.torn, pool...)
+		v.declared = cloneContractDeltaStrings(u.declared, pool...)
 		// Seeds always come from fresh core queries. Frozen test snapshots cannot
 		// use persistent checkpoints as a substitute for their seed fixture.
 		v.seedNodes, v.seedEdges = nil, nil
 		if u.ledger != nil {
 			l := *u.ledger
-			l.owners, l.keys, l.recorded, l.sources = cloneContractDeltaMap(l.owners), cloneContractDeltaMap(l.keys), cloneContractDeltaMap(l.recorded), cloneContractDeltaMap(l.sources)
+			if contractUnitSharesLedger(u) {
+				l.owners, l.keys = v.owners, v.keys
+				v.ledgerAliases = true
+			} else {
+				l.owners, l.keys = cloneContractDeltaMap(l.owners, pool...), cloneContractDeltaMap(l.keys, pool...)
+				v.ledgerAliases = false
+			}
+			l.sources = cloneContractDeltaMap(l.sources, pool...)
+			if len(pool) > 0 && pool[0] != nil {
+				l.recorded = nil
+			} else {
+				l.recorded = cloneContractDeltaMap(l.recorded)
+			}
 			l.reads = make([]contractRecordedRead, len(u.ledger.reads))
 			copy(l.reads, u.ledger.reads)
 			for i := range l.reads {
-				l.reads[i].kind = strings.Clone(l.reads[i].kind)
-				l.reads[i].digest = strings.Clone(l.reads[i].digest)
-				l.reads[i].args = cloneContractDeltaStrings(l.reads[i].args)
-				l.reads[i].owners = cloneContractDeltaStrings(l.reads[i].owners)
+				l.reads[i].kind = contractProofString(l.reads[i].kind, pool...)
+				l.reads[i].digest = contractProofString(l.reads[i].digest, pool...)
+				l.reads[i].args = cloneContractDeltaStrings(l.reads[i].args, pool...)
+				l.reads[i].owners = cloneContractDeltaStrings(l.reads[i].owners, pool...)
 			}
+
 			v.ledger = &l
 		}
-		out[strings.Clone(path)] = &v
+		out[contractProofString(path, pool...)] = &v
 	}
 	return out
 }
@@ -315,7 +346,7 @@ func (p *contractDeltaCache) plan(identity contractDeltaIdentity, census map[str
 		for path := range census {
 			old, had := p.receipts[path]
 			now, has := receipts[path]
-			if !p.live[path] || !had || !has || old.boundary != now.boundary || !maps.Equal(old.produced, now.produced) {
+			if !p.live[path] || !had || !has || old.boundary != now.boundary || old.producedDigest != now.producedDigest || !slices.Equal(old.producedKeys, now.producedKeys) {
 				moved[path] = true
 				extract[path] = true
 			}
@@ -327,13 +358,13 @@ func (p *contractDeltaCache) plan(identity contractDeltaIdentity, census map[str
 			}
 		}
 		for path := range moved {
-			for key := range p.receipts[path].produced {
-				contractDeltaProducedKeys(keys, key)
+			for _, key := range p.receipts[path].producedKeys {
+				keys[key] = true
 			}
-			for key := range receipts[path].produced {
-				contractDeltaProducedKeys(keys, key)
+			for _, key := range receipts[path].producedKeys {
+				keys[key] = true
 			}
-			for key := range p.unitsDeclared(path) {
+			for _, key := range p.unitsDeclared(path) {
 				keys[key] = true
 			}
 		}
@@ -391,20 +422,21 @@ func (p *contractDeltaCache) indexReaders() {
 // query actually asked, including cross-repository fallback. Conservatively
 // map both forms, rather than relying on receipt LookupKeys for followup reads.
 func contractDeltaProducedKeys(keys map[string]bool, key string) {
-	keys[key] = true
 	var parts []string
-	if json.Unmarshal([]byte(key), &parts) != nil || len(parts) != 3 {
-		return
+	if json.Unmarshal([]byte(key), &parts) == nil && len(parts) == 3 {
+		if strings.HasSuffix(parts[1], "_name") {
+			keys["name:"+parts[2]] = true
+			return
+		}
+		if strings.HasSuffix(parts[1], "_id") {
+			keys["id:"+parts[2]] = true
+			return
+		}
 	}
-	if strings.HasSuffix(parts[1], "_name") {
-		keys["name:"+parts[2]] = true
-	}
-	if strings.HasSuffix(parts[1], "_id") {
-		keys["id:"+parts[2]] = true
-	}
+	keys[key] = true
 }
 
-func (p *contractDeltaCache) unitsDeclared(path string) map[string]bool {
+func (p *contractDeltaCache) unitsDeclared(path string) []string {
 	if u := p.units[path]; u != nil {
 		return u.declared
 	}
@@ -519,7 +551,12 @@ func (l *contractDeltaLRU) put(actor ContractActor, p *contractDeltaCache) (resu
 // Count backing storage conservatively: repeated references count repeatedly,
 // and map entries include bucket/allocator overhead. This admits less than the
 // budget rather than hiding raw metadata and recorded query argument storage.
-func contractRetainedSize(v reflect.Value) int64 {
+func contractRetainedSize(v reflect.Value) int64 { return contractRetainedSizeMode(v, true) }
+
+// stringBacking=false is used only after every proof string was canonicalized
+// into the checkpoint's owned pool. That pool charges each backing allocation
+// once; headers, map tables and exact-capacity containers remain charged here.
+func contractRetainedSizeMode(v reflect.Value, stringBacking bool) int64 {
 	if !v.IsValid() {
 		return 0
 	}
@@ -527,19 +564,24 @@ func contractRetainedSize(v reflect.Value) int64 {
 	switch v.Kind() {
 	case reflect.Interface, reflect.Pointer:
 		if !v.IsNil() {
-			size += contractRetainedSize(v.Elem())
+			size += contractRetainedSizeMode(v.Elem(), stringBacking)
 			if v.Kind() == reflect.Pointer {
 				size += contractDeltaAllocation(int64(v.Type().Elem().Size())) - int64(v.Type().Elem().Size())
 			}
 		}
 	case reflect.String:
-		size += contractDeltaAllocation(int64(v.Len()))
+		if stringBacking {
+			size += contractDeltaAllocation(int64(v.Len()))
+		}
 	case reflect.Slice:
 		size += contractDeltaAllocation(int64(v.Cap()) * int64(v.Type().Elem().Size()))
 		for i := 0; i < v.Len(); i++ {
-			size += contractRetainedSize(v.Index(i))
+			size += contractRetainedSizeMode(v.Index(i), stringBacking)
 		}
 	case reflect.Map:
+		if v.IsNil() {
+			return size
+		}
 		// Fresh len-sized tables can still allocate an eight-slot bucket for a
 		// single entry. Charge spare slots, table headers and allocator rounding,
 		// rather than pretending map length is its allocated capacity.
@@ -547,11 +589,11 @@ func contractRetainedSize(v reflect.Value) int64 {
 		size += 512 + contractDeltaAllocation(slots*(int64(v.Type().Key().Size())+int64(v.Type().Elem().Size())+32))
 		iter := v.MapRange()
 		for iter.Next() {
-			size += 64 + contractRetainedSize(iter.Key()) + contractRetainedSize(iter.Value())
+			size += 64 + contractRetainedSizeMode(iter.Key(), stringBacking) + contractRetainedSizeMode(iter.Value(), stringBacking)
 		}
 	case reflect.Struct:
 		for i := 0; i < v.NumField(); i++ {
-			size += contractRetainedSize(v.Field(i))
+			size += contractRetainedSizeMode(v.Field(i), stringBacking)
 		}
 	}
 	return size
