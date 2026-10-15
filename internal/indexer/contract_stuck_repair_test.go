@@ -306,6 +306,20 @@ func TestContractStuckRepairBusyPassSchedulesAnotherPass(t *testing.T) {
 	}
 }
 
+func TestContractRepairAdmissionHonorsTheBatchGate(t *testing.T) {
+	mi := &MultiIndexer{}
+	func() {
+		mi.batchMutationGate.Lock()
+		defer mi.batchMutationGate.Unlock()
+		release, ok := mi.TryRepositoryMutationLanes([]string{"fixture"})
+		require.False(t, ok, "repair admission waits until the batch transition ends")
+		require.Nil(t, release)
+	}()
+	release, ok := mi.TryRepositoryMutationLanes([]string{"fixture"})
+	require.True(t, ok)
+	defer release()
+}
+
 // busyLaneRepair holds the fixture repository's lane over a stuck window for
 // longer than a repair period, checking that the repair waits and the
 // dispatcher does not, releases it and returns how long after the release
