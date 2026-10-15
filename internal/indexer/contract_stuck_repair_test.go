@@ -400,8 +400,16 @@ func busyLaneRepair(t *testing.T, dispatchTime, repairTime func(time.Duration)) 
 // of one repository are repaired by one forced reindex.
 func TestContractStuckRepairBatchesAllStuckPathsInOneReindex(t *testing.T) {
 	both := make(chan struct{})
+	var callsMu sync.Mutex
+	var calls [][]string
 	f := newContractRepairFixture(t, func(_ *contractRepairFixture, r *ContractStuckRepair) {
 		r.beforeLane = func(string) { <-both }
+		r.reindex = func(ctx context.Context, repo string, paths []string) error {
+			callsMu.Lock()
+			calls = append(calls, append([]string(nil), paths...))
+			callsMu.Unlock()
+			return r.realReindex(ctx, repo, paths)
+		}
 	})
 	repaired := repairCount("stuck_receipt")
 	f.failBody(t, "consts.go", jobConsts+"// a failed apply\n")
@@ -414,6 +422,9 @@ func TestContractStuckRepairBatchesAllStuckPathsInOneReindex(t *testing.T) {
 	require.Equal(t, repaired+1, repairCount("stuck_receipt"), "one reindex for every stuck path")
 	require.Len(t, lines(), 1)
 	require.Equal(t, []any{"fixture/consts.go", "fixture/helper.go"}, lines()[0].ContextMap()["paths"])
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	require.Equal(t, [][]string{{"fixture/consts.go", "fixture/helper.go"}}, calls, "one actual reindex invocation receives the complete batch")
 }
 
 // failingReindex is a forced reindex that keeps failing the way the body
