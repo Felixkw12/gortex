@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -91,4 +92,29 @@ func TestContractDeltaWorkerProducerLifecycleEqualsIndependentCold(t *testing.T)
 			}
 		})
 	}
+}
+
+func TestContractDeltaUnitRetainsItsMeasuredRawSize(t *testing.T) {
+	f := newContractJobFixture(t, map[string]string{"routes.go": jobRoutes, "consts.go": jobConsts, "helper.go": jobHelper})
+	core, logs := observer.New(zapcore.InfoLevel)
+	f.logger = zap.New(core)
+	var cache *contractDeltaCache
+	runCachedContractFixture(t, f, &cache)
+	sizes := map[string]int64{}
+	for path, unit := range cache.units {
+		require.Positive(t, unit.retainedRawBytes, "even an empty raw slice has owned header storage")
+		require.Equal(t, contractRetainedSize(reflect.ValueOf(unit.raw)), unit.retainedRawBytes)
+		sizes[path] = unit.retainedRawBytes
+	}
+	f.save("routes.go", strings.ReplaceAll(jobRoutes, "RoutePath", `"/after"`))
+	runCachedContractFixture(t, f, &cache)
+	for path, unit := range cache.units {
+		require.Equal(t, contractRetainedSize(reflect.ValueOf(unit.raw)), unit.retainedRawBytes)
+		if path != "fixture/routes.go" {
+			require.Equal(t, sizes[path], unit.retainedRawBytes)
+		}
+	}
+	checkpoints := logs.FilterMessage("contract cache checkpoint").All()
+	require.EqualValues(t, 1, checkpoints[len(checkpoints)-1].ContextMap()["normalized_raw_units"], "unchanged raw values retain their measurement across ownership transfer")
+	require.LessOrEqual(t, cache.retainedBytes, contractDeltaCacheBudget)
 }

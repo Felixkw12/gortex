@@ -140,15 +140,17 @@ func contractJobOutcomeOf(err error) string {
 
 // contractUnit is one file's proven extraction.
 type contractUnit struct {
-	path          string
-	stamp         ContractReceiptStamp
-	round         uint64
-	raw           []contracts.Contract
-	owners        map[string]bool
-	keys          map[string]bool
-	declared      []string
-	excluded      bool
-	ledgerAliases bool
+	// Retained raw size travels with its immutable unit; zero is unmeasured.
+	retainedRawBytes int64
+	path             string
+	stamp            ContractReceiptStamp
+	round            uint64
+	raw              []contracts.Contract
+	owners           map[string]bool
+	keys             map[string]bool
+	declared         []string
+	excluded         bool
+	ledgerAliases    bool
 	// rawDigest is the digest of raw, what the enrichment round consumed.
 	rawDigest string
 	// ledger holds the unit's recorded reads and byte reads, asked again to

@@ -101,9 +101,9 @@ func (s *contractDeltaSession) adopt(c *contractConvergence) {
 	c.units, c.live, c.excluded, c.suspect = p.units, p.live, p.excluded, p.suspect
 	c.retryOwners, c.declarers = p.retryOwners, p.declarers
 	c.clock, c.contentAt, c.maxContent, c.contents = p.clock, p.contentAt, p.maxContent, p.contents
-	for path, unit := range p.units {
-		if size, ok := p.rawBytes[path]; ok {
-			s.knownRaw[unit] = size
+	for _, unit := range p.units {
+		if unit.retainedRawBytes > 0 {
+			s.knownRaw[unit] = unit.retainedRawBytes
 		} else {
 			s.ownRaw(unit)
 		}
@@ -132,7 +132,8 @@ func (s *contractDeltaSession) ownRaw(unit *contractUnit) {
 		}
 	}
 	unit.raw = cloneContractDeltaRaw(unit.raw)
-	s.knownRaw[unit] = contractRetainedSize(reflect.ValueOf(unit.raw))
+	unit.retainedRawBytes = contractRetainedSize(reflect.ValueOf(unit.raw))
+	s.knownRaw[unit] = unit.retainedRawBytes
 	s.normalizedRaw++
 }
 
@@ -151,7 +152,7 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 		receipts = make(map[string]contractDeltaReceipt)
 	}
 	pool := &contractProofStrings{}
-	p := &contractDeltaCache{identity: pool.identity(s.identity), units: cloneContractUnitsMode(c.units, false, pool), live: cloneContractDeltaMap(c.live, pool), excluded: cloneContractDeltaMap(c.excluded, pool), suspect: cloneContractDeltaMap(c.suspect, pool), retryOwners: cloneContractIndex(c.retryOwners, pool), declarers: c.declarers.clone(pool), clock: cloneContractClock(c.clock, pool), contentAt: cloneContractDeltaMap(c.contentAt, pool), maxContent: c.maxContent, contents: cloneContractDeltaMap(c.contents, pool), receipts: cloneContractDeltaReceipts(receipts, pool), complete: complete, rawBytes: make(map[string]int64, len(c.units))}
+	p := &contractDeltaCache{identity: pool.identity(s.identity), units: cloneContractUnitsMode(c.units, false, pool), live: cloneContractDeltaMap(c.live, pool), excluded: cloneContractDeltaMap(c.excluded, pool), suspect: cloneContractDeltaMap(c.suspect, pool), retryOwners: cloneContractIndex(c.retryOwners, pool), declarers: c.declarers.clone(pool), clock: cloneContractClock(c.clock, pool), contentAt: cloneContractDeltaMap(c.contentAt, pool), maxContent: c.maxContent, contents: cloneContractDeltaMap(c.contents, pool), receipts: cloneContractDeltaReceipts(receipts, pool), complete: complete}
 	if s.cache != nil && c.report.Mode == viewmetrics.ContractModeDelta {
 		p.deltas = s.cache.deltas + 1
 	}
@@ -168,7 +169,6 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 			v.owners, v.keys = nil, nil
 		}
 		proofUnits[path] = &v
-		p.rawBytes[path] = s.knownRaw[c.units[path]]
 	}
 	withoutUnits := *p
 	withoutUnits.units = nil
@@ -177,9 +177,9 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 	p.retainedBytes = contractRetainedSizeMode(reflect.ValueOf(&withoutUnits), false) + contractRetainedSizeMode(reflect.ValueOf(proofUnits), false) + pooledBacking
 	proofBytes := p.retainedBytes
 	rawBytes := int64(0)
-	for _, size := range p.rawBytes {
-		p.retainedBytes += size
-		rawBytes += size
+	for _, unit := range p.units {
+		p.retainedBytes += unit.retainedRawBytes
+		rawBytes += unit.retainedRawBytes
 	}
 	c.logger.Info("contract cache checkpoint", zap.String("reason", "prepared"), zap.Bool("cache_present", true), zap.Bool("complete", p.complete), zap.Int("units", len(p.units)), zap.Int64("retained_bytes", p.retainedBytes), zap.Int64("raw_bytes", rawBytes), zap.Int64("proof_bytes", proofBytes), zap.Int("receipts", len(p.receipts)), zap.Int("deltas", p.deltas), zap.Int("pooled_strings", p.proofStringCount), zap.Int64("pooled_backing_bytes", pooledBacking), zap.Int("declarer_queries", len(p.declarers.queries)), zap.Int("normalized_raw_units", s.normalizedRaw))
 	s.cache = p

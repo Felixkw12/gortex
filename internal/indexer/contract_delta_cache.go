@@ -61,7 +61,6 @@ type contractDeltaCache struct {
 	deltas           int
 	complete         bool
 	retainedBytes    int64
-	rawBytes         map[string]int64
 	proofStringBytes int64
 	proofStringCount int
 }
