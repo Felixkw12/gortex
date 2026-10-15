@@ -959,9 +959,19 @@ func (c *ContractAnalysisCoordinator) recapture(a *contractActor, epoch uint64, 
 // already published are a noop. Only a job takes the job slot.
 func (c *ContractAnalysisCoordinator) startActor(a *contractActor, want contractActorWant, trigger string, triggeredAt time.Time) {
 	owned := true
+	started := time.Now()
 	defer func() {
+		recovered := recover()
 		if owned {
 			want.source.Release()
+		}
+		if recovered != nil {
+			elapsed := time.Since(started)
+			countContractJob(viewmetrics.ContractModeCold, viewmetrics.ContractJobPanic, elapsed)
+			c.options.Logger.Error("contract analysis admission panicked", zap.String("actor", a.id.String()), zap.Any("panic", recovered))
+			// No job slot was acquired: resolve the actor and arrange its
+			// retry here, leaving slot ownership to the job goroutine.
+			c.endJob(a, want, viewmetrics.ContractJobPanic, elapsed)
 		}
 	}()
 	switch {

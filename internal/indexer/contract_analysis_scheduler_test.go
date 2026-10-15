@@ -756,6 +756,63 @@ func TestContractSchedulerStallResolvesOnlyTheEndedJob(t *testing.T) {
 	require.Equal(t, []string{"r/@k", "r/@k", "r/@k", "r/@k2", "r/@k3"}, p.started())
 }
 
+func TestContractSchedulerRecoversFromBaselineAdmissionPanic(t *testing.T) {
+	var panicked atomic.Bool
+	p := newSchedulerProbe(t, func(options *ContractAnalysisCoordinatorOptions) {
+		options.ReconcileBaseline = func(context.Context, *graphview.RepoView, string, string) (bool, error) {
+			if panicked.CompareAndSwap(false, true) {
+				panic("injected baseline admission panic")
+			}
+			return true, nil
+		}
+	})
+	first, err := p.c.Schedule(t.Context(), ContractScheduleRequest{Actor: NewContractActor("", []string{"r"}), Key: graph.ContractAttachmentKey{RepoPrefix: "r"}})
+	require.NoError(t, err)
+	require.Equal(t, ContractActorPanic, p.wait(first).Result)
+	later := p.schedule("", []string{"r"}, "r", "accepted")
+	require.Equal(t, ContractActorPublished, p.wait(later).Result)
+}
+
+func TestContractSchedulerAdmissionPanicPreservesNewerInterest(t *testing.T) {
+	entered, proceed := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(proceed) }) }
+	p := newSchedulerProbe(t, func(options *ContractAnalysisCoordinatorOptions) {
+		options.ReconcileBaseline = func(ctx context.Context, _ *graphview.RepoView, _, _ string) (bool, error) {
+			close(entered)
+			select {
+			case <-proceed:
+				panic("injected pending baseline admission panic")
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+		}
+	})
+	t.Cleanup(release)
+	current := p.f.inputs[0].State
+	pending := current
+	pending.Accepted, pending.InputFingerprint = false, "pending"
+	require.NoError(t, p.f.store.BeginContractInputMutationContext(t.Context(), &current, pending, nil))
+	inputs, err := (&graphview.Materializer{Store: p.f.store}).CaptureContractInputs(t.Context(), nil, "repo-a", "")
+	require.NoError(t, err)
+	var released atomic.Int64
+	first, err := p.c.Schedule(t.Context(), ContractScheduleRequest{Actor: NewContractActor("", []string{"repo-a"}), Key: graph.ContractAttachmentKey{RepoPrefix: "repo-a"}, Inputs: inputs, Source: &ContractCaptureSource{onRelease: func() { released.Add(1) }}})
+	require.NoError(t, err)
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("baseline admission did not start")
+	}
+	p.hold("repo-a/@accepted")
+	later := p.schedule("", []string{"repo-a"}, "repo-a", "accepted")
+	release()
+	require.Eventually(t, func() bool { return p.c.Status(first.Actor).Result == ContractActorPanic }, 10*time.Second, time.Millisecond)
+	require.Equal(t, ContractActorPanic, p.wait(first).Result)
+	require.EqualValues(t, 1, released.Load())
+	p.release("repo-a/@accepted")
+	require.Equal(t, ContractActorPublished, p.wait(later).Result)
+}
+
 // TestContractSchedulerRecoversFromAJobPanic: a panicking job body is
 // counted, releases its snapshot once, serves its waiter at once and is
 // retried once; the actor stays schedulable and Close returns.
