@@ -194,6 +194,10 @@ const (
 	// ContractAnalysisRequestsTotal counts scheduling requests by what the
 	// request did: the answer every strict consumer's wait loop starts from.
 	ContractAnalysisRequestsTotal = "views_contract_analysis_requests_total"
+	// ContractAnalysisCapturesTotal counts the scheduler's census captures of
+	// an actor's inputs by result: a capture refused stale waits for the next
+	// input epoch, never retries at once.
+	ContractAnalysisCapturesTotal = "views_contract_analysis_captures_total"
 	// ContractAnalysisFilesTotal counts per-file extractions a job ran, by why
 	// the file was extracted. Its cold share is the whole-cohort cost.
 	ContractAnalysisFilesTotal = "views_contract_analysis_files_total"
@@ -281,6 +285,13 @@ const (
 	ContractRequestError            = "error"
 )
 
+// Contract analysis capture results.
+const (
+	ContractCaptureOK    = "ok"
+	ContractCaptureStale = "stale"
+	ContractCaptureError = "error"
+)
+
 // Why a job extracted one file.
 const (
 	ContractFilesCold     = "cold"
@@ -306,10 +317,12 @@ const (
 )
 
 // Contract repair kinds: a pending input-state header no save will accept,
-// and a receipt left unaccepted by a failed apply.
+// a receipt a failed apply left in flight, reindexed, and one whose
+// reindexes kept failing, excluded by a failure envelope.
 const (
 	ContractRepairPendingHeader = "pending_header"
 	ContractRepairStuckReceipt  = "stuck_receipt"
+	ContractRepairStuckEnvelope = "stuck_envelope"
 )
 
 // Committed-base generation shapes: self-contained, or composed over a parent.
@@ -781,6 +794,9 @@ var catalog = map[string]spec{
 			ContractRequestRefused, ContractRequestQueueFull, ContractRequestError,
 		}},
 	}},
+	ContractAnalysisCapturesTotal: {kind: kindCounter, labels: []labelSpec{
+		{name: LabelResult, values: []string{ContractCaptureOK, ContractCaptureStale, ContractCaptureError}},
+	}},
 	ContractAnalysisFilesTotal: {kind: kindCounter, labels: []labelSpec{
 		{name: LabelReason, values: []string{
 			ContractFilesCold, ContractFilesFill, ContractFilesDelta, ContractFilesRetry,
@@ -803,6 +819,6 @@ var catalog = map[string]spec{
 		}},
 	}},
 	ContractRepairTotal: {kind: kindCounter, labels: []labelSpec{
-		{name: LabelKind, values: []string{ContractRepairPendingHeader, ContractRepairStuckReceipt}},
+		{name: LabelKind, values: []string{ContractRepairPendingHeader, ContractRepairStuckReceipt, ContractRepairStuckEnvelope}},
 	}},
 }

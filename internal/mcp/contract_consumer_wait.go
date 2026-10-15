@@ -4,24 +4,32 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/runtimeactivity"
 )
 
 // ContractAnalysisRuntime is installed together with the contract worker.
-// Request must take independent selected-view/source ownership synchronously;
-// it may not retain the RPC's borrowed view after returning. Nil inputs request
-// only explicitly supported baseline reconciliation. WaitChange observes exact
-// attachment publication or input supersession, including a publication racing
-// its registration. Neither callback waits for ordinary core publication.
+// Schedule records a request's interest in an actor's inputs and returns at
+// once; it owns the prepared source on every return, and a full scheduler
+// refuses a new actor with a retryable *indexer.ContractQueueFullError.
+// WaitActor waits on the actor's promise for the seq Schedule answered.
+// WaitCapacity waits for capacity to free past CapacityEpoch, and WaitInputs
+// for the input epoch (InputEpoch) to move. None of them waits for ordinary
+// core publication.
 type ContractAnalysisRuntime struct {
-	Request    func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error)
-	WaitChange func(context.Context, graph.ContractAttachmentKey) error
+	Schedule      func(context.Context, indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error)
+	WaitActor     func(context.Context, indexer.ContractActor, uint64) (indexer.ContractActorStatus, error)
+	WaitCapacity  func(context.Context, uint64) error
+	CapacityEpoch func() uint64
+	InputEpoch    func() uint64
+	WaitInputs    func(context.Context, uint64) error
 }
 
 // SetContractAnalysisRuntime is a startup-only installation seam. Leaving it
@@ -30,11 +38,17 @@ func (s *Server) SetContractAnalysisRuntime(runtime *ContractAnalysisRuntime) {
 	if s == nil {
 		return
 	}
-	if runtime != nil && (runtime.Request == nil || runtime.WaitChange == nil) {
+	if runtime != nil && (runtime.Schedule == nil || runtime.WaitActor == nil || runtime.WaitCapacity == nil ||
+		runtime.CapacityEpoch == nil || runtime.InputEpoch == nil || runtime.WaitInputs == nil) {
 		return
 	}
 	s.contractAnalysisRuntime = runtime
 }
+
+// contractConsumerInputsPoll bounds one wait for the input epoch: inputs can
+// move without an announced core acceptance (a linked worktree's
+// generation), so a stale capture is taken again at least once a second.
+const contractConsumerInputsPoll = time.Second
 
 // ContractAnalysisShouldYield excludes RPCs suspended for this producer from
 // foreground demand. Ordinary active tools and the edit lane retain priority.
@@ -144,10 +158,20 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 			checkout = view.rider.CheckoutID
 		}
 	}
+	runtime := s.contractAnalysisRuntime
+	actor := indexer.NewContractActor(checkout, repos)
+	// scheduled holds the input epoch each key was last scheduled at: a key
+	// is asked for at most once per epoch, so a promise that resolved
+	// without its attachment opening waits for the inputs to move instead
+	// of asking again.
+	scheduled := make(map[graph.ContractAttachmentKey]uint64)
 	for {
 		if err := waitCtx.Err(); err != nil {
-			return ctx, contractWaitRefusal(err)
+			return ctx, contractWaitRefusal(err, 0)
 		}
+		// Sampled before the capture: an accept landing after it moves the
+		// epoch past this sample.
+		epoch := runtime.InputEpoch()
 		binding, pending, err := s.openContractConsumerBinding(waitCtx, selected, checkout, repos)
 		if err == nil {
 			status.state, status.reason = graphview.StateComplete, ""
@@ -157,52 +181,90 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 			return withContractAnalysisContext(ctx, binding), nil
 		}
 		if waitCtx.Err() != nil {
-			return ctx, contractWaitRefusal(waitCtx.Err())
+			return ctx, contractWaitRefusal(waitCtx.Err(), 0)
 		}
 		if pending == nil {
 			return ctx, mcp.NewToolResultError(err.Error())
 		}
-		if pending.stale {
-			if err := waitFreshnessRetry(waitCtx, deadline); err != nil {
-				return ctx, contractWaitRefusal(err)
+		if at, seen := scheduled[pending.key]; pending.stale || seen && at >= epoch {
+			// Superseded inputs are captured again once they move; never
+			// schedule the stale vector, nor one vector twice per epoch.
+			if err := s.waitContractInputs(waitCtx, epoch); err != nil {
+				return ctx, contractWaitRefusal(err, 0)
 			}
-			continue // Recapture superseded input; never queue the stale vector.
+			continue
 		}
-		supported, requestErr, waitErr := s.requestAndWaitContractAnalysis(waitCtx, selected, pending)
-
-		if requestErr != nil {
-			if errors.Is(requestErr, graph.ErrContractProjectionStale) {
-				if err := waitFreshnessRetry(waitCtx, deadline); err != nil {
-					return ctx, contractWaitRefusal(err)
-				}
-				continue
-			}
-			return ctx, contractWaitRefusal(requestErr)
-		}
-		if !supported {
+		scheduled[pending.key] = epoch
+		result, retry, err := s.scheduleAndWaitContractAnalysis(waitCtx, actor, selected, pending, epoch)
+		switch {
+		case errors.Is(err, indexer.ErrContractUnsupported):
 			return ctx, mcp.NewToolResultError(graphview.NewViewError(graphview.CodeCapabilityUnavailable, "contract analysis cannot build the selected historical inputs").Error())
+		case errors.Is(err, graph.ErrContractProjectionStale):
+			// The selected view's handoff could not be taken any more.
+			delete(scheduled, pending.key)
+			if err := s.waitContractInputs(waitCtx, epoch); err != nil {
+				return ctx, contractWaitRefusal(err, 0)
+			}
+			continue
+		case err != nil:
+			return ctx, contractWaitRefusal(err, retry)
 		}
-		if waitErr != nil {
-			return ctx, contractWaitRefusal(waitErr)
+		switch result.Result {
+		case indexer.ContractActorFailed, indexer.ContractActorStalled, indexer.ContractActorPanic:
+			return ctx, contractWaitRefusal(fmt.Errorf("contract analysis of these inputs %s", result.Result), result.RetryAfter)
+		case indexer.ContractActorInputsStale:
+			// The request's capture can no longer be taken: capture the
+			// inputs again once they moved, and ask for them again.
+			delete(scheduled, pending.key)
+			if err := s.waitContractInputs(waitCtx, epoch); err != nil {
+				return ctx, contractWaitRefusal(err, 0)
+			}
 		}
-		// Superseded notifications may be coalesced. Bound read/queue rate even
-		// if the runtime reports an already observed change immediately.
-		if err := waitFreshnessRetry(waitCtx, deadline); err != nil {
-			return ctx, contractWaitRefusal(err)
-		}
+		// Published, found published, or replaced by newer inputs: open the
+		// inputs again.
 	}
 }
 
-// A waiting contract RPC cannot be foreground demand that parks its own
-// producer. The counter balances cancellation, error and callback panics.
-func (s *Server) requestAndWaitContractAnalysis(ctx context.Context, selected *graphview.RepoView, pending *pendingContractBinding) (supported bool, requestErr, waitErr error) {
+// scheduleAndWaitContractAnalysis asks the scheduler for the pending inputs
+// and waits on the actor's promise; a full scheduler is waited out until its
+// capacity frees. A waiting contract RPC cannot be foreground demand that
+// parks its own producer: the counter balances cancellation, error and
+// callback panics.
+func (s *Server) scheduleAndWaitContractAnalysis(ctx context.Context, actor indexer.ContractActor, selected *graphview.RepoView, pending *pendingContractBinding, epoch uint64) (indexer.ContractActorStatus, time.Duration, error) {
 	s.contractAnalysisWaiters.Add(1)
 	defer s.contractAnalysisWaiters.Add(-1)
-	supported, requestErr = s.contractAnalysisRuntime.Request(ctx, selected, pending.inputs, pending.key.RepoPrefix, pending.key.CheckoutID)
-	if requestErr != nil || !supported {
-		return supported, requestErr, nil
+	runtime := s.contractAnalysisRuntime
+	for {
+		capacity := runtime.CapacityEpoch()
+		source, err := indexer.PrepareContractCaptureSource(selected)
+		if err != nil {
+			return indexer.ContractActorStatus{}, 0, err
+		}
+		scheduled, err := runtime.Schedule(ctx, indexer.ContractScheduleRequest{Actor: actor, Key: pending.key, Inputs: pending.inputs, Source: source, Epoch: epoch})
+		var full *indexer.ContractQueueFullError
+		if errors.As(err, &full) {
+			if waitErr := runtime.WaitCapacity(ctx, capacity); waitErr != nil {
+				return indexer.ContractActorStatus{}, full.RetryAfter, fmt.Errorf("%w: %w", err, waitErr)
+			}
+			continue
+		}
+		if err != nil {
+			return indexer.ContractActorStatus{}, 0, err
+		}
+		status, err := runtime.WaitActor(ctx, scheduled.Actor, scheduled.ArrivalSeq)
+		return status, status.RetryAfter, err
 	}
-	return supported, nil, s.contractAnalysisRuntime.WaitChange(ctx, pending.key)
+}
+
+// waitContractInputs waits, as a suspended producer waiter, for the input
+// epoch to pass since, at most contractConsumerInputsPoll.
+func (s *Server) waitContractInputs(ctx context.Context, since uint64) error {
+	s.contractAnalysisWaiters.Add(1)
+	defer s.contractAnalysisWaiters.Add(-1)
+	wait, cancel := context.WithTimeout(ctx, contractConsumerInputsPoll)
+	defer cancel()
+	_ = s.contractAnalysisRuntime.WaitInputs(wait, since)
+	return ctx.Err()
 }
 
 type pendingContractBinding struct {
@@ -313,8 +375,14 @@ func (s *Server) openContractConsumerBinding(ctx context.Context, selected *grap
 	return binding, nil, nil
 }
 
-func contractWaitRefusal(err error) *mcp.CallToolResult {
-	return mcp.NewToolResultError(graphview.NewViewError(graphview.CodeRequiredCapabilityIncomplete, "graph.contracts did not become complete within this request: "+err.Error()).Error())
+// contractWaitRefusal refuses a strict call whose contract analysis did not
+// complete in time, with a retry hint when the scheduler gave one.
+func contractWaitRefusal(err error, retryAfter time.Duration) *mcp.CallToolResult {
+	message := "graph.contracts did not become complete within this request: " + err.Error()
+	if retryAfter > 0 {
+		message += fmt.Sprintf("; retry after %s", retryAfter.Round(time.Second))
+	}
+	return mcp.NewToolResultError(graphview.NewViewError(graphview.CodeRequiredCapabilityIncomplete, message).Error())
 }
 
 func decorateContractConsumerResult(ctx context.Context, result *mcp.CallToolResult) *mcp.CallToolResult {

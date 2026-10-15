@@ -50,6 +50,8 @@ type contractJobFixture struct {
 	adjust func(*ContractFollowupSnapshot)
 	// onWait, when set, runs as a job starts waiting for a Published event.
 	onWait func()
+	// logger, when set, receives each job's lines.
+	logger *zap.Logger
 }
 
 func newContractJobFixture(t *testing.T, files map[string]string) *contractJobFixture {
@@ -294,11 +296,12 @@ func (f *contractJobFixture) job(hooks *contractConvergenceHooks, yield func(con
 	f.t.Helper()
 	f.layers++
 	return runFixtureContractJob(f.t, f.options, contractFixtureJob{hooks: hooks, yield: yield, layer: f.layers, adjust: f.adjust,
-		epoch: f.epoch.Load, wait: f.waitPublished})
+		epoch: f.epoch.Load, wait: f.waitPublished, logger: f.logger})
 }
 
 // contractFixtureJob is one job's knobs: test hooks, the yield, the payload
-// layer's creation order, a snapshot adjustment, and the Published source.
+// layer's creation order, a snapshot adjustment, the Published source and the
+// job's logger.
 type contractFixtureJob struct {
 	hooks  *contractConvergenceHooks
 	yield  func(context.Context) error
@@ -306,6 +309,7 @@ type contractFixtureJob struct {
 	adjust func(*ContractFollowupSnapshot)
 	epoch  func() uint64
 	wait   func(context.Context, uint64, time.Time) bool
+	logger *zap.Logger
 }
 
 // runFixtureContractJob captures the primary fixture repository's current
@@ -329,7 +333,11 @@ func runFixtureContractJob(t *testing.T, options ContractFollowupCaptureOptions,
 	if yield == nil {
 		yield = options.Yield
 	}
-	req := ContractFollowupRequest{RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: options.Registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: options.Materializer.Leases, Logger: zap.NewNop(), Yield: yield,
+	logger := job.logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	req := ContractFollowupRequest{RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: options.Registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: options.Materializer.Leases, Logger: logger, Yield: yield,
 		PublishedEpoch: job.epoch, WaitPublished: job.wait, convergenceHooks: job.hooks}
 	return RunContractFollowup(ctx, req)
 }
@@ -1347,7 +1355,7 @@ func TestContractJobProvesRetriedUnitsOneByOneUnderAWriter(t *testing.T) {
 // its deadline.
 func TestContractAnalysisCoordinatorPublishedIsLevelTriggered(t *testing.T) {
 	f := newContractWorkerFixture(t)
-	capture := func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+	capture := func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
 		return ContractFollowupSnapshot{}, nil, graph.ErrContractProjectionStale
 	}
 	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: func(ctx context.Context) error { return ctx.Err() }})
@@ -3327,13 +3335,15 @@ func TestContractWatcherPatchOvertakenAfterItsWritesEndsItsWindow(t *testing.T) 
 	require.True(t, stamp.quiescent())
 }
 
-// TestContractCaptureAdmitsAnUnacceptedRowOnlyOnceItsCoreWritesEnded: the
+// TestContractCaptureAdmitsAnUnacceptedRowOnTheRuleAJobProvesItsReadsBy: the
 // capture admits an unaccepted receipt row on the rule a job proves its reads
 // by. A watcher patch overtaken after its writes leaves its row neither
 // accepted nor settled with its window closed: a job is admitted and publishes
-// the cold build from it. A pass whose body failed after it staged a row
-// leaves that row's window open: the capture refuses it as stale.
-func TestContractCaptureAdmitsAnUnacceptedRowOnlyOnceItsCoreWritesEnded(t *testing.T) {
+// the cold build from it. An apply that staged a row and has not ended its
+// core writes leaves that row's window open: the capture admits it in flight,
+// and the job's reads of the file wait for the window to close
+// (TestContractCaptureAdmitsAFileInFlight).
+func TestContractCaptureAdmitsAnUnacceptedRowOnTheRuleAJobProvesItsReadsBy(t *testing.T) {
 	t.Run("overtaken_patch", func(t *testing.T) {
 		f := newRouteConstantFixture(t)
 		f.mi.mu.RLock()
@@ -3383,8 +3393,11 @@ func TestContractCaptureAdmitsAnUnacceptedRowOnlyOnceItsCoreWritesEnded(t *testi
 		require.True(t, state.Seq > 0 && state.Writing && !state.Settled, "the row is staged with its window open")
 		inputs, err := f.options.Materializer.CaptureContractInputs(t.Context(), nil, "fixture", "")
 		require.NoError(t, err)
-		_, _, err = NewContractFollowupCapture(f.options)(t.Context(), nil, inputs, "fixture", "")
-		require.ErrorIs(t, err, graph.ErrContractProjectionStale, "a row whose core writes may be in flight is not admitted")
+		snapshot, _, err := NewContractFollowupCapture(f.options)(t.Context(), nil, inputs, "fixture", "")
+		require.NoError(t, err, "a row whose core writes may be in flight is admitted in flight")
+		require.Equal(t, []string{owner}, snapshot.InFlight)
+		require.NotNil(t, snapshot.Scan, "a snapshot with a file in flight takes stamp scans")
+		snapshot.Release()
 		// The apply ends its core writes; nothing accepts or settles it.
 		f.store.EndContractCoreWrites("fixture", "", f.store.ContractReceiptWriteSeqs("fixture", "", []string{owner}))
 		report, err := f.job(nil, contractJobDeadline(time.Minute))

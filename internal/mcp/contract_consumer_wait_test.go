@@ -150,29 +150,22 @@ func TestContractConsumerHeldWorkerKeepsOrdinaryHandlersIndependent(t *testing.T
 	f.srv.indexer = idx
 	held := make(chan struct{})
 	queued := make(chan struct{}, 1)
-	var requests, waits atomic.Int64
-	f.srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{
-		Request: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error) {
-			if f.srv.ContractAnalysisShouldYield() {
-				t.Error("waiting contract RPC must not park its own producer")
-			}
-			requests.Add(1)
-			return true, nil
-		},
-		WaitChange: func(ctx context.Context, _ graph.ContractAttachmentKey) error {
-			waits.Add(1)
-			select {
-			case queued <- struct{}{}:
-			default:
-			}
-			select {
-			case <-held:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		},
-	})
+	fake := &contractRuntimeFake{t: t}
+	requests, waits := &fake.schedules, &fake.waits
+	fake.schedule = func(ctx context.Context, req indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error) {
+		if f.srv.ContractAnalysisShouldYield() {
+			t.Error("waiting contract RPC must not park its own producer")
+		}
+		return scheduledAt(1)(ctx, req)
+	}
+	fake.waitActor = func(ctx context.Context, actor indexer.ContractActor, seq uint64) (indexer.ContractActorStatus, error) {
+		select {
+		case queued <- struct{}{}:
+		default:
+		}
+		return waitUntilClosed(held)(ctx, actor, seq)
+	}
+	f.srv.SetContractAnalysisRuntime(fake.runtime())
 	type answer struct {
 		result *mcplib.CallToolResult
 		err    error
@@ -236,16 +229,7 @@ func TestContractConsumerHeldWorkerKeepsOrdinaryHandlersIndependent(t *testing.T
 func TestContractConsumerOrdinaryNameSearchDoesNotRequireAnalysisStorage(t *testing.T) {
 	f := newContractConsumerFixture(t)
 	f.srv.SetMaterializer(nil)
-	f.srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{
-		Request: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error) {
-			t.Error("ordinary name search scheduled contract work")
-			return false, nil
-		},
-		WaitChange: func(context.Context, graph.ContractAttachmentKey) error {
-			t.Error("ordinary name search waited for contract work")
-			return nil
-		},
-	})
+	installForbiddenContractRuntime(t, f.srv) // An ordinary name search never schedules or waits.
 	result, err := f.request(t.Context(), "search_symbols", map[string]any{"query": "Handle", "format": "json"}, f.srv.handleSearchSymbols)
 	body := requireContractBody(t, result, err)
 	require.Contains(t, body, "repo/handler.go::Handle")
@@ -260,16 +244,7 @@ func TestContractConsumerRequiredMixedSearchAndRelationsPreserveCore(t *testing.
 	f.store.AddBatch([]*graph.Node{core, table}, []*graph.Edge{{From: "repo/handler.go::Handle", To: table.ID, Kind: graph.EdgeProvides, FilePath: "repo/schema.sql"}})
 	require.NoError(t, f.store.BatchUpsertSymbolFTS([]graph.SymbolFTSItem{{NodeID: core.ID, Tokens: "after helper"}}))
 	f.publish(t, nil, "", "/after")
-	f.srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{
-		Request: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error) {
-			t.Error("current mixed request scheduled contract work")
-			return false, nil
-		},
-		WaitChange: func(context.Context, graph.ContractAttachmentKey) error {
-			t.Error("current mixed request waited")
-			return nil
-		},
-	})
+	installForbiddenContractRuntime(t, f.srv) // A current mixed request never schedules or waits.
 	result, err := f.request(t.Context(), "search_symbols", map[string]any{"query": "after", "format": "json", requiredCapabilitiesArgName: string(graphview.CapContracts)}, f.srv.handleSearchSymbols)
 	body := requireContractBody(t, result, err)
 	require.Contains(t, body, core.ID)
@@ -288,13 +263,12 @@ func TestContractConsumerWaitHonorsOriginalDeadlineAndCancellation(t *testing.T)
 		t.Run(fmt.Sprint(canceled), func(t *testing.T) {
 			f := newContractConsumerFixture(t)
 			entered := make(chan struct{}, 1)
-			f.srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{Request: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error) {
-				return true, nil
-			}, WaitChange: func(ctx context.Context, _ graph.ContractAttachmentKey) error {
+			fake := &contractRuntimeFake{t: t, schedule: scheduledAt(1), waitActor: func(ctx context.Context, _ indexer.ContractActor, _ uint64) (indexer.ContractActorStatus, error) {
 				entered <- struct{}{}
 				<-ctx.Done()
-				return ctx.Err()
-			}})
+				return indexer.ContractActorStatus{}, ctx.Err()
+			}}
+			f.srv.SetContractAnalysisRuntime(fake.runtime())
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			args := map[string]any{"action": "list", "wait_deadline": time.Now().Add(time.Second).Format(time.RFC3339Nano)}
@@ -340,30 +314,32 @@ func TestContractConsumerRecapturesSupersededInputsWithinSameRPC(t *testing.T) {
 	changed := make(chan struct{})
 	current := make(chan *graphview.SelectedContractInputs, 1)
 	held := make(chan struct{})
-	var attempts atomic.Int64
-	f.srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{
-		Request: func(ctx context.Context, _ *graphview.RepoView, inputs *graphview.SelectedContractInputs, _, _ string) (bool, error) {
-			if attempts.Add(1) == 1 {
-				close(first)
-				select {
-				case <-changed:
-					return false, graph.ErrContractProjectionStale
-				case <-ctx.Done():
-					return false, ctx.Err()
-				}
-			}
-			current <- inputs
-			return true, nil
-		},
-		WaitChange: func(ctx context.Context, _ graph.ContractAttachmentKey) error {
+	fake := &contractRuntimeFake{t: t}
+	fake.schedule = func(_ context.Context, req indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error) {
+		req.Source.Release()
+		n := fake.schedules.Load()
+		if n == 1 {
+			close(first)
+		} else {
+			current <- req.Inputs
+		}
+		return indexer.ContractScheduleResult{Result: indexer.ContractScheduled, Actor: req.Actor, ArrivalSeq: uint64(n)}, nil
+	}
+	fake.waitActor = func(ctx context.Context, actor indexer.ContractActor, seq uint64) (indexer.ContractActorStatus, error) {
+		if seq == 1 {
+			// The inputs move while the request waits: the promise for the
+			// superseded vector resolves stale, and the request captures
+			// again once the input epoch moved past its sample.
 			select {
-			case <-held:
-				return nil
+			case <-changed:
+				return indexer.ContractActorStatus{Result: indexer.ContractActorInputsStale, Seq: seq}, nil
 			case <-ctx.Done():
-				return ctx.Err()
+				return indexer.ContractActorStatus{}, ctx.Err()
 			}
-		},
-	})
+		}
+		return waitUntilClosed(held)(ctx, actor, seq)
+	}
+	f.srv.SetContractAnalysisRuntime(fake.runtime())
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	done := make(chan *mcplib.CallToolResult, 1)
@@ -382,6 +358,7 @@ func TestContractConsumerRecapturesSupersededInputsWithinSameRPC(t *testing.T) {
 	require.NoError(t, f.store.BeginContractInputMutationContext(t.Context(), &old, next, nil))
 	require.NoError(t, f.store.AcceptContractInputMutationContext(t.Context(), next))
 	f.states["repo"] = next
+	fake.epoch.Add(1) // The accept announces itself.
 	close(changed)
 	select {
 	case capture := <-current:
@@ -410,13 +387,7 @@ func TestContractConsumerRecapturesSupersededInputsWithinSameRPC(t *testing.T) {
 func TestContractConsumerNonemptySelectedHandlersUseOneCoherentCohort(t *testing.T) {
 	f := newContractConsumerFixture(t)
 	f.publish(t, nil, "", "/after")
-	f.srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{Request: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error) {
-		t.Error("ready attachment queued work")
-		return false, nil
-	}, WaitChange: func(context.Context, graph.ContractAttachmentKey) error {
-		t.Error("ready attachment waited")
-		return nil
-	}})
+	installForbiddenContractRuntime(t, f.srv) // A ready attachment schedules and waits on nothing.
 	for _, test := range []struct {
 		name     string
 		args     map[string]any
@@ -478,13 +449,7 @@ func TestContractConsumerLinkedCompanionBindingUsesActualMaterializedAncestry(t 
 	require.True(t, selected.ComposesBaseCorpus())
 	f.publish(t, nil, "", "/primary-only")
 	f.publish(t, selected, viewTestWorktree, "/linked-only")
-	f.srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{Request: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error) {
-		t.Error("selected attachments were not bound")
-		return false, nil
-	}, WaitChange: func(context.Context, graph.ContractAttachmentKey) error {
-		t.Error("selected attachments waited")
-		return nil
-	}})
+	installForbiddenContractRuntime(t, f.srv) // The selected attachments bind without a schedule or a wait.
 	ctx := WithSessionCWD(WithSessionID(t.Context(), "contract-linked"), worktreeRoot)
 	result, err := f.request(ctx, "contracts", map[string]any{"action": "check", "format": "json", "view": map[string]any{"kind": "worktree", "checkout_id": viewTestWorktree}}, f.srv.handleContracts)
 	body := requireContractBody(t, result, err)
@@ -537,13 +502,7 @@ func TestContractConsumerIndependentDependencyAndConfigEdgesKeepCoreDeclarations
 		{From: ctor.ID, To: bean.ID, Kind: graph.EdgeCalls, FilePath: ctor.FilePath, Meta: map[string]any{"via": "spring.Bean", "confidence": 1.0}},
 		{From: ctor.ID, To: current.ID, Kind: graph.EdgeReadsConfig, FilePath: ctor.FilePath, Meta: map[string]any{"source": "configuration"}},
 	})
-	f.srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{Request: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error) {
-		t.Error("complete dependency payload scheduled work")
-		return false, nil
-	}, WaitChange: func(context.Context, graph.ContractAttachmentKey) error {
-		t.Error("complete dependency payload waited")
-		return nil
-	}})
+	installForbiddenContractRuntime(t, f.srv) // A complete dependency payload schedules and waits on nothing.
 	result, err := f.request(t.Context(), "get_symbol", map[string]any{"id": ctor.ID, "format": "json", requiredCapabilitiesArgName: string(graphview.CapContracts)}, f.srv.handleGetSymbol)
 	body := requireContractBody(t, result, err)
 	require.Contains(t, body, "CurrentCoreCtor")
@@ -583,13 +542,7 @@ func TestContractConsumerIndependentDependencyAndConfigEdgesKeepCoreDeclarations
 func TestContractConsumerRepoSelectorUsesFullAdmittedCohortAndSharedOwner(t *testing.T) {
 	f := newContractConsumerFixture(t)
 	f.publish(t, nil, "", "/after")
-	f.srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{Request: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error) {
-		t.Error("coherent ready cohort scheduled work")
-		return false, nil
-	}, WaitChange: func(context.Context, graph.ContractAttachmentKey) error {
-		t.Error("coherent ready cohort waited")
-		return nil
-	}})
+	installForbiddenContractRuntime(t, f.srv) // A coherent ready cohort schedules and waits on nothing.
 	result, err := f.request(t.Context(), "search_symbols", map[string]any{"repo": "b", "query": "after", "kind": "contract", "format": "json"}, f.srv.handleSearchSymbols)
 	require.Contains(t, requireContractBody(t, result, err), "http::GET::/after", "B's consumer owns the global canonical scalar stored under repo")
 	result, err = f.request(t.Context(), "get_symbol", map[string]any{"repo": "b", "id": "http::GET::/after", "format": "json"}, f.srv.handleGetSymbol)
@@ -607,13 +560,7 @@ func TestContractConsumerOrdinaryCallersAndTraversalExcludeLegacyDerivedLinks(t 
 		{From: legacy.ID, To: "repo/handler.go::Handle", Kind: graph.EdgeMatches, FilePath: legacy.FilePath},
 		{From: "repo/handler.go::Handle", To: table.ID, Kind: graph.EdgeProvides, FilePath: table.FilePath},
 	})
-	f.srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{Request: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error) {
-		t.Error("ordinary traversal scheduled analysis")
-		return false, nil
-	}, WaitChange: func(context.Context, graph.ContractAttachmentKey) error {
-		t.Error("ordinary traversal waited")
-		return nil
-	}})
+	installForbiddenContractRuntime(t, f.srv) // An ordinary traversal schedules and waits on nothing.
 	// No input or attachment reader is available. Existing core endpoint rows
 	// are the only evidence the adjacency filter needs.
 	f.srv.materializer = nil
@@ -650,7 +597,10 @@ func TestContractConsumerYieldCountsOrdinaryWorkAndBalancesFailure(t *testing.T)
 	f := newContractConsumerFixture(t)
 	runtimeactivity.Begin("mcp")
 	defer runtimeactivity.End("mcp")
-	f.srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{Request: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error) {
+	fake := &contractRuntimeFake{t: t, waitActor: func(context.Context, indexer.ContractActor, uint64) (indexer.ContractActorStatus, error) {
+		return indexer.ContractActorStatus{}, context.Canceled
+	}}
+	fake.schedule = func(ctx context.Context, req indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error) {
 		if f.srv.ContractAnalysisShouldYield() {
 			t.Error("contract waiter self-starved")
 		}
@@ -659,10 +609,256 @@ func TestContractConsumerYieldCountsOrdinaryWorkAndBalancesFailure(t *testing.T)
 			t.Error("ordinary concurrent tool did not retain priority")
 		}
 		runtimeactivity.End("mcp")
-		return true, nil
-	}, WaitChange: func(context.Context, graph.ContractAttachmentKey) error { return context.Canceled }})
-	_, _, err := f.srv.requestAndWaitContractAnalysis(t.Context(), nil, &pendingContractBinding{})
+		return scheduledAt(1)(ctx, req)
+	}
+	f.srv.SetContractAnalysisRuntime(fake.runtime())
+	_, _, err := f.srv.scheduleAndWaitContractAnalysis(t.Context(), indexer.NewContractActor("", []string{"repo"}), nil, &pendingContractBinding{}, 0)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Zero(t, f.srv.contractAnalysisWaiters.Load())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, f.srv.waitContractInputs(ctx, 0), context.Canceled)
+	require.Zero(t, f.srv.contractAnalysisWaiters.Load(), "every producer wait balances the waiter count")
 	require.True(t, f.srv.ContractAnalysisShouldYield())
+}
+
+func (f *contractConsumerFixture) strictList(ctx context.Context, wait time.Duration) (*mcplib.CallToolResult, error) {
+	return f.request(ctx, "contracts", map[string]any{"action": "list", "format": "json", "wait_deadline": time.Now().Add(wait).Format(time.RFC3339Nano)}, f.srv.handleContracts)
+}
+
+// TestContractConsumerWaitsOnTheActorPromiseNotByRecapture: unrelated core
+// acceptances move the input epoch while the strict call waits; it waits on
+// the actor's promise alone and schedules its inputs once.
+func TestContractConsumerWaitsOnTheActorPromiseNotByRecapture(t *testing.T) {
+	f := newContractConsumerFixture(t)
+	release := make(chan struct{})
+	fake := &contractRuntimeFake{t: t, schedule: scheduledAt(1), waitActor: waitUntilClosed(release)}
+	f.srv.SetContractAnalysisRuntime(fake.runtime())
+	done := make(chan *mcplib.CallToolResult, 1)
+	go func() {
+		result, _ := f.strictList(t.Context(), 20*time.Second)
+		done <- result
+	}()
+	require.Eventually(t, func() bool { return fake.waits.Load() == 1 }, 10*time.Second, time.Millisecond)
+	for range 20 {
+		fake.epoch.Add(1)
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.publish(t, nil, "", "/after")
+	close(release)
+	select {
+	case result := <-done:
+		require.False(t, result.IsError, viewResultText(t, result))
+		require.Contains(t, viewResultText(t, result), "/after")
+	case <-time.After(20 * time.Second):
+		t.Fatal("the strict call did not complete")
+	}
+	require.EqualValues(t, 1, fake.schedules.Load(), "one schedule for one key")
+}
+
+// TestContractConsumerStaleInputsWaitForTheInputEpoch: inputs whose capture
+// went stale are captured again once the input epoch moves, and at most
+// once a second while it does not.
+func TestContractConsumerStaleInputsWaitForTheInputEpoch(t *testing.T) {
+	f := newContractConsumerFixture(t)
+	fake := &contractRuntimeFake{t: t, schedule: scheduledAt(1), waitActor: func(_ context.Context, _ indexer.ContractActor, seq uint64) (indexer.ContractActorStatus, error) {
+		return indexer.ContractActorStatus{Result: indexer.ContractActorInputsStale, Seq: seq}, nil
+	}}
+	f.srv.SetContractAnalysisRuntime(fake.runtime())
+	start := time.Now()
+	result, err := f.strictList(t.Context(), 2500*time.Millisecond)
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, viewResultText(t, result), "required_capability_incomplete")
+	elapsed := time.Since(start)
+	require.LessOrEqual(t, fake.captures.Load(), int64(elapsed/time.Second)+2, "one capture per second with no epoch move, %d in %s", fake.captures.Load(), elapsed)
+}
+
+// TestContractConsumerQueueFullIsRetryableNeverUnavailable: a full
+// scheduler is waited out until capacity frees; at the deadline the call is
+// refused as incomplete with a retry hint, never as unavailable.
+func TestContractConsumerQueueFullIsRetryableNeverUnavailable(t *testing.T) {
+	full := func(_ context.Context, req indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error) {
+		req.Source.Release()
+		return indexer.ContractScheduleResult{}, &indexer.ContractQueueFullError{RetryAfter: 3 * time.Second}
+	}
+	t.Run("deadline", func(t *testing.T) {
+		f := newContractConsumerFixture(t)
+		fake := &contractRuntimeFake{t: t, schedule: full}
+		f.srv.SetContractAnalysisRuntime(fake.runtime())
+		result, err := f.strictList(t.Context(), time.Second)
+		require.NoError(t, err)
+		text := viewResultText(t, result)
+		require.True(t, result.IsError)
+		require.Contains(t, text, "required_capability_incomplete")
+		require.Contains(t, text, "retry after 3s")
+		require.NotContains(t, text, "capability_unavailable")
+	})
+	t.Run("capacity", func(t *testing.T) {
+		f := newContractConsumerFixture(t)
+		release := make(chan struct{})
+		var refused atomic.Bool
+		fake := &contractRuntimeFake{t: t, waitActor: waitUntilClosed(release)}
+		fake.schedule = func(ctx context.Context, req indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error) {
+			if refused.CompareAndSwap(false, true) {
+				go func() {
+					time.Sleep(50 * time.Millisecond)
+					fake.capacity.Add(1)
+				}()
+				return full(ctx, req)
+			}
+			return scheduledAt(2)(ctx, req)
+		}
+		f.srv.SetContractAnalysisRuntime(fake.runtime())
+		go func() {
+			for fake.waits.Load() == 0 {
+				time.Sleep(time.Millisecond)
+			}
+			f.publish(t, nil, "", "/after")
+			close(release)
+		}()
+		result, err := f.strictList(t.Context(), 10*time.Second)
+		require.NoError(t, err)
+		require.False(t, result.IsError, viewResultText(t, result))
+		require.EqualValues(t, 2, fake.schedules.Load(), "asked again once capacity freed")
+	})
+}
+
+// TestContractConsumerPendingInputsWithACurrentBaselineWait: inputs not yet
+// accepted are scheduled and waited on; the call completes once they are
+// accepted and published, never refused as unavailable.
+func TestContractConsumerPendingInputsWithACurrentBaselineWait(t *testing.T) {
+	f := newContractConsumerFixture(t)
+	old := f.states["repo"]
+	pending := old
+	pending.InputFingerprint = "repo-pending"
+	pending.Accepted = false
+	require.NoError(t, f.store.BeginContractInputMutationContext(t.Context(), &old, pending, nil))
+	var seen atomic.Bool
+	fake := &contractRuntimeFake{t: t}
+	fake.schedule = func(_ context.Context, req indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error) {
+		req.Source.Release()
+		result := indexer.ContractScheduleResult{Result: indexer.ContractScheduled, Actor: req.Actor, ArrivalSeq: 1}
+		if req.Inputs != nil && !req.Inputs.State.Accepted {
+			seen.Store(true)
+			result.Result = indexer.ContractDeferred
+		}
+		return result, nil
+	}
+	fake.waitActor = func(ctx context.Context, _ indexer.ContractActor, seq uint64) (indexer.ContractActorStatus, error) {
+		if seq == 1 && seen.Load() {
+			// The inputs are accepted and published meanwhile.
+			accepted := pending
+			accepted.Accepted = true
+			if err := f.store.AcceptContractInputMutationContext(ctx, accepted); err != nil {
+				return indexer.ContractActorStatus{}, err
+			}
+			f.states["repo"] = accepted
+			f.publish(t, nil, "", "/accepted")
+			fake.epoch.Add(1)
+			return indexer.ContractActorStatus{Result: indexer.ContractActorKeyMoved, Seq: seq}, nil
+		}
+		return indexer.ContractActorStatus{Result: indexer.ContractActorPublished, Seq: seq}, nil
+	}
+	f.srv.SetContractAnalysisRuntime(fake.runtime())
+	result, err := f.strictList(t.Context(), 10*time.Second)
+	require.NoError(t, err)
+	require.False(t, result.IsError, viewResultText(t, result))
+	require.True(t, seen.Load(), "the pending inputs were scheduled")
+	require.Contains(t, viewResultText(t, result), "/accepted")
+}
+
+// TestContractConsumerArrivalAtAPublishedKeyCompletesWithoutARerun: inputs
+// published before the call complete it with no schedule; inputs published
+// between the open and the schedule, or between the schedule and the wait,
+// complete it at the next open.
+func TestContractConsumerArrivalAtAPublishedKeyCompletesWithoutARerun(t *testing.T) {
+	t.Run("before", func(t *testing.T) {
+		f := newContractConsumerFixture(t)
+		f.publish(t, nil, "", "/after")
+		fake := installForbiddenContractRuntime(t, f.srv)
+		result, err := f.strictList(t.Context(), 5*time.Second)
+		require.NoError(t, err)
+		require.False(t, result.IsError, viewResultText(t, result))
+		require.Zero(t, fake.schedules.Load())
+	})
+	for _, race := range []string{"schedule", "wait"} {
+		t.Run(race, func(t *testing.T) {
+			f := newContractConsumerFixture(t)
+			fake := &contractRuntimeFake{t: t}
+			fake.schedule = func(_ context.Context, req indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error) {
+				req.Source.Release()
+				result := indexer.ContractScheduleResult{Result: indexer.ContractScheduled, Actor: req.Actor, ArrivalSeq: 1}
+				if race == "schedule" {
+					f.publish(t, nil, "", "/after")
+					result.Result = indexer.ContractNoop
+				}
+				return result, nil
+			}
+			fake.waitActor = func(_ context.Context, _ indexer.ContractActor, seq uint64) (indexer.ContractActorStatus, error) {
+				if race == "wait" {
+					f.publish(t, nil, "", "/after")
+				}
+				return indexer.ContractActorStatus{Result: indexer.ContractActorPublished, Seq: seq}, nil
+			}
+			f.srv.SetContractAnalysisRuntime(fake.runtime())
+			result, err := f.strictList(t.Context(), 5*time.Second)
+			require.NoError(t, err)
+			require.False(t, result.IsError, viewResultText(t, result))
+			require.Contains(t, viewResultText(t, result), "/after")
+			require.EqualValues(t, 1, fake.schedules.Load(), "no rerun at a published key")
+		})
+	}
+}
+
+// TestContractConsumerWorktreeStaleCaptureWakesTheWaiter: a linked
+// worktree's capture that went stale resolves the request's promise; the
+// request captures its view again, schedules it with a fresh source and
+// completes once the selected attachments are published.
+func TestContractConsumerWorktreeStaleCaptureWakesTheWaiter(t *testing.T) {
+	f := newContractConsumerFixture(t)
+	graphID := indexer.GraphIDFor("repo")
+	worktreeRoot := filepath.Join(f.root, "worktree")
+	require.NoError(t, os.MkdirAll(worktreeRoot, 0o755))
+	seedViewCatalog(t, f.store, graphID, filepath.Join(f.root, "repo"), worktreeRoot)
+	generation, handle, err := f.store.BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: graphID, CheckoutID: viewTestWorktree, LayerID: "stale-contract-core", GenerationKind: "commit", TreeOID: "stale-contract-tree", CreatedAt: 1000})
+	require.NoError(t, err)
+	state := graph.ContractInputState{RepoPrefix: "repo", CheckoutID: viewTestWorktree, InputVersion: "boundary-v1", InputFingerprint: "selected-linked", Accepted: true}
+	require.NoError(t, handle.SetContractInputStateWithWorkContext(t.Context(), nil, state, nil))
+	handle.AddBatch([]*graph.Node{{ID: "repo/handler.go", Name: "handler.go", Kind: graph.KindFile, FilePath: "repo/handler.go", RepoPrefix: "repo"}, {ID: "repo/handler.go::Handle", Name: "Handle", Kind: graph.KindFunction, FilePath: "repo/handler.go", RepoPrefix: "repo", WorkspaceID: "ws", ProjectID: "project"}}, nil)
+	require.NoError(t, handle.SetFileMasks([]store_sqlite.FileMask{{RepoPrefix: "repo", FilePath: "repo/handler.go", Mode: store_sqlite.OwnershipReplace}}))
+	require.NoError(t, f.store.PublishPayloadGeneration(t.Context(), generation, 2000))
+	dirty, dirtyHandle, err := f.store.BeginPayloadGeneration(t.Context(), store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: graphID, CheckoutID: viewTestWorktree, LayerID: "stale-contract-dirty", GenerationKind: "dirty", BaseGenerationID: generation, TreeOID: "stale-contract-tree", CreatedAt: 3000})
+	require.NoError(t, err)
+	require.NoError(t, dirtyHandle.SetContractInputStateWithWorkContext(t.Context(), &state, state, nil))
+	require.NoError(t, f.store.PublishPayloadGeneration(t.Context(), dirty, 4000))
+	routeViewCheckout(t, f.store, graphID, generation, dirty, store_sqlite.RouteActive)
+	selected, err := f.srv.materializer.MaterializeCheckout(t.Context(), viewTestWorktree)
+	require.NoError(t, err)
+	defer selected.Close()
+	f.publish(t, nil, "", "/primary-only")
+	var sources atomic.Int64
+	fake := &contractRuntimeFake{t: t}
+	fake.schedule = func(_ context.Context, req indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error) {
+		if req.Source != nil {
+			sources.Add(1)
+		}
+		req.Source.Release()
+		return indexer.ContractScheduleResult{Result: indexer.ContractScheduled, Actor: req.Actor, ArrivalSeq: uint64(fake.schedules.Load())}, nil
+	}
+	fake.waitActor = func(_ context.Context, _ indexer.ContractActor, seq uint64) (indexer.ContractActorStatus, error) {
+		if seq == 1 {
+			fake.epoch.Add(1)
+			return indexer.ContractActorStatus{Result: indexer.ContractActorInputsStale, Seq: seq}, nil
+		}
+		f.publish(t, selected, viewTestWorktree, "/linked-only")
+		return indexer.ContractActorStatus{Result: indexer.ContractActorPublished, Seq: seq}, nil
+	}
+	f.srv.SetContractAnalysisRuntime(fake.runtime())
+	ctx := WithSessionCWD(WithSessionID(t.Context(), "contract-linked-stale"), worktreeRoot)
+	result, err := f.request(ctx, "contracts", map[string]any{"action": "check", "format": "json", "view": map[string]any{"kind": "worktree", "checkout_id": viewTestWorktree}, "wait_deadline": time.Now().Add(10 * time.Second).Format(time.RFC3339Nano)}, f.srv.handleContracts)
+	body := requireContractBody(t, result, err)
+	require.Contains(t, body, "/linked-only")
+	require.EqualValues(t, 2, fake.schedules.Load(), "the stale promise asked for the view's inputs again")
+	require.EqualValues(t, 2, sources.Load(), "each request carried its view's own source")
 }

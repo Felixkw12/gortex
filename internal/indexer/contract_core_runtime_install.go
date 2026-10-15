@@ -118,6 +118,14 @@ func (mi *MultiIndexer) endInstalledContractCoreWrites(repo string) {
 	}
 }
 
+// orphanInstalledContractCoreWrites marks the core-write windows the outer
+// MI output receipt's failed body left open.
+func (mi *MultiIndexer) orphanInstalledContractCoreWrites(repo string) {
+	if journal := mi.installedContractCoreInputs(repo); journal != nil {
+		journal.orphan()
+	}
+}
+
 // settleInstalledContractCoreInputs settles the receipts of a completed body
 // a newer mutation overtook: they are never accepted.
 func (mi *MultiIndexer) settleInstalledContractCoreInputs(repo string) {

@@ -8,9 +8,21 @@ import (
 )
 
 // countContractRequest records what one scheduling request did. Every return
-// path of the coordinator's Request records exactly one result.
+// path of the coordinator's Schedule records exactly one result; a worker
+// capture that fails other than stale records one error.
 func countContractRequest(result string) {
 	viewmetrics.Count(viewmetrics.ContractAnalysisRequestsTotal, result)
+}
+
+// countContractCapture records one scheduler capture of an actor's inputs.
+func countContractCapture(result string) {
+	viewmetrics.Count(viewmetrics.ContractAnalysisCapturesTotal, result)
+}
+
+// countContractRequeue records one job put back on its ring after an end
+// that left its key current and unpublished.
+func countContractRequeue() {
+	viewmetrics.Count(viewmetrics.ContractAnalysisRequeuedTotal)
 }
 
 // countContractJob records one finished attachment job and its body time.
@@ -73,8 +85,20 @@ func logContractJob(logger *zap.Logger, mode, outcome string, elapsed time.Durat
 		zap.Int("pp_runs", cohort.EnrichRuns), zap.Int("pp_reruns", cohort.EnrichReruns), zap.Int("revalidated", cohort.Revalidated),
 		zap.Int("pp_rechecks", cohort.EnrichRechecks), zap.Int("pp_recheck_reads", cohort.EnrichRecheckReads),
 		zap.Int("content_kept", cohort.ContentKept),
+		// What the iterations after the first needed of a writer's quiet
+		// gap, and the gaps the writer left on the paths they waited on.
+		zap.Duration("w_need_sum", cohort.NeedSum), zap.Int("w_iterations", cohort.NeedIterations),
+		zap.Duration("window_p10", contractQuantile(cohort.WindowGaps, 0.1)),
+		zap.Duration("window_p50", contractQuantile(cohort.WindowGaps, 0.5)),
+		zap.Duration("window_p90", contractQuantile(cohort.WindowGaps, 0.9)),
+		zap.Int("window_n", len(cohort.WindowGaps)),
 	}
 	fields = append(fields, phases.fields()...)
 	fields = append(fields, extra...)
 	logger.Info("contract analysis job", fields...)
+}
+
+// countContractRepair records one stuck-input repair by kind.
+func countContractRepair(kind string) {
+	viewmetrics.Count(viewmetrics.ContractRepairTotal, kind)
 }

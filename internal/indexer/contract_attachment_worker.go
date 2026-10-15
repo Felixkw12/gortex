@@ -56,6 +56,10 @@ type ContractFollowupSnapshot struct {
 	// Excluded names the census paths whose accepted receipt is a failure
 	// envelope: they are not live, so no file of the job reads them.
 	Excluded []string
+	// InFlight names the census paths captured while a mutation had their
+	// core-write window open. Only a job that takes stamp scans (Scan) can
+	// prove reads of them; a snapshot without Scan that names any is refused.
+	InFlight []string
 	// RepoConfigs is captured immutable extractor/transform policy authority.
 	RepoConfigs map[string]config.IndexConfig
 	// RepoExtractionOptions freezes repository parser options for baseline replay.
@@ -88,7 +92,14 @@ type ContractFollowupSnapshot struct {
 	// fingerprint. Nil means no move is known to keep a file's contract
 	// content.
 	ReceiptContents func(context.Context, map[string]ContractReceiptStamp) (map[string]string, error)
-	Release         func()
+	// WindowGaps returns the quiet gaps a writer left between the core-write
+	// windows of the named paths that opened at or after since. Nil records
+	// none.
+	WindowGaps func(paths []string, since time.Time) []time.Duration
+	// Suspect reports paths whose open core-write window a job was refused
+	// on, unmoved, for a repair period. Nil reports nothing.
+	Suspect func(paths []string)
+	Release func()
 }
 
 // errContractSourceMoved reports that a file's accepted bytes are no longer
@@ -161,6 +172,14 @@ type ContractFollowupReport struct {
 	// ContentKept counts observed receipt moves whose contract content was
 	// unchanged: they make no unit and no enrichment round stale.
 	ContentKept int
+	// NeedSum sums, over the iterations after the first, what each needed of
+	// a writer's quiet gap (its re-asks' p90 lead and span, its enrichment
+	// re-check and its fence); NeedIterations counts them. WindowGaps are
+	// the quiet gaps between the core-write windows of the paths those
+	// iterations waited on.
+	NeedSum        time.Duration
+	NeedIterations int
+	WindowGaps     []time.Duration
 }
 
 // ContractFollowupTarget reserves one independently published repository payload.
@@ -280,6 +299,11 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 	}
 	if err := ctx.Err(); err != nil {
 		return report, err
+	}
+	if len(snap.InFlight) > 0 && snap.Scan == nil {
+		// A frozen snapshot reads every census file as captured: it cannot
+		// wait for an in-flight file's window to close.
+		return report, graph.ErrContractProjectionStale
 	}
 	if req.RebuildReason != ContractFollowupColdBaseline && req.RebuildReason != ContractFollowupUnknownInterval && req.RebuildReason != ContractFollowupChangedBoundary {
 		return report, fmt.Errorf("contract followup: explicit rebuild reason required")
@@ -534,6 +558,7 @@ func contractPreparedReport(report, prepared ContractFollowupReport) ContractFol
 	report.Iterations, report.Rounds = prepared.Iterations, prepared.Rounds
 	report.EnrichRuns, report.EnrichReruns, report.Revalidated = prepared.EnrichRuns, prepared.EnrichReruns, prepared.Revalidated
 	report.EnrichRechecks, report.EnrichRecheckReads = prepared.EnrichRechecks, prepared.EnrichRecheckReads
+	report.NeedSum, report.NeedIterations, report.WindowGaps = prepared.NeedSum, prepared.NeedIterations, prepared.WindowGaps
 	return report
 }
 

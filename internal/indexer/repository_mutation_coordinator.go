@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"sync"
 
@@ -526,15 +527,21 @@ func (mi *MultiIndexer) withRepositoryOutputGenerationSource(
 		return bodyErr
 	})
 	if bodyDone && err != nil {
+		if errors.Is(err, ErrOutputMutationReceiptSuperseded) {
+			// Overtaken after every core write: never accepted, settled, the
+			// settle closing the windows it settles.
+			mi.settleInstalledContractCoreInputs(repoPrefix)
+		}
 		// As on the Indexer's own lane: a completed body closes the core-write
 		// windows of the files it began, whatever Complete says.
 		mi.endInstalledContractCoreWrites(repoPrefix)
 	}
+	if !bodyDone && err != nil {
+		// As on the Indexer's own lane: a failed body leaves its windows
+		// open and marks them orphaned.
+		mi.orphanInstalledContractCoreWrites(repoPrefix)
+	}
 	if err != nil {
-		if bodyDone && errors.Is(err, ErrOutputMutationReceiptSuperseded) {
-			// Overtaken after every core write: never accepted, settled.
-			mi.settleInstalledContractCoreInputs(repoPrefix)
-		}
 		return err
 	}
 	// As on the Indexer's own lane, the accept closes the windows of the rows
@@ -574,11 +581,94 @@ func (mi *MultiIndexer) withRepositoryMutationLanes(
 		if i == len(coordinators) {
 			return fn()
 		}
+		if heldRepositoryLane(ctx, compact[i]) {
+			// The caller holds this lane already (TryRepositoryMutationLanes).
+			return acquire(i + 1)
+		}
 		return coordinators[i].runExclusiveLaneOnly(ctx, func() error {
 			return acquire(i + 1)
 		})
 	}
 	return acquire(0)
+}
+
+// TryRepositoryMutationLanes takes the mutation lanes of repos, in sorted
+// order and each behind its batch admission, only if every one is free now:
+// it never waits. It mirrors runExclusiveMode without blocking, so a caller
+// that holds no lane cannot be part of a lane cycle. ok=false holds nothing;
+// the release returns the lanes in reverse order.
+func (mi *MultiIndexer) TryRepositoryMutationLanes(repos []string) (release func(), ok bool) {
+	ordered := append([]string(nil), repos...)
+	sort.Strings(ordered)
+	ordered = slices.Compact(ordered)
+	var held []func()
+	releaseAll := func() {
+		for i := len(held) - 1; i >= 0; i-- {
+			held[i]()
+		}
+	}
+	for _, prefix := range ordered {
+		lane, ok := mi.repositoryMutationCoordinator(prefix).tryExclusive()
+		if !ok {
+			releaseAll()
+			return nil, false
+		}
+		held = append(held, lane)
+	}
+	return releaseAll, true
+}
+
+// tryExclusive is runExclusiveMode's admission without waiting: the batch
+// gate's read side, then the lane, each only if free.
+func (c *repositoryMutationCoordinator) tryExclusive() (func(), bool) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, false
+	}
+	gate := c.batchMutationGate
+	c.work.Add(1)
+	c.mu.Unlock()
+	if gate != nil && !gate.TryRLock() {
+		c.work.Done()
+		return nil, false
+	}
+	select {
+	case <-c.lane:
+	default:
+		if gate != nil {
+			gate.RUnlock()
+		}
+		c.work.Done()
+		return nil, false
+	}
+	return func() {
+		c.lane <- struct{}{}
+		if gate != nil {
+			gate.RUnlock()
+		}
+		c.work.Done()
+	}, true
+}
+
+// heldRepositoryLanesKey marks a context whose caller holds the mutation
+// lanes it names, taken by TryRepositoryMutationLanes.
+type heldRepositoryLanesKey struct{}
+
+// withHeldRepositoryLanes marks ctx as running under repos' mutation lanes:
+// a lane door reached with it runs its body under the held lane instead of
+// waiting for the lane its own caller holds.
+func withHeldRepositoryLanes(ctx context.Context, repos []string) context.Context {
+	held := make(map[string]bool, len(repos))
+	for _, repo := range repos {
+		held[repo] = true
+	}
+	return context.WithValue(ctx, heldRepositoryLanesKey{}, held)
+}
+
+func heldRepositoryLane(ctx context.Context, prefix string) bool {
+	held, _ := ctx.Value(heldRepositoryLanesKey{}).(map[string]bool)
+	return held[prefix]
 }
 
 // existingRepositoryMutationCoordinator returns the exact coordinator slot
@@ -978,6 +1068,10 @@ const (
 	// Baseline reconstruction writes contract input/receipt sidecars only. It
 	// leaves the accepted core source and graph unchanged.
 	OutputEntryContractBaseline OutputMutationEntry = "indexer.reconcilePrimaryContractBaseline"
+	// The stuck-input repair reindexes, or excludes with a failure envelope,
+	// primary files a failed mutation left in flight, under the repository
+	// lane it took itself.
+	OutputEntryContractRepair OutputMutationEntry = "indexer.ContractStuckRepair.repairHeld"
 )
 
 // outputMutationEntryKinds is the registry. An entry that is absent here cannot
@@ -1002,6 +1096,7 @@ var outputMutationEntryKinds = map[OutputMutationEntry]OutputGenerationKind{
 	OutputEntryRepositoryReconcileLane: OutputGenerationLegacy,
 	OutputEntryEnrichmentCorpus:        OutputGenerationLegacy,
 	OutputEntryContractBaseline:        OutputGenerationLegacy,
+	OutputEntryContractRepair:          OutputGenerationLegacy,
 }
 
 // OutputMutationTarget is the one output generation and owner a mutation
@@ -1902,32 +1997,43 @@ func (idx *Indexer) withOutputGenerationSource(
 		return bodyErr
 	})
 	if bodyDone && err != nil {
-		// Every core write of the begun files is done, whatever Complete
-		// says: their core-write windows close, so a contract job can read
-		// their rows without waiting for an accept that will not come.
 		if journal := current.contractCoreInputs; journal != nil {
+			if errors.Is(err, ErrOutputMutationReceiptSuperseded) {
+				// The body completed every core write and Complete found
+				// that a newer mutation took the owner over: its receipts
+				// are never accepted, and are settled so a contract job sees
+				// the file's rows are complete. The settle closes the
+				// windows it settles, so a job woken by the close reads each
+				// row's final stamp. A body that failed, or never ran, left
+				// its rows in whatever state it stopped in and settles
+				// nothing.
+				journal.settle()
+			}
+			// Every core write of the begun files is done, whatever Complete
+			// says: their core-write windows close, so a contract job can
+			// read their rows without waiting for an accept that will not
+			// come. After a settle this closes only a window the settle did
+			// not, one whose path a later receipt write moved.
 			journal.written()
 		}
 	}
-	if err != nil {
-		if bodyDone && errors.Is(err, ErrOutputMutationReceiptSuperseded) {
-			// The body completed every core write and Complete found that a
-			// newer mutation took the owner over: its receipts are never
-			// accepted, and are settled so a contract job sees the file's
-			// rows are complete. A body that failed, or never ran, left its
-			// rows in whatever state it stopped in and settles nothing.
-			if journal := current.contractCoreInputs; journal != nil {
-				journal.settle()
-			}
+	if !bodyDone && err != nil {
+		// A body that failed after it began receipts may have stopped
+		// between an evict and its add: their windows stay open, marked
+		// orphaned, since nothing of this mutation will close them.
+		if journal := current.contractCoreInputs; journal != nil {
+			journal.orphan()
 		}
+	}
+	if err != nil {
 		return err
 	}
 	// Complete has validated the existing source/output authority. Contract
 	// eligibility cannot be acknowledged by the inner mutation body earlier.
 	if journal := current.contractCoreInputs; journal != nil {
 		if contractCoreAcceptHeld(current.repoPrefix) {
-			journal.written()
 			journal.settle()
+			journal.written()
 			return nil
 		}
 		// The accept closes the core-write windows of the rows it accepts as

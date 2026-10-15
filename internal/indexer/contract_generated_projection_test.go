@@ -152,17 +152,16 @@ func TestContractBaselineRepairsTheAcceptedGeneratedParserNamespace(t *testing.T
 	var admission sync.Mutex
 	var jobs sync.WaitGroup
 	options := ContractFollowupCaptureOptions{Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }, BaselineAdmissionMu: &admission, BaselineJobs: &jobs}
-	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: store, Leases: leases, Registry: idx.registry, Config: idx.config, Capture: NewContractFollowupCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
+	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: store, Leases: leases, Registry: idx.registry, Config: idx.config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, coordinator.Close()); jobs.Wait() })
 	mi.SetContractCoreRuntime(ContractCoreRuntimeHooks{Published: coordinator.Published})
 	pending, err := materializer.CaptureContractInputs(ctx, nil, "fixture", "")
 	require.NoError(t, err)
 	require.False(t, pending.State.Accepted)
-	admitted, err := coordinator.Request(ctx, nil, pending, "fixture", "")
-	require.NoError(t, err)
-	require.True(t, admitted)
-	require.NoError(t, coordinator.WaitChange(ctx, graph.ContractAttachmentKey{RepoPrefix: "fixture", InputVersion: pending.State.InputVersion, InputFingerprint: pending.State.InputFingerprint}))
+	scheduled, status := scheduleAndWait(t, ctx, coordinator, []string{"fixture"}, "fixture", pending)
+	require.Equal(t, ContractDeferred, scheduled.Result)
+	require.Equal(t, ContractActorInputsStale, status.Result, "the baseline's Published resolves the pending promise")
 	jobs.Wait()
 	accepted, err := materializer.CaptureContractInputs(ctx, nil, "fixture", "")
 	require.NoError(t, err)

@@ -155,9 +155,12 @@ var coldDoors = []struct {
 // The fault rows inject a refused begin for one file during the door: that
 // file becomes an accepted failure envelope the census excludes; when even
 // the envelope cannot be staged the header stays pending for the baseline.
+// The in-flight row captures the next job while a save of a file the door
+// accepted holds its core-write window open: the job waits for it and the
+// publish equals a cold build.
 func TestContractCoreColdDoorMatrix(t *testing.T) {
 	for _, door := range coldDoors {
-		for _, fault := range []string{"none", "failed_file", "envelope_refused"} {
+		for _, fault := range []string{"none", "failed_file", "envelope_refused", "in_flight"} {
 			t.Run(door.name+"/"+fault, func(t *testing.T) {
 				f := newContractColdDoorFixture(t)
 				before := f.state(t)
@@ -254,6 +257,23 @@ func TestContractCoreColdDoorMatrix(t *testing.T) {
 					require.Equal(t, contractIDs(coldContracts(t, map[string]string{"routes.go": coldDoorRoutes})), contractIDs(publishedFixtureContracts(t, options)))
 				} else {
 					require.False(t, contractReceiptIsFailureEnvelope(envelope))
+				}
+				if fault == "in_flight" {
+					const routes = "fixture/routes.go"
+					row := f.receipt(t, routes)
+					staged := *row
+					staged.Accepted, staged.Previous = false, nil
+					require.NoError(t, f.store.SetContractBoundaryReceiptsContext(t.Context(), []graph.ContractBoundaryReceipt{staged}))
+					options := f.options
+					options.MultiIndexer = mi
+					closed := false
+					report, err := runFixtureContractJob(t, options, contractFixtureJob{layer: 1, wait: contractInFlightWait(f.store, "fixture", routes, &closed),
+						hooks: &contractConvergenceHooks{roundWait: 5 * time.Second}, yield: contractJobDeadline(time.Minute)})
+					require.NoError(t, err)
+					require.True(t, report.Published)
+					require.True(t, closed, "the job waited for the in-flight window")
+					require.Equal(t, contractIDs(coldContracts(t, map[string]string{"routes.go": coldDoorRoutes, "failing.go": coldDoorFailing})), contractIDs(publishedFixtureContracts(t, options)))
+					return
 				}
 				// The accepted namespace still journals: a route edit moves the key.
 				writeFile(t, filepath.Join(f.root, "routes.go"), "package fixture\nfunc register(r Router) { r.GET(\"/after\", serve) }\nfunc serve() {}\n")

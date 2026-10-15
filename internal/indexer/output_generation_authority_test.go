@@ -305,6 +305,10 @@ func TestEveryProductionMutationEntryPointIsRegistered(t *testing.T) {
 		{file: "repository_topology_batch.go", fn: "coordinateRepositoryTopologyMutation", door: "coordinateRepositoryMutation", entries: []string{"OutputEntryRepositoryTopology"}},
 		{file: authorityPlumbingFile, fn: "bindMutationLaneAuthority", door: "withOutputGenerationSource", entries: []string{"OutputEntryRepositoryReconcileLane"}},
 		{file: authorityPlumbingFile, fn: "repositoryMutationCoordinator", door: "withRepositoryOutputGenerationSource", entries: []string{"OutputEntryRepositoryReconcileLane"}},
+		// The stuck-input repair takes its lane with TryRepositoryMutationLanes
+		// and names its own entry for the reindex and the envelope it runs.
+		{file: "contract_stuck_repair.go", fn: "realReindex", door: "withOutputGeneration", entries: []string{"OutputEntryContractRepair"}},
+		{file: "contract_stuck_repair.go", fn: "envelopePaths", door: "withOutputGeneration", entries: []string{"OutputEntryContractRepair"}},
 	}
 	for _, want := range required {
 		found := false
@@ -415,6 +419,7 @@ func outputMutationEntryValue(identifier string) (string, bool) {
 		"OutputEntryRepositoryReconcileLane": OutputEntryRepositoryReconcileLane,
 		"OutputEntryEnrichmentCorpus":        OutputEntryEnrichmentCorpus,
 		"OutputEntryContractBaseline":        OutputEntryContractBaseline,
+		"OutputEntryContractRepair":          OutputEntryContractRepair,
 	}
 	value, ok := known[identifier]
 	return string(value), ok

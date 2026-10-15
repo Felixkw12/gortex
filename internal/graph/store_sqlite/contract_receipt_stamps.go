@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -43,15 +45,108 @@ import (
 // seq and a closed window before and after a read mean no core write of the
 // path overlapped the read. A body that fails leaves its window open until the
 // next mutation of the path.
+//
+// Each window records when it opened and closed, and a window opened after
+// the previous one closed records the quiet gap between them in a bounded
+// per-path ring: the time a contract job has to ask its reads again between
+// two applies of the path.
+//
+// A mutation whose body failed after it staged its receipts marks the windows
+// it left open as orphaned at the seqs that opened them: nothing of that
+// mutation will close them. The mark holds while the window it names is open
+// and is dropped at every close of the path, whoever closes it.
 type contractReceiptWriteSequence struct {
 	mu      sync.Mutex
 	seq     map[contractReceiptWriteKey]uint64
 	settled map[contractReceiptWriteKey]uint64
 	// writing holds the write seq that opened each open core-write window.
 	writing map[contractReceiptWriteKey]uint64
-	repos   map[string]*contractReceiptWriteBracket
-	events  uint64
-	changed chan struct{}
+	// openedAt holds when each open window opened; closed holds when each
+	// path's last window opened and closed.
+	openedAt map[contractReceiptWriteKey]time.Time
+	closed   map[contractReceiptWriteKey]contractCoreWindowSpan
+	gaps     map[contractReceiptWriteKey][]ContractCoreWindowGap
+	// orphaned holds the opener seq of each window a failed mutation left
+	// open, and when it was marked.
+	orphaned map[contractReceiptWriteKey]contractCoreOrphan
+	repos    map[string]*contractReceiptWriteBracket
+	events   uint64
+	changed  chan struct{}
+	// orphanEvents counts orphan marks; orphanChanged is closed by the next.
+	orphanEvents  uint64
+	orphanChanged chan struct{}
+	// now replaces time.Now in tests.
+	now func() time.Time
+}
+
+// contractCoreOrphan is one orphan mark: the seq of the window it names.
+type contractCoreOrphan struct {
+	seq uint64
+	at  time.Time
+}
+
+// contractCoreWindowSpan is when one closed core-write window opened and
+// closed.
+type contractCoreWindowSpan struct{ opened, closed time.Time }
+
+// contractCoreWindowGapRing bounds the gaps kept per path.
+const contractCoreWindowGapRing = 16
+
+// ContractCoreWindowGap is the quiet gap before one core-write window of a
+// path opened: Quiet runs from the close of the path's previous window to
+// this window's open, and OpenPrev is how long that previous window was
+// open. Seq is the write seq that opened this window.
+type ContractCoreWindowGap struct {
+	Path            string
+	Seq             uint64
+	OpenedAt        time.Time
+	Quiet, OpenPrev time.Duration
+}
+
+func (w *contractReceiptWriteSequence) clock() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
+}
+
+// openLocked opens key's core-write window at seq. A window opened after the
+// path's previous one closed records the gap between them; one opened again
+// while it is open records nothing.
+func (w *contractReceiptWriteSequence) openLocked(key contractReceiptWriteKey, seq uint64, at time.Time) {
+	if w.openedAt == nil {
+		w.openedAt = make(map[contractReceiptWriteKey]time.Time)
+	}
+	if _, open := w.writing[key]; !open {
+		if last, ok := w.closed[key]; ok {
+			if w.gaps == nil {
+				w.gaps = make(map[contractReceiptWriteKey][]ContractCoreWindowGap)
+			}
+			ring := append(w.gaps[key], ContractCoreWindowGap{Path: key.path, Seq: seq, OpenedAt: at,
+				Quiet: at.Sub(last.closed), OpenPrev: last.closed.Sub(last.opened)})
+			if len(ring) > contractCoreWindowGapRing {
+				ring = slices.Delete(ring, 0, len(ring)-contractCoreWindowGapRing)
+			}
+			w.gaps[key] = ring
+		}
+	}
+	w.writing[key] = seq
+	w.openedAt[key] = at
+}
+
+// closeLocked closes key's open core-write window at at, and drops the
+// path's orphan mark.
+func (w *contractReceiptWriteSequence) closeLocked(key contractReceiptWriteKey, at time.Time) {
+	delete(w.orphaned, key)
+	if _, open := w.writing[key]; !open {
+		return
+	}
+	if w.closed == nil {
+		w.closed = make(map[contractReceiptWriteKey]contractCoreWindowSpan)
+	}
+	w.closed[key] = contractCoreWindowSpan{opened: w.openedAt[key], closed: at}
+	delete(w.writing, key)
+	delete(w.openedAt, key)
 }
 
 // contractCoreWindow is what one receipt write does to the core-write windows
@@ -104,6 +199,43 @@ func contractReceiptWriteAt(stage string, keys []contractReceiptWriteKey) {
 	(*hook)(stage, paths)
 }
 
+// contractCoreWindowOpenHook, when set by a test, observes each primary
+// core-write window as it opens, under the write sequence's lock.
+var contractCoreWindowOpenHook atomic.Pointer[func(repo, checkout, path string)]
+
+// SetContractCoreWindowOpenHookForTest installs a hook called as each primary
+// core-write window opens, so a test can check what holds it open.
+func SetContractCoreWindowOpenHookForTest(hook func(repo, checkout, path string)) (restore func()) {
+	previous := contractCoreWindowOpenHook.Swap(&hook)
+	return func() { contractCoreWindowOpenHook.Store(previous) }
+}
+
+// ForgetContractReceiptWritesForTest drops what this process knows of the
+// receipt writes of paths, as a restarted process starts: their rows read
+// as written by an earlier one (seq 0, no window). Tests only.
+func (s *Store) ForgetContractReceiptWritesForTest(repo, checkout string, paths []string) {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, path := range paths {
+		key := contractReceiptWriteKey{repo, checkout, path}
+		delete(w.seq, key)
+		delete(w.settled, key)
+		delete(w.writing, key)
+		delete(w.openedAt, key)
+		delete(w.closed, key)
+		delete(w.gaps, key)
+		delete(w.orphaned, key)
+	}
+	w.notifyLocked()
+}
+
+func contractCoreWindowOpenedAt(key contractReceiptWriteKey) {
+	if hook := contractCoreWindowOpenHook.Load(); hook != nil && *hook != nil {
+		(*hook)(key.repo, key.checkout, key.path)
+	}
+}
+
 type contractReceiptWriteBracket struct{ begun, done uint64 }
 
 // beginContractReceiptWrites bumps the begun counter of every repository
@@ -135,11 +267,15 @@ func (s *Store) beginContractReceiptWrites(rows []graph.ContractBoundaryReceipt,
 			repos = append(repos, key.repo)
 		}
 	}
+	opened := w.clock()
 	for _, row := range rows {
 		key := contractReceiptWriteKey{row.RepoPrefix, row.CheckoutID, row.FilePath}
 		bump(key)
 		if window == contractCoreWindowOpened && !row.Accepted {
-			w.writing[key] = w.seq[key]
+			w.openLocked(key, w.seq[key], opened)
+			if s.viewGen == 0 {
+				contractCoreWindowOpenedAt(key)
+			}
 		}
 	}
 	for _, source := range sources {
@@ -161,8 +297,10 @@ func (s *Store) beginContractReceiptWrites(rows []graph.ContractBoundaryReceipt,
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		if committed && window == contractCoreWindowClosed {
+			// The window closes when the accept commits, not when it began.
+			closed := w.clock()
 			for _, row := range rows {
-				delete(w.writing, contractReceiptWriteKey{row.RepoPrefix, row.CheckoutID, row.FilePath})
+				w.closeLocked(contractReceiptWriteKey{row.RepoPrefix, row.CheckoutID, row.FilePath}, closed)
 			}
 		}
 		for _, repo := range repos {
@@ -182,12 +320,13 @@ func (s *Store) EndContractCoreWrites(repo, checkout string, seqs map[string]uin
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	closed := false
+	at := w.clock()
 	for path, seq := range seqs {
 		key := contractReceiptWriteKey{repo, checkout, path}
 		if seq == 0 || w.writing[key] != seq {
 			continue
 		}
-		delete(w.writing, key)
+		w.closeLocked(key, at)
 		closed = true
 	}
 	if !closed {
@@ -203,12 +342,16 @@ func (s *Store) EndContractCoreWrites(repo, checkout string, seqs map[string]uin
 // SettleContractReceiptWrites marks one repository and actor's receipts
 // settled at the given write seqs: the mutation that wrote them completed its
 // core writes without accepting them. A path written again since keeps its
-// newer, unsettled seq.
+// newer, unsettled seq. A settled path's window closes with the settle, in
+// the one event that announces both. Settling moves no row, so the
+// repository's bracket steps as a write would: a full scan taken before the
+// settle is never reused for one after it.
 func (s *Store) SettleContractReceiptWrites(repo, checkout string, seqs map[string]uint64) {
 	w := &s.contractReceiptWrites
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	settled := false
+	at := w.clock()
 	for path, seq := range seqs {
 		key := contractReceiptWriteKey{repo, checkout, path}
 		if seq == 0 || w.seq[key] != seq {
@@ -219,13 +362,18 @@ func (s *Store) SettleContractReceiptWrites(repo, checkout string, seqs map[stri
 		}
 		w.settled[key] = seq
 		if w.writing[key] == seq {
-			delete(w.writing, key)
+			w.closeLocked(key, at)
 		}
 		settled = true
 	}
-	if settled {
-		w.notifyLocked()
+	if !settled {
+		return
 	}
+	if bracket := w.repos[repo]; bracket != nil {
+		bracket.begun++
+		bracket.done++
+	}
+	w.notifyLocked()
 }
 
 // ContractReceiptWriteState is one path's write seq, whether the mutation
@@ -288,6 +436,118 @@ func (s *Store) ContractReceiptWriteSeqs(repo, checkout string, paths []string) 
 	out := make(map[string]uint64, len(paths))
 	for _, path := range paths {
 		out[path] = w.seq[contractReceiptWriteKey{repo, checkout, path}]
+	}
+	return out
+}
+
+// ContractCoreWindow is one open core-write window of a primary path: the
+// write seq that opened it and when. MarkedAt is when a failed mutation
+// marked it orphaned, zero for a window not marked.
+type ContractCoreWindow struct {
+	Checkout, Path string
+	OpenerSeq      uint64
+	OpenedAt       time.Time
+	MarkedAt       time.Time
+}
+
+// OrphanContractCoreWrites marks the core-write windows one repository and
+// actor's mutation opened at the given write seqs and left open: its body
+// failed after staging their receipts, and nothing of it will close them. A
+// path written again since keeps its newer window unmarked. Marking moves no
+// row and closes nothing; it wakes ContractCoreOrphanEvents waiters.
+func (s *Store) OrphanContractCoreWrites(repo, checkout string, seqs map[string]uint64) {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	at := w.clock()
+	marked := false
+	for path, seq := range seqs {
+		key := contractReceiptWriteKey{repo, checkout, path}
+		if seq == 0 || w.writing[key] != seq {
+			continue
+		}
+		if w.orphaned == nil {
+			w.orphaned = make(map[contractReceiptWriteKey]contractCoreOrphan)
+		}
+		w.orphaned[key] = contractCoreOrphan{seq: seq, at: at}
+		marked = true
+	}
+	if !marked {
+		return
+	}
+	w.orphanEvents++
+	if w.orphanChanged != nil {
+		close(w.orphanChanged)
+		w.orphanChanged = nil
+	}
+}
+
+// ContractCoreOrphanEvents returns the count of orphan marks in this process
+// and a channel closed by the next one.
+func (s *Store) ContractCoreOrphanEvents() (uint64, <-chan struct{}) {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.orphanChanged == nil {
+		w.orphanChanged = make(chan struct{})
+	}
+	return w.orphanEvents, w.orphanChanged
+}
+
+// OpenContractCoreWindows returns every open core-write window of one
+// repository's primary paths, by checkout then path. Every primary window
+// opens under the repository's mutation lane, so a caller holding that lane
+// sees only windows nothing is still writing in.
+func (s *Store) OpenContractCoreWindows(repo string) []ContractCoreWindow {
+	return s.contractCoreWindows(repo, false)
+}
+
+// OrphanedContractCoreWindows returns the open windows of one repository a
+// failed mutation marked orphaned, by checkout then path.
+func (s *Store) OrphanedContractCoreWindows(repo string) []ContractCoreWindow {
+	return s.contractCoreWindows(repo, true)
+}
+
+func (s *Store) contractCoreWindows(repo string, orphanedOnly bool) []ContractCoreWindow {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []ContractCoreWindow
+	for key, seq := range w.writing {
+		if key.repo != repo {
+			continue
+		}
+		window := ContractCoreWindow{Checkout: key.checkout, Path: key.path, OpenerSeq: seq, OpenedAt: w.openedAt[key]}
+		if mark, ok := w.orphaned[key]; ok && mark.seq == seq {
+			window.MarkedAt = mark.at
+		} else if orphanedOnly {
+			continue
+		}
+		out = append(out, window)
+	}
+	slices.SortFunc(out, func(a, b ContractCoreWindow) int {
+		if a.Checkout != b.Checkout {
+			return strings.Compare(a.Checkout, b.Checkout)
+		}
+		return strings.Compare(a.Path, b.Path)
+	})
+	return out
+}
+
+// ContractCoreWindowGaps returns the recorded quiet gaps of one repository's
+// primary paths whose window opened at or after since, oldest first per path,
+// paths in the order given. Each path keeps only its latest gaps.
+func (s *Store) ContractCoreWindowGaps(repo string, paths []string, since time.Time) []ContractCoreWindowGap {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []ContractCoreWindowGap
+	for _, path := range paths {
+		for _, gap := range w.gaps[contractReceiptWriteKey{repo, "", path}] {
+			if !gap.OpenedAt.Before(since) {
+				out = append(out, gap)
+			}
+		}
 	}
 	return out
 }

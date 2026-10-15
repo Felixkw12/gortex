@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
 	"go.uber.org/zap"
 )
@@ -227,12 +228,20 @@ func (j *contractCoreInputJournal) priorFailureEnvelope(ctx context.Context, pat
 // whose prior receipt is not already one. The caller's outer acceptance
 // accepts them with the rest of the pass.
 func (j *contractCoreInputJournal) stageFailureEnvelopes(ctx context.Context, paths []string) error {
+	return j.stageFailureEnvelopesOver(ctx, paths, false)
+}
+
+// stageFailureEnvelopesOver is stageFailureEnvelopes; with over it stages an
+// envelope even where the receipt under the path's row is one already. The
+// stuck-input repair excludes a row left in flight over an envelope that
+// way: only its own staging opens the window its accept then closes.
+func (j *contractCoreInputJournal) stageFailureEnvelopesOver(ctx context.Context, paths []string, over bool) error {
 	var staged []string
 	for _, path := range appendUniqueSorted(nil, paths...) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if j.priorFailureEnvelope(ctx, path) && !j.coldNamespace() {
+		if !over && j.priorFailureEnvelope(ctx, path) && !j.coldNamespace() {
 			continue
 		}
 		change := contractCoreInputChange{FilePath: path, SourceFingerprint: contractFailureEnvelopeSource(path), Uncertainty: contractFileIndexFailed}
@@ -307,6 +316,17 @@ func (j *contractCoreInputJournal) begin(paths []string) error {
 	}
 	if j.logger != nil {
 		j.logger.Debug("contract journal begin", contractJournalPathFields(begun)...)
+		// One line per window this begin opened after the path's previous
+		// window closed: the writer's quiet gap a contract job re-asks in.
+		if gaps, ok := j.backend.(interface {
+			takeWindowGaps() (string, []store_sqlite.ContractCoreWindowGap)
+		}); ok {
+			repo, opened := gaps.takeWindowGaps()
+			for _, gap := range opened {
+				j.logger.Info("contract receipt window", zap.String("repo", repo), zap.String("path", gap.Path), zap.Uint64("seq", gap.Seq),
+					zap.Float64("quiet_ms", contractMillis(gap.Quiet)), zap.Float64("open_prev_ms", contractMillis(gap.OpenPrev)))
+			}
+		}
 	}
 	return nil
 }
@@ -360,6 +380,28 @@ func (j *contractCoreInputJournal) written() {
 		}
 		sort.Strings(written)
 		j.logger.Debug("contract journal written", contractJournalPathFields(written)...)
+	}
+}
+
+// orphan ends a pass whose body failed after it began receipts: their
+// core-write windows stay open, since the body may have stopped between an
+// evict and its add, and are marked orphaned so a repair can find them.
+func (j *contractCoreInputJournal) orphan() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if len(j.begun) == 0 {
+		return
+	}
+	if orphaner, ok := j.backend.(interface{ OrphanBoundaryCoreWrites() }); ok {
+		orphaner.OrphanBoundaryCoreWrites()
+	}
+	if j.logger != nil {
+		orphaned := make([]string, 0, len(j.begun))
+		for path := range j.begun {
+			orphaned = append(orphaned, path)
+		}
+		sort.Strings(orphaned)
+		j.logger.Info("contract journal orphaned", contractJournalPathFields(orphaned)...)
 	}
 }
 
