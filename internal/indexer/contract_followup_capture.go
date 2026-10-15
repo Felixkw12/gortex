@@ -555,6 +555,43 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 				break
 			}
 		}
+		snapshot.WindowLastCloses = func(paths []string, before time.Time) ([]store_sqlite.ContractCoreWindowClose, []string) {
+			var closes []store_sqlite.ContractCoreWindowClose
+			var missing []string
+			for _, path := range paths {
+				found := false
+				for _, repo := range repos {
+					handles := handlesByRepo[repo]
+					if len(handles) == 0 || !contractPathInRepo(path, repo, repos) {
+						continue
+					}
+					if close, ok := handles[0].ContractCoreWindowLastClose(repo, "", path, before); ok {
+						closes = append(closes, close)
+						found = true
+					}
+					break
+				}
+				if !found {
+					missing = append(missing, path)
+				}
+			}
+			return closes, missing
+		}
+		snapshot.ReceiptWindowClose = func(windows map[string]ContractReceiptStamp) (time.Time, bool) {
+			var first time.Time
+			for path, stamp := range windows {
+				for _, repo := range repos {
+					handles := handlesByRepo[repo]
+					if len(handles) == 0 || !contractPathInRepo(path, repo, repos) {
+						continue
+					}
+					if at, ok := handles[0].ContractCoreWindowClosedAt(repo, stamp.Actor, path, stamp.Seq); ok && (first.IsZero() || at.Before(first)) {
+						first = at
+					}
+				}
+			}
+			return first, !first.IsZero()
+		}
 		snapshot.WindowGaps = func(paths []string, since time.Time) []time.Duration {
 			var out []time.Duration
 			for _, repo := range repos {

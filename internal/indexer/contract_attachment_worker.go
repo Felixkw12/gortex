@@ -87,6 +87,12 @@ type ContractFollowupSnapshot struct {
 	// settles, with a channel closed by the next one: a job's retry wakes on
 	// them as well as on Published.
 	ReceiptEvents func() (uint64, <-chan struct{})
+	// ReceiptWindowClose returns the earliest recorded close of an exact
+	// waited-on window, for measurement only. Missing history is unknown.
+	ReceiptWindowClose func(map[string]ContractReceiptStamp) (time.Time, bool)
+	// WindowLastCloses reports the primary paths last known closes before the
+	// proof ended, plus paths whose bounded history has no such close.
+	WindowLastCloses func([]string, time.Time) ([]store_sqlite.ContractCoreWindowClose, []string)
 	// ReceiptContents reads the contract content of each stamped path's
 	// receipt row and of its accepted predecessor, keyed by receipt
 	// fingerprint. Nil means no move is known to keep a file's contract

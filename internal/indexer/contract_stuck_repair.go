@@ -236,6 +236,7 @@ func (r *ContractStuckRepair) repoLocked(repo string) *contractRepoRepair {
 	if state == nil {
 		state = &contractRepoRepair{repo: repo, wake: make(chan struct{}, 1), suspects: make(map[string]bool), detected: make(map[string]bool), attempts: make(map[string]int), scan: true}
 		r.repos[repo] = state
+		r.options.Logger.Info("contract repair started", zap.String("repo", repo))
 		signalContractRepair(state.wake)
 		r.workers.Add(1)
 		go r.run(state)

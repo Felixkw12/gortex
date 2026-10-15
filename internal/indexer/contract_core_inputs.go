@@ -323,7 +323,7 @@ func (j *contractCoreInputJournal) begin(paths []string) error {
 		}); ok {
 			repo, opened := gaps.takeWindowGaps()
 			for _, gap := range opened {
-				j.logger.Info("contract receipt window", zap.String("repo", repo), zap.String("path", gap.Path), zap.Uint64("seq", gap.Seq),
+				j.logger.Info("contract receipt window", zap.String("repo", repo), zap.String("path", gap.Path), zap.Uint64("seq", gap.Seq), zap.String("window_process", contractWindowProcess), zap.String("checkout", gap.Checkout), zap.Int64("opened_at_ns", gap.OpenedAt.UnixNano()), zap.Int64("closed_at_ns", gap.ClosedAt.UnixNano()),
 					zap.Float64("quiet_ms", contractMillis(gap.Quiet)), zap.Float64("open_prev_ms", contractMillis(gap.OpenPrev)))
 			}
 		}

@@ -680,7 +680,7 @@ func (s contractRevalidationStats) fields() []zap.Field {
 // from the opening scan to the closing one, and its lead from the event that
 // woke the wait before it, when one did. A re-ask every input of which was
 // inside an open window at its opening scan asked nothing and is not one.
-func (c *contractConvergence) noteReask(lead time.Duration, woken bool, span time.Duration, moved bool) {
+func (c *contractConvergence) noteReask(lead time.Duration, woken bool, span time.Duration, moved bool, source string, closedAt time.Time) {
 	c.spans = append(c.spans, span)
 	leadMS := -1.0
 	if woken {
@@ -688,7 +688,7 @@ func (c *contractConvergence) noteReask(lead time.Duration, woken bool, span tim
 		leadMS = contractMillis(lead)
 	}
 	c.logger.Info("contract analysis reask", zap.String("repo", c.snap.Key.RepoPrefix), zap.Int("iteration", c.iteration),
-		zap.Float64("lead_ms", leadMS), zap.Float64("span_ms", contractMillis(span)), zap.Bool("moved", moved))
+		zap.Float64("lead_ms", leadMS), zap.Bool("lead_valid", woken), zap.String("lead_source", source), zap.Int64("wake_closed_at_ns", contractWindowUnixNano(closedAt)), zap.Float64("span_ms", contractMillis(span)), zap.Bool("moved", moved))
 }
 
 // contractMillis is d in milliseconds, to the microsecond.
@@ -846,14 +846,15 @@ type contractConvergence struct {
 	// revalidation counts one retry pass's revalidation work for its log line.
 	revalidation contractRevalidationStats
 	// What an iteration needs of a writer's quiet gap, measured: iteration is
-	// the current iteration; wokeAt is when the last wait saw the event that
-	// woke it, taken by the next re-ask as its lead; leads and spans are the
+	// the current iteration; wokeAt is the exact recorded window close that
+	// woke the last wait, taken by the next re-ask as its lead; leads and spans are the
 	// iteration's re-asks that ran their reads (from the wake to the opening
 	// scan, and from the opening scan to the closing one). blocked holds the
 	// paths whose open window refused a read from the second iteration on,
 	// blockedSince when that iteration began.
 	iteration    int
 	wokeAt       time.Time
+	wakeSource   string
 	leads, spans []time.Duration
 	blocked      map[string]bool
 	blockedSince time.Time
@@ -871,6 +872,7 @@ func newContractConvergence(ctx context.Context, req ContractFollowupRequest, fi
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	logger = logger.With(zap.String("window_process", contractWindowProcess), zap.Uint64("window_job", contractWindowJobs.Add(1)))
 	excluded := make(map[string]bool, len(req.Snapshot.Excluded))
 	for _, path := range req.Snapshot.Excluded {
 		excluded[path] = true
@@ -1216,6 +1218,7 @@ func (c *contractConvergence) wake() contractWake {
 // the write that opens a window is the worst moment to ask again, and the
 // close is the start of the gap before the next apply.
 func (c *contractConvergence) waitWake(since contractWake, until time.Time) bool {
+	c.wokeAt, c.wakeSource = time.Time{}, "none"
 	if c.req.WaitPublished == nil {
 		timer := time.NewTimer(time.Until(until))
 		defer timer.Stop()
@@ -1228,7 +1231,7 @@ func (c *contractConvergence) waitWake(since contractWake, until time.Time) bool
 	if c.snap.ReceiptEvents == nil {
 		published := c.req.WaitPublished(c.ctx, since.published, until)
 		if published {
-			c.wokeAt = time.Now()
+			c.wakeSource = "published_unscoped"
 		}
 		return published
 	}
@@ -1244,14 +1247,13 @@ func (c *contractConvergence) waitWake(since contractWake, until time.Time) bool
 	}
 	events, changed := c.snap.ReceiptEvents()
 	if ready(c.ctx, events) {
-		c.wokeAt = time.Now()
+		c.measureWindowWake(windows, "receipt_unmatched")
 		return true
 	}
 	ctx, cancel := context.WithCancel(c.ctx)
 	defer cancel()
 	done := make(chan struct{})
 	woke := false
-	var wokeAt time.Time
 	go func() {
 		defer close(done)
 		for {
@@ -1260,11 +1262,10 @@ func (c *contractConvergence) waitWake(since contractWake, until time.Time) bool
 			case <-ctx.Done():
 				return
 			}
-			seen := time.Now()
 			var now uint64
 			now, changed = c.snap.ReceiptEvents()
 			if ready(ctx, now) && ctx.Err() == nil {
-				woke, wokeAt = true, seen
+				woke = true
 				cancel()
 				return
 			}
@@ -1275,9 +1276,9 @@ func (c *contractConvergence) waitWake(since contractWake, until time.Time) bool
 	<-done
 	switch {
 	case woke:
-		c.wokeAt = wokeAt
+		c.measureWindowWake(windows, "receipt_unmatched")
 	case published:
-		c.wokeAt = time.Now()
+		c.measureWindowWake(windows, "published_unmatched")
 	}
 	return published || woke
 }
@@ -1891,7 +1892,9 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 	// The first re-ask after a wake carries its lead: from the event that
 	// woke the wait to this opening scan.
 	lead, woken := opened.Sub(c.wokeAt), !c.wokeAt.IsZero()
+	source, closedAt := c.wakeSource, c.wokeAt
 	c.wokeAt = time.Time{}
+	c.wakeSource = "no_wake"
 	r0, err := c.scan(union)
 	if err != nil {
 		return nil, nil, nil, err
@@ -2102,7 +2105,7 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 	stats.scans += time.Since(started)
 	stats.span = time.Since(opened)
 	moved := false
-	defer func() { c.noteReask(lead, woken, stats.span, moved) }()
+	defer func() { c.noteReask(lead, woken, stats.span, moved, source, closedAt) }()
 	// An answer asked while an input moved may be torn: it is asked again,
 	// never acted on, and the round waits for that input's window to close.
 	blockMoves := func(bracket []string) {
@@ -2873,10 +2876,19 @@ func (c *contractConvergence) run() error {
 	}
 }
 
-// noteWindowGaps reports the writer's quiet gaps on the paths whose open
-// window refused a read from the second iteration on, recorded since that
-// iteration began.
+// noteWindowGaps records the proof interval and every primary path that
+// blocked after initial extraction, with bounded close and gap summaries.
 func (c *contractConvergence) noteWindowGaps() {
+	end := time.Now()
+	paths := slices.Sorted(maps.Keys(c.blocked))
+	var closes []store_sqlite.ContractCoreWindowClose
+	missing := paths
+	if c.snap.WindowLastCloses != nil {
+		closes, missing = c.snap.WindowLastCloses(paths, end)
+	}
+	if !c.blockedSince.IsZero() {
+		c.logger.Info("contract analysis window scope", zap.String("repo", c.snap.Key.RepoPrefix), zap.String("checkout", ""), zap.String("actor_checkout", c.snap.Key.CheckoutID), zap.Any("last_closes", closes), zap.Strings("last_close_missing", missing), zap.Strings("repos", slices.Sorted(maps.Keys(c.repos))), zap.Int64("postextract_since_ns", c.blockedSince.UnixNano()), zap.Int64("measurement_end_ns", end.UnixNano()), zap.Strings("blocked_paths", slices.Sorted(maps.Keys(c.blocked))))
+	}
 	if c.snap.WindowGaps == nil || len(c.blocked) == 0 {
 		return
 	}
@@ -3457,5 +3469,16 @@ func (c *contractConvergence) noteStuck(path string, stamp ContractReceiptStamp)
 		seen.reported = true
 		c.stuck[path] = seen
 		c.snap.Suspect([]string{path})
+	}
+}
+
+// measureWindowWake records timing evidence without changing wake admission.
+func (c *contractConvergence) measureWindowWake(windows map[string]ContractReceiptStamp, missing string) {
+	c.wakeSource = missing
+	if len(windows) == 0 || c.snap.ReceiptWindowClose == nil {
+		return
+	}
+	if at, ok := c.snap.ReceiptWindowClose(windows); ok {
+		c.wokeAt, c.wakeSource = at, "window_close"
 	}
 }

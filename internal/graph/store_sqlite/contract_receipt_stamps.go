@@ -65,6 +65,7 @@ type contractReceiptWriteSequence struct {
 	// path's last window opened and closed.
 	openedAt map[contractReceiptWriteKey]time.Time
 	closed   map[contractReceiptWriteKey]contractCoreWindowSpan
+	closes   map[contractReceiptWriteKey][]contractCoreWindowSpan
 	gaps     map[contractReceiptWriteKey][]ContractCoreWindowGap
 	// orphaned holds the opener seq of each window a failed mutation left
 	// open, and when it was marked.
@@ -87,7 +88,10 @@ type contractCoreOrphan struct {
 
 // contractCoreWindowSpan is when one closed core-write window opened and
 // closed.
-type contractCoreWindowSpan struct{ opened, closed time.Time }
+type contractCoreWindowSpan struct {
+	opened, closed time.Time
+	seq            uint64
+}
 
 // contractCoreWindowGapRing bounds the gaps kept per path.
 const contractCoreWindowGapRing = 16
@@ -98,6 +102,8 @@ const contractCoreWindowGapRing = 16
 // open. Seq is the write seq that opened this window.
 type ContractCoreWindowGap struct {
 	Path            string
+	Checkout        string
+	ClosedAt        time.Time
 	Seq             uint64
 	OpenedAt        time.Time
 	Quiet, OpenPrev time.Duration
@@ -122,7 +128,7 @@ func (w *contractReceiptWriteSequence) openLocked(key contractReceiptWriteKey, s
 			if w.gaps == nil {
 				w.gaps = make(map[contractReceiptWriteKey][]ContractCoreWindowGap)
 			}
-			ring := append(w.gaps[key], ContractCoreWindowGap{Path: key.path, Seq: seq, OpenedAt: at,
+			ring := append(w.gaps[key], ContractCoreWindowGap{Path: key.path, Checkout: key.checkout, ClosedAt: last.closed, Seq: seq, OpenedAt: at,
 				Quiet: at.Sub(last.closed), OpenPrev: last.closed.Sub(last.opened)})
 			if len(ring) > contractCoreWindowGapRing {
 				ring = slices.Delete(ring, 0, len(ring)-contractCoreWindowGapRing)
@@ -144,7 +150,16 @@ func (w *contractReceiptWriteSequence) closeLocked(key contractReceiptWriteKey, 
 	if w.closed == nil {
 		w.closed = make(map[contractReceiptWriteKey]contractCoreWindowSpan)
 	}
-	w.closed[key] = contractCoreWindowSpan{opened: w.openedAt[key], closed: at}
+	span := contractCoreWindowSpan{opened: w.openedAt[key], closed: at, seq: w.writing[key]}
+	w.closed[key] = span
+	if w.closes == nil {
+		w.closes = make(map[contractReceiptWriteKey][]contractCoreWindowSpan)
+	}
+	history := append(w.closes[key], span)
+	if len(history) > contractCoreWindowGapRing {
+		history = slices.Delete(history, 0, len(history)-contractCoreWindowGapRing)
+	}
+	w.closes[key] = history
 	delete(w.writing, key)
 	delete(w.openedAt, key)
 }
@@ -224,6 +239,7 @@ func (s *Store) ForgetContractReceiptWritesForTest(repo, checkout string, paths 
 		delete(w.writing, key)
 		delete(w.openedAt, key)
 		delete(w.closed, key)
+		delete(w.closes, key)
 		delete(w.gaps, key)
 		delete(w.orphaned, key)
 	}
@@ -693,4 +709,45 @@ func (s *Store) ContractSeedNodesContext(ctx context.Context, repo string) ([]*g
 		return nil, fmt.Errorf("%w: contract seed nodes", graph.ErrContractProjectionLimit)
 	}
 	return out, ctx.Err()
+}
+
+// ContractCoreWindowClosedAt returns the recorded close of the exact window
+// opened at seq. A later window is never evidence for an earlier close; a
+// close outside the bounded history is reported missing.
+func (s *Store) ContractCoreWindowClosedAt(repo, checkout, path string, seq uint64) (time.Time, bool) {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, span := range w.closes[contractReceiptWriteKey{repo, checkout, path}] {
+		if span.seq == seq {
+			return span.closed, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// ContractCoreWindowClose is one bounded-history close used to associate a
+// proof interval with a writer's next open, or identify a censored gap.
+type ContractCoreWindowClose struct {
+	Repo       string `json:"repo"`
+	Checkout   string `json:"checkout"`
+	Path       string `json:"path"`
+	OpenerSeq  uint64 `json:"opener_seq"`
+	ClosedAtNS int64  `json:"closed_at_ns"`
+}
+
+// ContractCoreWindowLastClose returns the newest retained close at or before
+// the bound for one path, without substituting a later event.
+func (s *Store) ContractCoreWindowLastClose(repo, checkout, path string, before time.Time) (ContractCoreWindowClose, bool) {
+	w := &s.contractReceiptWrites
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	history := w.closes[contractReceiptWriteKey{repo, checkout, path}]
+	for i := len(history) - 1; i >= 0; i-- {
+		span := history[i]
+		if !span.closed.After(before) {
+			return ContractCoreWindowClose{Repo: repo, Checkout: checkout, Path: path, OpenerSeq: span.seq, ClosedAtNS: span.closed.UnixNano()}, true
+		}
+	}
+	return ContractCoreWindowClose{}, false
 }

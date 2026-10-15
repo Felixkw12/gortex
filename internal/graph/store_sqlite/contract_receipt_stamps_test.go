@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -554,4 +555,54 @@ func TestContractReceiptWriteBracketHoldsAWriteInFlight(t *testing.T) {
 	if begun, done := s.ContractReceiptWriteSample("repo"); begun != done {
 		t.Fatalf("a refused write left the bracket open: begun=%d done=%d", begun, done)
 	}
+}
+
+func TestContractCoreWindowCloseIdentifiesTheOpenedSequence(t *testing.T) {
+	s := openCatalogStore(t)
+	ctx := context.Background()
+	base := time.Unix(1700000000, 0)
+	now := base
+	s.contractReceiptWrites.now = func() time.Time { return now }
+	a, b := boundaryStorageReceipt("a.go", "a1"), boundaryStorageReceipt("b.go", "b1")
+	stage := func(row graph.ContractBoundaryReceipt) uint64 {
+		require.NoError(t, s.SetContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{row}))
+		return s.ContractReceiptWriteSeqs("repo", "", []string{row.FilePath})[row.FilePath]
+	}
+	first := stage(a)
+	now = base.Add(time.Second)
+	s.EndContractCoreWrites("repo", "", map[string]uint64{a.FilePath: first})
+	now = base.Add(2 * time.Second)
+	second := stage(a)
+	now = base.Add(3 * time.Second)
+	s.EndContractCoreWrites("repo", "", map[string]uint64{a.FilePath: second})
+	other := stage(b)
+	now = base.Add(4 * time.Second)
+	s.EndContractCoreWrites("repo", "", map[string]uint64{b.FilePath: other})
+	at, ok := s.ContractCoreWindowClosedAt("repo", "", a.FilePath, first)
+	require.True(t, ok)
+	require.Equal(t, base.Add(time.Second), at, "later and unrelated windows never substitute for this close")
+	at, ok = s.ContractCoreWindowClosedAt("repo", "", a.FilePath, second)
+	require.True(t, ok)
+	require.Equal(t, base.Add(3*time.Second), at)
+	close, found := s.ContractCoreWindowLastClose("repo", "", a.FilePath, base.Add(2*time.Second))
+	require.True(t, found)
+	require.Equal(t, first, close.OpenerSeq)
+	require.Equal(t, base.Add(time.Second).UnixNano(), close.ClosedAtNS)
+	require.Equal(t, a.FilePath, close.Path)
+	_, found = s.ContractCoreWindowLastClose("repo", "", a.FilePath, base)
+	require.False(t, found)
+	_, ok = s.ContractCoreWindowClosedAt("repo", "", a.FilePath, second+100)
+	require.False(t, ok)
+	for i := range contractCoreWindowGapRing + 1 {
+		now = base.Add(time.Duration(5+i) * time.Second)
+		seq := stage(a)
+		s.EndContractCoreWrites("repo", "", map[string]uint64{a.FilePath: seq})
+	}
+	_, ok = s.ContractCoreWindowClosedAt("repo", "", a.FilePath, first)
+	require.False(t, ok, "an evicted close is unknown, never the latest close")
+	_, found = s.ContractCoreWindowLastClose("repo", "", a.FilePath, base.Add(2*time.Second))
+	require.False(t, found, "history cannot invent a censored interval boundary")
+	s.ForgetContractReceiptWritesForTest("repo", "", []string{a.FilePath})
+	_, ok = s.ContractCoreWindowClosedAt("repo", "", a.FilePath, first)
+	require.False(t, ok, "a restarted sequence cannot match a previous process's close")
 }

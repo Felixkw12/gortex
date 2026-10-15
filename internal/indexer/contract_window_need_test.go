@@ -41,12 +41,14 @@ func TestContractIterationLineCarriesItsNeed(t *testing.T) {
 	}
 	consts := jobConsts
 	stage := 0
+	var firstPPAt time.Time
 	hooks := &contractConvergenceHooks{
 		roundWait: 2 * time.Second,
 		// After the first enrichment round the owner declares one more
 		// function: the route's unit is revalidated in a second iteration.
 		afterPP: func() {
 			if stage == 0 {
+				firstPPAt = time.Now()
 				stage = 1
 				consts = jobConsts + "func Extra() int { return 1 }\n"
 				f.saveKeepingKey("consts.go", consts)
@@ -129,6 +131,20 @@ func TestContractIterationLineCarriesItsNeed(t *testing.T) {
 	}
 	require.Equal(t, needSum, report.NeedSum, "the job sums the need of the iterations after the first")
 	require.Equal(t, needIterations, report.NeedIterations)
+	scopes := logs.FilterMessage("contract analysis window scope").All()
+	require.Len(t, scopes, 1)
+	scope := scopes[0].ContextMap()
+	require.NotEmpty(t, scope["window_process"])
+	require.NotEmpty(t, scope["last_closes"])
+	require.Positive(t, scope["window_job"])
+	require.Contains(t, scope["blocked_paths"], "fixture/consts.go")
+	require.Positive(t, scope["postextract_since_ns"])
+	require.GreaterOrEqual(t, scope["postextract_since_ns"], firstPPAt.UnixNano(), "only iterations after the initial extraction qualify quiet gaps")
+	require.GreaterOrEqual(t, scope["measurement_end_ns"], scope["postextract_since_ns"])
+	for _, line := range reasks {
+		require.Equal(t, scope["window_process"], line.ContextMap()["window_process"])
+		require.Equal(t, scope["window_job"], line.ContextMap()["window_job"])
+	}
 
 	jobCore, jobLogs := observer.New(zapcore.InfoLevel)
 	logContractJob(zap.New(jobCore), viewmetrics.ContractModeCold, viewmetrics.ContractJobPublished, time.Second, ContractFollowupBatchReport{Cohort: report})
@@ -171,4 +187,9 @@ func TestContractJournalLogsTheQuietGapBeforeEachWindow(t *testing.T) {
 	gaps := f.store.ContractCoreWindowGaps("fixture", []string{"fixture/helper.go"}, time.Time{})
 	require.NotEmpty(t, gaps)
 	require.Equal(t, fields["seq"], gaps[len(gaps)-1].Seq, "the line names the window the save opened")
+	require.Equal(t, gaps[len(gaps)-1].OpenedAt.UnixNano(), fields["opened_at_ns"])
+	require.Equal(t, gaps[len(gaps)-1].ClosedAt.UnixNano(), fields["closed_at_ns"])
+	require.Equal(t, "", fields["checkout"])
+	require.NotEmpty(t, fields["window_process"])
+
 }
