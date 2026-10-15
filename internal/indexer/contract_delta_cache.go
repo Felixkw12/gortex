@@ -56,7 +56,7 @@ type contractDeltaCache struct {
 	maxContent               uint64
 	contents                 map[string]string
 	receipts                 map[string]contractDeltaReceipt
-	ownerReaders, keyReaders map[string]map[string]bool
+	ownerReaders, keyReaders map[string][]string
 	// deltas counts completed delta jobs since the last cold/fill baseline.
 	deltas           int
 	complete         bool
@@ -369,14 +369,14 @@ func (p *contractDeltaCache) plan(identity contractDeltaIdentity, census map[str
 			}
 		}
 		for owner := range moved {
-			for reader := range p.ownerReaders[owner] {
+			for _, reader := range p.ownerReaders[owner] {
 				if census[reader] {
 					readers[reader] = true
 				}
 			}
 		}
 		for key := range keys {
-			for reader := range p.keyReaders[key] {
+			for _, reader := range p.keyReaders[key] {
 				if census[reader] {
 					readers[reader] = true
 				}
@@ -398,22 +398,27 @@ func (p *contractDeltaCache) plan(identity contractDeltaIdentity, census map[str
 // integration should update these alongside changed units, so a small delta
 // does not rebuild indexes for every unchanged unit.
 func (p *contractDeltaCache) indexReaders() {
-	p.ownerReaders, p.keyReaders = make(map[string]map[string]bool), make(map[string]map[string]bool)
-	add := func(index map[string]map[string]bool, key, reader string) {
-		if index[key] == nil {
-			index[key] = make(map[string]bool)
-		}
-		index[key][reader] = true
-	}
+	p.ownerReaders, p.keyReaders = make(map[string][]string), make(map[string][]string)
 	for reader, unit := range p.units {
 		if unit == nil {
 			continue
 		}
 		for owner := range unit.owners {
-			add(p.ownerReaders, owner, reader)
+			p.ownerReaders[owner] = append(p.ownerReaders[owner], reader)
 		}
 		for key := range unit.keys {
-			add(p.keyReaders, key, reader)
+			p.keyReaders[key] = append(p.keyReaders[key], reader)
+		}
+	}
+	// These immutable postings own exact-capacity backing. A clipped slice
+	// would retain its historical allocation while hiding it from accounting.
+	for _, index := range []map[string][]string{p.ownerReaders, p.keyReaders} {
+		for key, readers := range index {
+			slices.Sort(readers)
+			readers = slices.Compact(readers)
+			owned := make([]string, len(readers))
+			copy(owned, readers)
+			index[key] = owned
 		}
 	}
 }

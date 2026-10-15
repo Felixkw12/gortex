@@ -277,3 +277,38 @@ func TestContractInterestExpiryRetainsOwnedDeltaCache(t *testing.T) {
 	require.Same(t, p, c.deltaCaches.get(actor))
 	require.False(t, state.retryOnInputs)
 }
+
+func TestContractDeltaReaderPostingsConservePlanAndOwnBacking(t *testing.T) {
+	receipts := map[string]contractDeltaReceipt{"a": {boundary: "a"}, "b": {boundary: "b"}, "owner": {boundary: "owner"}}
+	p := &contractDeltaCache{complete: true, receipts: receipts, live: map[string]bool{"a": true, "b": true, "owner": true}, units: map[string]*contractUnit{
+		"a":     {owners: map[string]bool{"owner": true, "other": true}, keys: map[string]bool{"name:Missing": true, "id:Shared": true}},
+		"b":     {owners: map[string]bool{"owner": true}, keys: map[string]bool{"name:Missing": true}},
+		"owner": {},
+	}}
+	p.indexReaders()
+	require.Equal(t, map[string][]string{"owner": {"a", "b"}, "other": {"a"}}, p.ownerReaders)
+	require.Equal(t, map[string][]string{"name:Missing": {"a", "b"}, "id:Shared": {"a"}}, p.keyReaders)
+	require.Nil(t, p.keyReaders["name:Unasked"])
+	for _, index := range []map[string][]string{p.ownerReaders, p.keyReaders} {
+		for _, posting := range index {
+			require.Equal(t, len(posting), cap(posting))
+		}
+	}
+	old := p.keyReaders["name:Missing"]
+	now := cloneContractDeltaReceipts(receipts)
+	delete(now, "owner")
+	now["producer"] = newContractDeltaReceipt("new", map[string]string{`["repo","symbol_name","Missing"]`: "value"})
+	census := map[string]bool{"a": true, "b": true, "producer": true}
+	plan := p.plan(contractDeltaIdentity{}, census, now, false)
+	require.Equal(t, []string{"a", "b"}, plan.revalidate)
+	require.Equal(t, []string{"producer"}, plan.extract)
+	require.Equal(t, []string{"owner"}, plan.removed)
+	// Replacement rebuild drops obsolete edges without changing prior postings.
+	p.units["a"] = &contractUnit{keys: map[string]bool{"name:Replacement": true}}
+	delete(p.units, "b")
+	p.indexReaders()
+	require.Equal(t, []string{"a", "b"}, old)
+	require.Empty(t, p.ownerReaders)
+	require.Nil(t, p.keyReaders["name:Missing"])
+	require.Equal(t, []string{"a"}, p.keyReaders["name:Replacement"])
+}
