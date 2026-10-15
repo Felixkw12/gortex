@@ -343,6 +343,20 @@ func TestContractSchedulerCoalescesInterestAtAnUnchangedKey(t *testing.T) {
 	require.Equal(t, []string{"r/@k"}, p.started(), "no rerun at an unchanged key")
 }
 
+// TestContractSchedulerPublicationBeforeTheWaitResolvesIt: a job that
+// publishes between Schedule and WaitActor resolves the wait at once; the
+// promise is a level, not an edge.
+func TestContractSchedulerPublicationBeforeTheWaitResolvesIt(t *testing.T) {
+	p := newSchedulerProbe(t, nil)
+	scheduled := p.schedule("", []string{"r"}, "r", "k")
+	require.Eventually(t, func() bool {
+		return len(p.started()) == 1 && p.c.Status(scheduled.Actor).State == contractActorIdle.String()
+	}, 10*time.Second, time.Millisecond)
+	start := time.Now()
+	require.Equal(t, ContractActorPublished, p.wait(scheduled).Result)
+	require.Less(t, time.Since(start), time.Second, "the wait sees the publication that preceded it")
+}
+
 // TestContractSchedulerRerunsOnceAtTheNewestKey: keys that arrive while a
 // job runs rerun it once, at the newest; each replaced key's source is
 // released exactly once.

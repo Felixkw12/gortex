@@ -97,12 +97,6 @@ type ContractAnalysisCoordinator struct {
 	// repairPending, when set, reports whether a stuck-input repair is due
 	// for a cohort: an unsettled job's actor then waits for its accept.
 	repairPending func(repos []string) bool
-	adapters      map[graph.ContractAttachmentKey]contractAdapterWait
-}
-
-type contractAdapterWait struct {
-	actor ContractActor
-	seq   uint64
 }
 
 func NewContractAnalysisCoordinator(options ContractAnalysisCoordinatorOptions) (*ContractAnalysisCoordinator, error) {
@@ -121,50 +115,8 @@ func NewContractAnalysisCoordinator(options ContractAnalysisCoordinatorOptions) 
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &ContractAnalysisCoordinator{options: options, ctx: ctx, cancel: cancel, changed: make(chan struct{}),
 		acceptedAt: make(map[string]time.Time), actors: make(map[ContractActor]*contractActor), rings: make(map[string]*contractRing),
-		slots: &contractJobSlots{free: contractJobSlotCount(options.JobSlots)}, capacityChanged: make(chan struct{}),
-		adapters: make(map[graph.ContractAttachmentKey]contractAdapterWait)}
+		slots: &contractJobSlots{free: contractJobSlotCount(options.JobSlots)}, capacityChanged: make(chan struct{})}
 	return c, nil
-}
-
-// Request schedules the selected inputs' actor and reports whether a producer
-// will answer them, for a consumer that waits with WaitChange.
-func (c *ContractAnalysisCoordinator) Request(ctx context.Context, view *graphview.RepoView, inputs *graphview.SelectedContractInputs, repo, checkout string) (bool, error) {
-	epoch := c.InputEpoch()
-	source, err := PrepareContractCaptureSource(view)
-	if err != nil {
-		return false, err
-	}
-	key := graph.ContractAttachmentKey{RepoPrefix: repo, CheckoutID: checkout}
-	repos := []string{repo}
-	if inputs != nil {
-		key.InputVersion, key.InputFingerprint = inputs.State.InputVersion, inputs.State.InputFingerprint
-		for _, witness := range inputs.Witnesses {
-			repos = append(repos, witness.State.RepoPrefix)
-		}
-	}
-	scheduled, err := c.Schedule(ctx, ContractScheduleRequest{Actor: NewContractActor(checkout, repos), Key: key, Inputs: inputs, Source: source, Epoch: epoch})
-	if errors.Is(err, ErrContractQueueFull) || errors.Is(err, ErrContractUnsupported) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	c.mu.Lock()
-	c.adapters[key] = contractAdapterWait{scheduled.Actor, scheduled.ArrivalSeq}
-	c.mu.Unlock()
-	return true, nil
-}
-
-// WaitChange waits on the promise of the last Request for key.
-func (c *ContractAnalysisCoordinator) WaitChange(ctx context.Context, key graph.ContractAttachmentKey) error {
-	c.mu.Lock()
-	wait, ok := c.adapters[key]
-	c.mu.Unlock()
-	if !ok {
-		return nil
-	}
-	_, err := c.WaitActor(ctx, wait.actor, wait.seq)
-	return err
 }
 
 func contractAnalysisCohortID(snapshot ContractFollowupSnapshot, cfg config.IndexConfig) (string, error) {

@@ -10,7 +10,6 @@ import (
 	mcpsdk "github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graphview"
 )
 
 type contractCoreKindSpy struct {
@@ -67,16 +66,8 @@ func TestContractCoreEdgesClassifyEndpointKindsWithoutFullNodes(t *testing.T) {
 
 func installContractCoreKindTestRuntime(t *testing.T, srv *Server) {
 	t.Helper()
-	srv.SetContractAnalysisRuntime(&ContractAnalysisRuntime{
-		Request: func(context.Context, *graphview.RepoView, *graphview.SelectedContractInputs, string, string) (bool, error) {
-			t.Error("ordinary core request scheduled contract work")
-			return false, nil
-		},
-		WaitChange: func(context.Context, graph.ContractAttachmentKey) error {
-			t.Error("ordinary core request waited for contract work")
-			return nil
-		},
-	})
+	// An ordinary core request never schedules or waits on contract work.
+	installForbiddenContractRuntime(t, srv)
 	require.NotNil(t, srv.contractAnalysisRuntime)
 }
 
