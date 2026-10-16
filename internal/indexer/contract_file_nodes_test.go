@@ -212,3 +212,39 @@ func TestContractFileNodesCapturedDispatcherNeverSubstitutesPrimary(t *testing.T
 	require.ErrorIs(t, err, graph.ErrContractProjectionUnsupported)
 	require.Nil(t, rows)
 }
+
+func TestContractFollowupCrossFileHandlerResolvesSiblingResponseShape(t *testing.T) {
+	files := map[string]string{
+		"routes.go":  "package fixture\nimport \"net/http\"\nfunc register(mux *http.ServeMux) { mux.HandleFunc(\"GET /before\", handle) }\n",
+		"handler.go": "package fixture\nimport \"net/http\"\nfunc handle(w http.ResponseWriter, r *http.Request) { response := Reply{Name:\"ok\"}; WriteJSON(w,200,response) }\nfunc WriteJSON(w http.ResponseWriter, code int, body any) {}\n",
+		"types.go":   "package fixture\ntype Reply struct { Name string `json:\"name\"` }\n",
+	}
+	f := newContractJobFixture(t, files)
+	assertShape := func(route string) {
+		t.Helper()
+		inputs, err := f.options.Materializer.CaptureContractInputs(t.Context(), nil, "fixture", "")
+		require.NoError(t, err)
+		analysis, err := f.options.Materializer.OpenContractAnalysisForInputs(t.Context(), nil, inputs)
+		require.NoError(t, err)
+		defer analysis.Close()
+		nodes, err := analysis.NodesByKindsContext(t.Context(), []graph.NodeKind{graph.KindType})
+		require.NoError(t, err)
+		require.Len(t, nodes, 1)
+		require.Equal(t, "fixture/types.go::Reply", nodes[0].ID)
+		require.NotNil(t, nodes[0].Meta["shape"], "the actual independently leased payload must carry the sibling response shape")
+		contracts := f.contracts()
+		require.Contains(t, contracts, "http::GET::"+route)
+		meta, ok := contracts["http::GET::"+route].Meta["contract_meta"].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, "fixture/types.go::Reply", meta["response_type"])
+		require.NoError(t, analysis.Validate(t.Context()))
+	}
+	var cache *contractDeltaCache
+	runCachedContractFixture(t, f, &cache)
+	assertShape("/before")
+	files["routes.go"] = strings.ReplaceAll(files["routes.go"], "/before", "/after")
+	f.save("routes.go", files["routes.go"])
+	runCachedContractFixture(t, f, &cache)
+	assertShape("/after")
+	require.NotContains(t, f.contracts(), "http::GET::/before")
+}

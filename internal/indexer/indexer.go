@@ -7428,13 +7428,6 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	if idx.contractCoreInputs != nil {
 		return
 	}
-	// Upgrade bare type names in contract Meta (e.g. "UserResp") to
-	// full symbol IDs (e.g. "pkg/resp.go::UserResp") now that the
-	// graph is complete. During extraction the enricher only saw
-	// the handler's file-scoped node list, so types declared in a
-	// sibling file stayed as bare names.
-	idx.upgradeContractBareTypeRefs(reg)
-
 	// Cross-file handler resolution. When a route is registered with
 	// a handler identifier that the file-scoped extractor couldn't
 	// resolve (`h.ServeArchive` in router.go wiring a method defined
@@ -7444,6 +7437,10 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	// piled on top of each other. Re-run enrichment with the
 	// correct per-handler scope now that the graph is complete.
 	idx.resolveProviderHandlers(reg)
+	// Cross-file handler enrichment can introduce bare request/response
+	// types from sibling files. Resolve the complete enriched set once,
+	// before return-type and shape consumers require symbol identities.
+	idx.upgradeContractBareTypeRefs(reg)
 
 	// Cross-file route-prefix joining. A FastAPI APIRouter declared in
 	// one file (`router = APIRouter(prefix="/users")`) is mounted under
