@@ -2,7 +2,6 @@ package indexer
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"runtime"
 	"slices"
@@ -64,23 +63,15 @@ func (c *CheckoutCoordinator) inlineFoldBudget() time.Duration {
 }
 
 // copyChainInline is the copier of an inline fold: the store's stepped fold
-// when no other fold runs, the one-shot copy of the (few) layers above a
-// running fold otherwise. Either way it ends within the caller's budget or
-// fails.
+// when no other fold runs. A busy store refuses this optional copy so the
+// edit takes the existing direct-build fallback, without starting a monolithic
+// copy beside the active fold. The admitted stepped copy keeps its budget.
 func (c *CheckoutCoordinator) copyChainInline() chainCopier {
 	return func(ctx context.Context, oldestFirst []int64, to int64) (store_sqlite.GenerationCopyCounts, func(context.Context, bool), error) {
 		// The caller's context carries the budget (foldInlineAtCap).
 		backend := c.foldBackend()
 		fold, err := backend.BeginChainFold(ctx, oldestFirst, to, c.checkoutID+"/inline")
-		if errors.Is(err, store_sqlite.ErrChainFoldBusy) {
-			// The background fold holds the store's one stepped fold: the
-			// layers above it are copied at once, under the same budget.
-			counts, err := c.store.FlattenGenerationChain(ctx, oldestFirst, to)
-			if err == nil {
-				err = c.afterFoldCopy(ctx, to)
-			}
-			return counts, func(context.Context, bool) {}, err
-		}
+
 		if err != nil {
 			return store_sqlite.GenerationCopyCounts{}, nil, err
 		}
