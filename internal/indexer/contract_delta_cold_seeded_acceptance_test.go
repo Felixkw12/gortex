@@ -111,12 +111,28 @@ func TestContractDeltaColdPayloadSeeded200(t *testing.T) {
 						return
 					}
 					fired = true
-					text := strings.ReplaceAll(row.files["config.go"], "MATRIX_DATABASE_URL", fmt.Sprintf("MATRIX_INTERLEAVED_%03d", step))
-					// Change actual core/receipt/Published while preserving the
-					// captured namespace key: exercise the proof loop instead
-					// of replacing the scheduled job with a different key.
-					f.saveKeepingKey("config.go", text)
-					files["config.go"] = text
+					// Exercise a real source-only accepted edit at the cutpoint.
+					// Rewinding the input-state row after a boundary-changing save
+					// invents an impossible journal/key pair and strands its work.
+					before, found, err := f.store.ContractInputStateContext(t.Context(), "fixture", "")
+					require.NoError(t, err)
+					require.True(t, found)
+					prior, known, err := f.store.ContractBoundaryReceiptContext(t.Context(), "fixture", "", "fixture/server.go")
+					require.NoError(t, err)
+					require.True(t, known)
+					epoch := f.epoch.Load()
+					text := files["server.go"] + fmt.Sprintf("\n// accepted_interleaving_%03d\n", step)
+					f.save("server.go", text)
+					after, found, err := f.store.ContractInputStateContext(t.Context(), "fixture", "")
+					require.NoError(t, err)
+					require.True(t, found)
+					require.Equal(t, before, after, "the real edit must retain the exact accepted namespace identity")
+					current, known, err := f.store.ContractBoundaryReceiptContext(t.Context(), "fixture", "", "fixture/server.go")
+					require.NoError(t, err)
+					require.True(t, known)
+					require.NotEqual(t, prior.SourceFingerprint, current.SourceFingerprint)
+					require.Greater(t, f.epoch.Load(), epoch, "the concurrent accepted source must actually publish")
+					files["server.go"] = text
 					cutpoints[placement]++
 				}
 				hooks = &contractConvergenceHooks{}

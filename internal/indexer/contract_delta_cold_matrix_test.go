@@ -235,9 +235,18 @@ func runContractColdMatrixAcceptedState(t *testing.T, f *contractJobFixture, cac
 	ran := len(targets) != 0
 	if !ran {
 		require.Equal(t, beforeKey, key, "no job is valid only for the carried exact input key")
-		work, err := f.store.PendingContractWorkForScopeContext(t.Context(), "fixture", "")
+		// Physical journal debt is retained for historical readers even when
+		// this exact attachment has acknowledged it. Test serving completion,
+		// not mutation of historical work (including unmoved-key cutpoints).
+		work, err := f.store.ContractWorkForAttachmentScopeContext(t.Context(), key, "fixture", "")
 		require.NoError(t, err)
-		require.Empty(t, work, "source-only identity carry owes no pending work")
+		var pending []graph.ContractWork
+		for _, row := range work {
+			if row.State == graph.ContractWorkPending {
+				pending = append(pending, row)
+			}
+		}
+		require.Empty(t, pending, "source-only identity carry owes no selected attachment work")
 		require.Equal(t, before, contractColdMatrixAttachment(t, f), "no-op keeps the exact sealed payload")
 		require.Same(t, previousCache, *cache)
 		require.Equal(t, previousDeltas, (*cache).deltas, "no delta job ran")
