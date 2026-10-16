@@ -13,7 +13,6 @@ import (
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/audit"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/semantic/lsp"
 )
@@ -262,11 +261,7 @@ func (s *Server) handlePRReviewContext(ctx context.Context, req mcp.CallToolRequ
 	if len(ids) > 0 {
 		contracts := s.computeContractImpactContext(ctx, ids)
 		out.Contracts = contracts
-		if status := contractConsumerStatusFromContext(ctx); status != nil && status.state != graphview.StateComplete {
-			out.Gates = append(out.Gates, reviewGate{Name: "contracts", Status: prReviewWarn, Detail: "contract analysis was not evaluated; core review results remain available"})
-		} else {
-			out.Gates = append(out.Gates, prReviewContractGate(contracts))
-		}
+		out.Gates = append(out.Gates, optionalContractReviewGate(contractConsumerStatusFromContext(ctx), contracts))
 	}
 
 	// --- section: verify_change gate (result computed above) ---

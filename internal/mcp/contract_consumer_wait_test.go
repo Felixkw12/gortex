@@ -208,7 +208,7 @@ func TestContractConsumerHeldWorkerKeepsOrdinaryHandlersIndependent(t *testing.T
 		require.Contains(t, body, test.contains)
 		if test.name == "search_symbols" {
 			require.NotContains(t, body, "/before")
-			require.Contains(t, body, "contract_component_not_loaded")
+			require.NotContains(t, body, "contract_analysis", "core-only name search never consulted the optional component")
 		}
 		require.EqualValues(t, 1, requests.Load(), "ordinary %s queued contract analysis", test.name)
 		require.EqualValues(t, 1, waits.Load(), "ordinary %s waited for contract analysis", test.name)
@@ -234,7 +234,7 @@ func TestContractConsumerOrdinaryNameSearchDoesNotRequireAnalysisStorage(t *test
 	body := requireContractBody(t, result, err)
 	require.Contains(t, body, "repo/handler.go::Handle")
 	require.NotContains(t, body, "/before")
-	require.Contains(t, body, "contract_component_not_loaded")
+	require.NotContains(t, body, "contract_analysis", "core-only name search never consulted the optional component")
 }
 
 func TestContractConsumerRequiredMixedSearchAndRelationsPreserveCore(t *testing.T) {

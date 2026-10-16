@@ -353,9 +353,15 @@ func (s *Server) wrapToolHandlerMode(h mcpserver.ToolHandlerFunc, injectOverlay 
 				res = mcp.NewToolResultError(err.Error())
 			}
 		}
-		if status := contractConsumerStatusFromContext(ctx); status != nil && status.mode == contractConsumerRequired && hErr == nil && res != nil {
-			if err := contractAnalysisFromContext(ctx).validate(ctx); err != nil {
-				res = mcp.NewToolResultError(err.Error())
+		if status := contractConsumerStatusFromContext(ctx); status != nil && hErr == nil && res != nil &&
+			(status.mode == contractConsumerRequired || status.consulted) {
+			binding := contractAnalysisFromContext(ctx)
+			// Default optional absence leaves the core answer useful. Once a payload
+			// was read (or exact policy failed), its checked failure cannot be hidden.
+			if binding != nil && (status.mode == contractConsumerRequired || len(binding.views) > 0 || binding.lazyErr != nil) {
+				if err := binding.validate(ctx); err != nil {
+					res = mcp.NewToolResultError(err.Error())
+				}
 			}
 		}
 		if view != nil && view.sourceFallback != nil {

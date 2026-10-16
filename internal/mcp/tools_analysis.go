@@ -592,7 +592,11 @@ func (s *Server) handleEnhancedChangeImpact(ctx context.Context, req mcp.CallToo
 	// contracts so existing breaking drift is reported alongside the
 	// pending-change blast radius.
 	if impactCtx.Err() == nil {
-		if ci := s.computeContractImpactContext(impactCtx, ids); ci != nil {
+		ci := s.computeContractImpactContext(impactCtx, ids)
+		if status := contractConsumerStatusFromContext(impactCtx); status != nil && status.consulted {
+			result["contract_analysis"] = optionalContractFacts(status)
+		}
+		if ci != nil {
 			result["contract_impact"] = ci
 			if impact.Risk == analysis.RiskLow && ci.Breaking > 0 {
 				result["risk"] = analysis.RiskHigh
@@ -655,7 +659,7 @@ func (s *Server) computeContractImpactContext(ctx context.Context, changedIDs []
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || len(changedIDs) == 0 {
 		return nil
 	}
 	reg := s.optionalContractRegistryForContext(ctx)
@@ -746,7 +750,13 @@ func (s *Server) computeContractImpactContext(ctx context.Context, changedIDs []
 		}
 		return nil
 	})
+	if binding := contractAnalysisFromContext(ctx); binding != nil && len(binding.views) > 0 {
+		lookup = binding.shapeLookup(ctx)
+	}
 	issues := contracts.Validate(sub, lookup)
+	if binding := contractAnalysisFromContext(ctx); binding != nil && binding.readError() != nil {
+		aborted = true
+	}
 	if aborted || ctx.Err() != nil {
 		return nil
 	}

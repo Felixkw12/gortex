@@ -33,6 +33,9 @@ type contractAnalysisContext struct {
 	closeOnce     sync.Once
 	releaseCohort func()
 	served        bool
+	lazy          func(context.Context) error
+	lazyOnce      sync.Once
+	lazyErr       error
 }
 
 func withContractAnalysisContext(ctx context.Context, binding *contractAnalysisContext) context.Context {
@@ -42,6 +45,21 @@ func withContractAnalysisContext(ctx context.Context, binding *contractAnalysisC
 func contractAnalysisFromContext(ctx context.Context) *contractAnalysisContext {
 	binding, _ := ctx.Value(contractAnalysisContextKey{}).(*contractAnalysisContext)
 	return binding
+}
+
+// ensure binds an optional component once, only when a handler actually asks
+// for contract registry/graph/shape data. The request owns this placeholder's
+// cleanup before any lazily opened payloads exist.
+func (binding *contractAnalysisContext) ensure(ctx context.Context) error {
+	if binding == nil {
+		return graph.ErrContractProjectionIncomplete
+	}
+	binding.lazyOnce.Do(func() {
+		if binding.lazy != nil {
+			binding.lazyErr = binding.lazy(ctx)
+		}
+	})
+	return binding.lazyErr
 }
 
 func (binding *contractAnalysisContext) close() {
@@ -100,6 +118,9 @@ func (binding *contractAnalysisContext) checkCohort() error {
 }
 
 func (binding *contractAnalysisContext) validate(ctx context.Context) error {
+	if binding != nil && binding.lazyErr != nil {
+		return binding.lazyErr
+	}
 	if err := binding.readError(); err != nil {
 		return err
 	}
@@ -124,6 +145,9 @@ func (binding *contractAnalysisContext) validate(ctx context.Context) error {
 }
 
 func (binding *contractAnalysisContext) loadRegistry(ctx context.Context) (*contracts.Registry, error) {
+	if err := binding.ensure(ctx); err != nil {
+		return nil, err
+	}
 	binding.once.Do(func() {
 		binding.registry = contracts.NewRegistry()
 		if len(binding.views) == 0 {
@@ -158,6 +182,12 @@ func (binding *contractAnalysisContext) loadRegistry(ctx context.Context) (*cont
 		}
 	})
 	if binding.registryErr != nil {
+		// An opened attachment's checked projection failure is sticky even when
+		// an optional handler omits its contract section. Absence has no opened
+		// payload and remains a valid default core-only answer.
+		if len(binding.views) > 0 {
+			binding.recordReadError(binding.registryErr)
+		}
 		return nil, binding.registryErr
 	}
 	if err := ctx.Err(); err != nil {
@@ -179,8 +209,9 @@ func (s *Server) contractRegistryForContext(ctx context.Context) (*contracts.Reg
 	return s.effectiveContractRegistry(), nil
 }
 
-// Optional consumers omit an unbound contract section. The middleware reports
-// its incomplete status without loading a primary registry or scheduling work.
+// Optional consumers bind lazily at this first registry read. An unavailable
+// attachment omits the contract section after recording interest; a routed
+// request never borrows the primary registry.
 func (s *Server) optionalContractRegistryForContext(ctx context.Context) *contracts.Registry {
 	registry, err := s.contractRegistryForContext(ctx)
 	if err != nil {
@@ -197,6 +228,10 @@ func (s *Server) contractReaderForContext(ctx context.Context) (graph.Reader, er
 }
 
 func (binding *contractAnalysisContext) shapeLookup(ctx context.Context) contracts.ShapeLookup {
+	if err := binding.ensure(ctx); err != nil {
+		binding.recordReadError(err)
+		return func(string) *contracts.Shape { return nil }
+	}
 	repos := make([]string, 0, len(binding.views))
 	for repo := range binding.views {
 		repos = append(repos, repo)
@@ -300,6 +335,12 @@ func (binding *contractAnalysisContext) analysisOutEdges(ctx context.Context, id
 // rows. It never embeds the core reader's legacy contract edges. Current core
 // source identities are added only as evidence for owned contract endpoints.
 func (binding *contractAnalysisContext) analysisReader(ctx context.Context) (graph.Reader, error) {
+	if err := binding.ensure(ctx); err != nil {
+		return nil, err
+	}
+	if len(binding.views) == 0 {
+		return nil, graph.ErrContractProjectionIncomplete
+	}
 	binding.graphOnce.Do(func() {
 		nodes, err := binding.analysisNodes(ctx, nil)
 		if err != nil {

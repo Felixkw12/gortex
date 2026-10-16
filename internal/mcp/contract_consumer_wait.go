@@ -75,6 +75,8 @@ type contractConsumerStatus struct {
 	navigate    bool
 	allowServed bool
 	fresh       bool
+	consulted   bool
+	retryAfter  time.Duration
 }
 
 func contractConsumerStatusFromContext(ctx context.Context) *contractConsumerStatus {
@@ -114,7 +116,7 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 	if mode == contractConsumerNone {
 		return ctx, nil
 	}
-	status := &contractConsumerStatus{mode: mode, state: graphview.StateIncomplete, reason: "contract_component_not_loaded", navigate: contractNavigationRequest(lowered)}
+	status := &contractConsumerStatus{mode: mode, state: graphview.StateIncomplete, reason: "no_attachment", navigate: contractNavigationRequest(lowered)}
 	if mode == contractConsumerRequired {
 		switch lowered.Params.Name {
 		case "contracts", "api_impact", "analyze":
@@ -128,9 +130,20 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 	status.allowServed = !freshness.requireExact && len(want.required) == 0
 	ctx = context.WithValue(ctx, contractConsumerContextKey{}, status)
 	if mode == contractConsumerOptional {
-		ctx = withContractAnalysisContext(ctx, &contractAnalysisContext{})
+		binding := &contractAnalysisContext{}
+		optionalRequest := lowered
+		optionalArgs := make(map[string]any, len(lowered.GetArguments()))
+		for key, value := range lowered.GetArguments() {
+			optionalArgs[key] = value
+		}
+		optionalRequest.Params.Arguments = optionalArgs
+		binding.lazy = func(readCtx context.Context) error {
+			return s.bindOptionalContractConsumer(readCtx, optionalRequest, status, binding)
+		}
+		ctx = withContractAnalysisContext(ctx, binding)
 		return ctx, nil
 	}
+	status.consulted = true
 	if s.materializer == nil {
 		return ctx, mcp.NewToolResultError(graphview.NewViewError(graphview.CodeCapabilityUnavailable, "selected contract analysis is unsupported").Error())
 	}
@@ -440,7 +453,7 @@ func contractWaitRefusal(err error, retryAfter time.Duration) *mcp.CallToolResul
 
 func decorateContractConsumerResult(ctx context.Context, result *mcp.CallToolResult) *mcp.CallToolResult {
 	status := contractConsumerStatusFromContext(ctx)
-	if status == nil || result == nil || result.IsError {
+	if status == nil || (status.mode == contractConsumerOptional && !status.consulted) || result == nil || result.IsError {
 		return result
 	}
 	fresh := status.fresh
@@ -463,6 +476,9 @@ func decorateContractConsumerResult(ctx context.Context, result *mcp.CallToolRes
 	fields := map[string]any{"capability": graphview.CapContracts, "state": status.state, "fresh": fresh}
 	if status.reason != "" {
 		fields["reason"] = status.reason
+	}
+	if status.retryAfter > 0 {
+		fields["retry_after"] = int64((status.retryAfter + time.Second - 1) / time.Second)
 	}
 	result = mergeResultMeta(result, map[string]any{"contract_analysis": fields})
 	text, ok := singleTextContent(result)
