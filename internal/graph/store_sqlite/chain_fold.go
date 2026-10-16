@@ -137,8 +137,9 @@ type ChainFold struct {
 	yields     int
 	released   bool
 	stepTarget time.Duration
-	// interruptedPageRows bounds only retries of a page rolled back for a
-	// queued writer. A committed step returns to measured time-based sizing.
+	// interruptedPageRows remembers a page budget reduced by a queued writer.
+	// Retain it across commits within the same member/phase/table; a successful
+	// operation transition returns to measured time-based sizing.
 	interruptedPageRows int
 	interruptedPages    int
 	pageBackoffs        int
@@ -546,9 +547,15 @@ func (f *ChainFold) Step(ctx context.Context) (done bool, err error) {
 		}
 		return false, err
 	}
-	f.interruptedPageRows = 0
 	if deferred != nil {
 		deferred()
+	}
+	// A small committed page proves progress at the reduced budget, not that
+	// the next page of this operation can regain its previous larger budget.
+	// Metadata pages do not update the payload row-rate estimate below. Clear
+	// the learned ceiling only after an actual operation transition.
+	if f.member != snapshot.member || f.phase != snapshot.phase || f.table != snapshot.table {
+		f.interruptedPageRows = 0
 	}
 	f.steps++
 	if moved >= int64(chainFoldMinRows) {

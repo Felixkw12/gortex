@@ -120,8 +120,27 @@ func TestChainFoldInterruptedPagesReduceOnlyAfterTransactionWork(t *testing.T) {
 	_, err = fold.Step(ctx)
 	require.NoError(t, err)
 	require.Len(t, renderFoldMasks(t, store, target), len(before)+64, "the shortened page must make real committed progress")
-	require.Zero(t, fold.interruptedPageRows, "successful commit must release the retry-only limit")
-	require.Equal(t, 512, fold.stepRows(), "normal time-based sizing must recover after commit")
+	require.Equal(t, 64, fold.interruptedPageRows, "same-operation progress must retain the learned quiet-window budget")
+	require.Equal(t, 64, fold.stepRows(), "one committed page must not restore the interrupted larger page")
+	maskTable := fold.table
+	previousRows := len(renderFoldMasks(t, store, target))
+	for fold.phase == foldPhaseMasks && fold.table == maskTable {
+		beforePage := fold.cursor()
+		_, err = fold.Step(ctx)
+		require.NoError(t, err)
+		afterRows := len(renderFoldMasks(t, store, target))
+		require.Positive(t, afterRows-previousRows, "every remaining page must commit real ownership rows")
+		require.LessOrEqual(t, afterRows-previousRows, 64, "same-operation pages must remain bounded by learned progress")
+		require.NotEqual(t, beforePage, fold.cursor(), "committed source work must advance its cursor")
+		previousRows = afterRows
+		if fold.phase == foldPhaseMasks && fold.table == maskTable {
+			require.Equal(t, 64, fold.interruptedPageRows)
+			require.Equal(t, 64, fold.stepRows())
+		}
+	}
+	require.Len(t, renderFoldMasks(t, store, target), len(before)+len(files), "all ownership rows survive the bounded pages")
+	require.Zero(t, fold.interruptedPageRows, "only the completed operation releases its learned page ceiling")
+	require.Equal(t, 512, fold.stepRows(), "the next operation must recover normal time-based sizing")
 	interruptions, reductions = fold.InterruptionCounts()
 	require.Equal(t, 4, interruptions, "commits preserve cumulative telemetry")
 	require.Equal(t, 3, reductions)
