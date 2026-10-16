@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"math"
@@ -18,10 +19,13 @@ import (
 // guard stamps come from that checkpoint's immutable change-clock map.
 type contractFillContinuation struct {
 	identity contractDeltaIdentity
-	// namespaceBaseline certifies only these exact completed barrier rows.
+	// namespaceBaseline certifies completed barrier rows. Copying may prune
+	// acknowledged non-root debt; namespace rows must remain exact.
 	// Current own/read stamps, row identities and guards remain mandatory.
 	namespaceBaseline            bool
 	barrierRows, allRows, census [sha256.Size]byte
+	namespaceRows                [sha256.Size]byte
+	barrierMembers               [][sha256.Size]byte
 	paths                        []string
 	rows                         [][sha256.Size]byte
 	units                        []contractFillUnitProof
@@ -87,13 +91,25 @@ func (rows contractFillRows) own(path string) [sha256.Size]byte {
 	return contractFillDigest(slices.Clone(rows.byPath[path]))
 }
 
-func contractFillBarrierRows(work []graph.ContractWork) [sha256.Size]byte {
-	var identities [][sha256.Size]byte
+// Canonical full identities retain actor, origin, scope, token and input key.
+// Sorting also preserves multiplicity for conservative subset comparison.
+func contractFillBarrierMembers(work []graph.ContractWork) ([][sha256.Size]byte, [sha256.Size]byte) {
+	var identities, roots [][sha256.Size]byte
 	for _, row := range work {
 		if contractDeltaMembershipUnknown([]graph.ContractWork{row}) {
-			identities = append(identities, sha256.Sum256([]byte(contractWorkIdentity(row))))
+			identity := sha256.Sum256([]byte(contractWorkIdentity(row)))
+			identities = append(identities, identity)
+			if row.FilePath == row.RepoPrefix+"/" {
+				roots = append(roots, identity)
+			}
 		}
 	}
+	slices.SortFunc(identities, func(a, b [sha256.Size]byte) int { return bytes.Compare(a[:], b[:]) })
+	return identities, contractFillDigest(roots)
+}
+
+func contractFillBarrierRows(work []graph.ContractWork) [sha256.Size]byte {
+	identities, _ := contractFillBarrierMembers(work)
 	return contractFillDigest(identities)
 }
 
@@ -157,6 +173,7 @@ func checkpointContractFill(c *contractConvergence, p *contractDeltaCache, pool 
 	w := c.coverage
 	rows := newContractFillRows(w.work)
 	proof := &contractFillContinuation{identity: p.identity, barrierRows: contractFillBarrierRows(w.work), allRows: rows.all, census: contractFillCensus(c.clock.lastCensus)}
+	proof.barrierMembers, proof.namespaceRows = contractFillBarrierMembers(w.work)
 	type candidate struct {
 		unit   *contractUnit
 		flags  uint8
@@ -338,11 +355,36 @@ func (proof *contractFillContinuation) metadataSize() int64 {
 }
 
 func (proof *contractFillContinuation) resumesBarrier(identity contractDeltaIdentity, work []graph.ContractWork) bool {
-	return proof != nil && proof.identity == identity && proof.barrierRows == contractFillBarrierRows(work)
+	if proof == nil || proof.identity != identity {
+		return false
+	}
+	members, roots := contractFillBarrierMembers(work)
+	if proof.barrierRows == contractFillDigest(members) {
+		return true
+	}
+	// Only a completed baseline can survive removal of already completed
+	// non-root uncertainty. New/changed debt and namespace roots still refuse;
+	// initial partial fills retain exact-set semantics. Unit reuse below still
+	// checks the actual current own/read/census/source stamps independently.
+	if !proof.namespaceBaseline || roots != proof.namespaceRows || len(members) > len(proof.barrierMembers) {
+		return false
+	}
+	previous := 0
+	for _, member := range members {
+		for previous < len(proof.barrierMembers) && bytes.Compare(proof.barrierMembers[previous][:], member[:]) < 0 {
+			previous++
+		}
+		if previous == len(proof.barrierMembers) || proof.barrierMembers[previous] != member {
+			return false
+		}
+		previous++
+	}
+	return true
 }
 
 // Completed namespace debt remains in immutable ancestry. New local work may
-// reuse only individually current proofs; changed namespace/unknown debt cannot.
+// reuse only individually current proofs. Namespace changes or added/changed
+// unknown debt cannot inherit completion; acknowledged non-root removal can.
 func (proof *contractFillContinuation) completedBarrierCurrent(identity contractDeltaIdentity, work []graph.ContractWork) bool {
 	return proof != nil && proof.namespaceBaseline && proof.resumesBarrier(identity, work)
 }
