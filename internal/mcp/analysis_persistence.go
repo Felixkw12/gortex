@@ -231,11 +231,13 @@ func (s *Server) populateAnalysis(takeLock, background bool) analysisRunMetrics 
 			yields += metrics.yields
 			yielded += metrics.yielded
 		}
-		leidenInput := s.leidenCache
+		var leidenInput *analysis.LeidenPartitionCache
 		if takeLock {
 			s.analysisMu.RLock()
 			leidenInput = s.leidenCache
 			s.analysisMu.RUnlock()
+		} else {
+			leidenInput = s.leidenCache
 		}
 		// Start breadcrumb per analyzer: these are whole-graph walks that can
 		// each run minutes on a large cold workspace, and metrics-only logging
