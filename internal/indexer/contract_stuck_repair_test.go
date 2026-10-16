@@ -267,9 +267,19 @@ func TestContractStuckRepairWhileAStuckJobHoldsTheSlot(t *testing.T) {
 // repair: the pass logs the window healed and reindexes nothing.
 func TestContractStuckRepairRechecksUnderTheLane(t *testing.T) {
 	healed := make(chan struct{})
+	allowLane := make(chan struct{})
+	var allowOnce sync.Once
+	defer allowOnce.Do(func() { close(allowLane) })
 	var once sync.Once
 	f := newContractRepairFixture(t, func(f *contractRepairFixture, r *ContractStuckRepair) {
 		r.beforeLane = func(repo string) {
+			// Also hold the initial scan pass: it could otherwise pass this
+			// hook before failBody and acquire the lane after the failure.
+			select {
+			case <-allowLane:
+			case <-r.ctx.Done():
+				return
+			}
 			if len(f.store.OrphanedContractCoreWindows("fixture")) == 0 {
 				return // Not the pass the failed body asked for.
 			}
@@ -281,8 +291,18 @@ func TestContractStuckRepairRechecksUnderTheLane(t *testing.T) {
 			})
 		}
 	})
+	f.strict(t, time.Minute)
 	repaired := repairCount("stuck_receipt")
 	f.failBody(t, "consts.go", jobConsts+"// a failed apply\n")
+	// Observe the real watcher's detection before healing. The pass must
+	// retain that detection across saveQuiet and recheck it under the lane.
+	require.Eventually(t, func() bool {
+		f.r.mu.Lock()
+		defer f.r.mu.Unlock()
+		state := f.r.repos["fixture"]
+		return state != nil && state.detected["fixture/consts.go"]
+	}, 20*time.Second, 10*time.Millisecond, "the watcher must detect the failed body's window")
+	allowOnce.Do(func() { close(allowLane) })
 	select {
 	case <-healed:
 	case <-time.After(20 * time.Second):
