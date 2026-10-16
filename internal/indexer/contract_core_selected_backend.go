@@ -129,14 +129,23 @@ func newSelectedContractCoreStorageBackend(ctx context.Context, target *store_sq
 	carried.Accepted = true
 	var inherited *graph.ContractInputState
 	if cumulativeGeneration > 0 && cumulative.CheckoutID == checkout {
-		row, found, err := target.Catalog().GetViewGeneration(ctx, target.ViewGeneration())
-		if err != nil {
-			return nil, err
-		}
-		if found && row.BaseGenerationID == cumulativeGeneration {
-			// The storage CAS deliberately follows explicit catalog ancestry.
-			// It must see the same original selected parent, not expect absence.
-			inherited = cumulative
+		generation := target.ViewGeneration()
+		for steps := 0; generation > cumulativeGeneration && steps < maxDedicatedBaseActiveAncestryWalk; steps++ {
+			row, found, err := target.Catalog().GetViewGeneration(ctx, generation)
+			if err != nil {
+				return nil, err
+			}
+			if !found || row.BaseGenerationID < cumulativeGeneration || row.BaseGenerationID >= generation {
+				break
+			}
+			if row.BaseGenerationID == cumulativeGeneration {
+				// The storage CAS follows explicit ancestry past missing physical
+				// headers too. Expect only this exact selected ancestor, never an
+				// actor's latest row or a merely equal unrelated generation.
+				inherited = cumulative
+				break
+			}
+			generation = row.BaseGenerationID
 		}
 	}
 	if e := target.SetContractInputStateWithWorkReceiptsAndSourcesContext(ctx, inherited, carried, nil, nil, nil); e != nil {
@@ -170,4 +179,30 @@ func (b *SparseGenerationBuilder) installSelectedContractCoreInputs(ctx context.
 	idx.contractProjectionNeedsWitness = false
 	idx.contractInputWitness = nil
 	return nil
+}
+
+// prepareEmptyContractCoreInputs records deletion masks without running the
+// full indexing pass (which would erase payload retained by copy/resume paths).
+func (b *SparseGenerationBuilder) prepareEmptyContractCoreInputs(ctx context.Context, handle *store_sqlite.Store, req BuildRequest, plan buildPlan) (*contractCoreInputJournal, error) {
+	backend, err := newSelectedContractCoreStorageBackend(ctx, handle, req.Base, req.RepoPrefix, req.Identity.CheckoutID)
+	if err != nil {
+		return nil, err
+	}
+	journal, err := newContractCoreInputJournal(ctx, backend)
+	if err != nil {
+		return nil, err
+	}
+	journal.logger = b.Logger
+	paths := make([]string, 0, len(plan.deleted))
+	for _, relative := range plan.deleted {
+		path := builderGraphPath(req.RepoPrefix, relative)
+		if err := journal.prepare(ctx, nil, path, "", nil, nil, true); err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+	}
+	if err := journal.begin(paths); err != nil {
+		return nil, err
+	}
+	return journal, nil
 }

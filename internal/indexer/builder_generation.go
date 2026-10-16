@@ -776,10 +776,28 @@ func (b *SparseGenerationBuilder) buildReservedGenerationWithCallbacks(ctx conte
 		// deletion-only layer. A recovered adopted generation may carry partial
 		// payload from a vanished writer, so it remains on the established
 		// recovery path and is re-derived in full.
+		var emptyInputs *contractCoreInputJournal
+		emptyWritten := false
+		defer func() {
+			if emptyInputs == nil {
+				return
+			}
+			if emptyWritten {
+				emptyInputs.settle()
+			} else {
+				emptyInputs.orphan()
+			}
+		}()
 		var separation contextSeparation
 		if adopted || len(plan.indexed) > 0 {
 			var err error
 			if separation, err = b.runPass(ctx, req, plan, handle, &report); err != nil {
+				return err
+			}
+		} else if b.contractCoreRuntime != nil && !req.contractFullCensus {
+			var err error
+			emptyInputs, err = b.prepareEmptyContractCoreInputs(ctx, handle, req, plan)
+			if err != nil {
 				return err
 			}
 		}
@@ -814,6 +832,10 @@ func (b *SparseGenerationBuilder) buildReservedGenerationWithCallbacks(ctx conte
 		if err := b.writeMasks(req, plan, handle, &report); err != nil {
 			return err
 		}
+		if emptyInputs != nil {
+			emptyInputs.written()
+			emptyWritten = true
+		}
 		if err := b.declareProducers(req, handle, &report); err != nil {
 			return err
 		}
@@ -837,6 +859,11 @@ func (b *SparseGenerationBuilder) buildReservedGenerationWithCallbacks(ctx conte
 		reachBuildCommitPoint(ctx)
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if emptyInputs != nil {
+			if err := emptyInputs.accept(nil); err != nil {
+				return err
+			}
 		}
 		if err := window.close(); err != nil {
 			return err
