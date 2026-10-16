@@ -2683,9 +2683,10 @@ func (s *Server) facadeCapability(spec facadeOperationSpec, includeSchema bool) 
 				}
 			}
 			required := legacy.tool.InputSchema.Required
+			sessionSubscription := spec.Facade == "session" && (spec.Operation == "subscribe" || spec.Operation == "unsubscribe")
 			if spec.Facade == "analyze" || (spec.Facade == "workspace_admin" && spec.Legacy == "analyze") {
 				inputSchema, properties, required = analyzeFacadeCapabilitySchema(spec, properties, required)
-			} else if spec.Facade == "session" && (spec.Operation == "subscribe" || spec.Operation == "unsubscribe") {
+			} else if sessionSubscription {
 				inputSchema = map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -2698,7 +2699,7 @@ func (s *Server) facadeCapability(spec facadeOperationSpec, includeSchema bool) 
 				required = []string{"channel"}
 			}
 			requestShape := facadeRequestShape(spec, properties, required)
-			if spec.Facade != "analyze" && spec.Facade != "session" && (spec.Facade != "workspace_admin" || spec.Legacy != "analyze") {
+			if spec.Facade != "analyze" && !sessionSubscription && (spec.Facade != "workspace_admin" || spec.Legacy != "analyze") {
 				inputSchema = facadePublicCapabilitySchema(spec, properties, required, requestShape)
 			}
 			schema, ok := inputSchema.(map[string]any)
