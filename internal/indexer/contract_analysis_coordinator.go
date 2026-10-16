@@ -37,6 +37,9 @@ type ContractAnalysisCoordinatorOptions struct {
 	// Inputs, when set, captures a primary actor's inputs again after a
 	// cohort Published: the cohort's current input vector composed for repo.
 	Inputs func(ctx context.Context, repos []string, repo string) (*graphview.SelectedContractInputs, error)
+	// LinkedInputs reacquires current selected sources after a linked segment
+	// consumed its handoff. Nil preserves non-resumable linked execution.
+	LinkedInputs ContractLinkedInputCapture
 	// ReconcileBaseline admits an independently owned baseline job. It must not
 	// retain the caller's RepoView or report success for unavailable capture.
 	ReconcileBaseline  func(context.Context, *graphview.RepoView, string, string) (bool, error)

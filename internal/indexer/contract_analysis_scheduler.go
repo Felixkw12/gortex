@@ -847,6 +847,11 @@ func (c *ContractAnalysisCoordinator) markActorLocked(a *contractActor, now time
 	}
 	switch {
 	case a.state == contractActorDeferred, a.state == contractActorBackoff, a.state == contractActorIdle && a.retryOnInputs:
+		if !a.primary() && c.options.LinkedInputs != nil {
+			a.retryOnInputs = false
+			c.enqueueLocked(a, contractJobTriggerPublished, now)
+			return
+		}
 		a.retryOnInputs = false
 		a.resolveLocked(a.want.seq, ContractActorInputsStale)
 		c.setStateLocked(a, contractActorIdle)
@@ -1001,35 +1006,38 @@ func (c *ContractAnalysisCoordinator) startActor(a *contractActor, want contract
 			c.endJob(a, want, viewmetrics.ContractJobPanic, elapsed)
 		}
 	}()
-	switch {
-	case !a.primary() && want.source == nil:
-		// A requeued handoff actor has no source left to capture.
-		c.endCapture(a, want, ContractActorInputsStale)
-		return
-	case want.inputs == nil:
-		c.park(a, want, c.admitBaselines(want, []string{want.repo}))
-		return
-	case !want.inputs.State.Accepted:
-		if err := want.inputs.Validate(c.ctx); err != nil {
-			c.endInputs(a, want, err)
+	reacquire := !a.primary() && want.source == nil && c.options.LinkedInputs != nil
+	if !reacquire {
+		switch {
+		case !a.primary() && want.source == nil:
+			// A requeued handoff actor has no source left to capture.
+			c.endCapture(a, want, ContractActorInputsStale)
 			return
-		}
-		baseline := c.admitPendingBaselines(want)
-		if !baseline {
-			// A repair may have accepted the inputs between the validation
-			// and the admission without announcing it: capture them again
-			// rather than wait on a producer that is gone.
+		case want.inputs == nil:
+			c.park(a, want, c.admitBaselines(want, []string{want.repo}))
+			return
+		case !want.inputs.State.Accepted:
 			if err := want.inputs.Validate(c.ctx); err != nil {
 				c.endInputs(a, want, err)
 				return
 			}
+			baseline := c.admitPendingBaselines(want)
+			if !baseline {
+				// A repair may have accepted the inputs between the validation
+				// and the admission without announcing it: capture them again
+				// rather than wait on a producer that is gone.
+				if err := want.inputs.Validate(c.ctx); err != nil {
+					c.endInputs(a, want, err)
+					return
+				}
+			}
+			c.park(a, want, baseline)
+			return
 		}
-		c.park(a, want, baseline)
-		return
-	}
-	if c.attached(want) {
-		c.endNoop(a, want)
-		return
+		if c.attached(want) {
+			c.endNoop(a, want)
+			return
+		}
 	}
 	if err := c.slots.acquire(c.ctx); err != nil {
 		c.endCapture(a, want, ContractActorPending)
@@ -1120,6 +1128,10 @@ func (c *ContractAnalysisCoordinator) captureRefusal(err error) ContractActorRes
 func (c *ContractAnalysisCoordinator) park(a *contractActor, want contractActorWant, baseline bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if a.running.seq == want.seq {
+		a.running.contractActorKeySeq = contractActorKeySeq{}
+		a.running.cancel = nil
+	}
 	if c.supersededLocked(a, want) {
 		return
 	}
@@ -1150,6 +1162,10 @@ func (c *ContractAnalysisCoordinator) supersededLocked(a *contractActor, want co
 func (c *ContractAnalysisCoordinator) endNoop(a *contractActor, want contractActorWant) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if a.running.seq == want.seq {
+		a.running.contractActorKeySeq = contractActorKeySeq{}
+		a.running.cancel = nil
+	}
 	a.lastPublished = contractActorKeySeq{want.key, want.seq}
 	a.resolveLocked(want.seq, ContractActorNoop)
 	if c.supersededLocked(a, want) {
@@ -1165,6 +1181,10 @@ func (c *ContractAnalysisCoordinator) endNoop(a *contractActor, want contractAct
 func (c *ContractAnalysisCoordinator) endCapture(a *contractActor, want contractActorWant, result ContractActorResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if a.running.seq == want.seq {
+		a.running.contractActorKeySeq = contractActorKeySeq{}
+		a.running.cancel = nil
+	}
 	if c.supersededLocked(a, want) {
 		return
 	}
@@ -1200,6 +1220,10 @@ func (c *ContractAnalysisCoordinator) endInputs(a *contractActor, want contractA
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if a.running.seq == want.seq {
+		a.running.contractActorKeySeq = contractActorKeySeq{}
+		a.running.cancel = nil
+	}
 	if c.supersededLocked(a, want) {
 		return
 	}
@@ -1210,6 +1234,10 @@ func (c *ContractAnalysisCoordinator) endInputs(a *contractActor, want contractA
 		}
 		a.dirty, a.dirtyEpoch = true, c.published
 		a.ring.signal()
+		return
+	}
+	if !a.primary() && c.options.LinkedInputs != nil {
+		c.enqueueLocked(a, contractJobTriggerPublished, c.now())
 		return
 	}
 	a.resolveLocked(want.seq, ContractActorInputsStale)
@@ -1224,6 +1252,7 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	defer c.slots.release()
 	started := time.Now()
 	source := want.source
+	defer func() { source.Release() }()
 	var release func()
 	defer func() {
 		recovered := recover()
@@ -1244,6 +1273,77 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	a.running.cancel = cancel
 	c.mu.Unlock()
 	captureStart := time.Now()
+	if !a.primary() && source == nil {
+		c.mu.Lock()
+		captureEpoch := c.published
+		c.mu.Unlock()
+		inputs, fresh, err := c.options.LinkedInputs(ctx, a.id, want.repo)
+		source = fresh
+		if err == nil {
+			err = ctx.Err()
+		}
+		if err == nil && (source == nil || !contractLinkedInputsMatch(a.id, want.repo, inputs)) {
+			err = graph.ErrContractInputVector
+		}
+		if err != nil {
+			source.Release()
+			result := c.captureRefusal(err)
+			if graphview.CodeOf(err) == graphview.CodeViewBuilding || graphview.CodeOf(err) == graphview.CodeRequiredCapabilityIncomplete || graphview.CodeOf(err) == graphview.CodeCapabilityUnavailable {
+				result = ContractActorInputsStale
+			}
+			if ctx.Err() != nil {
+				result = ContractActorPending
+			}
+			c.endCapture(a, want, result)
+			return
+		}
+		c.mu.Lock()
+		if c.closed || a.want.seq > want.seq {
+			c.mu.Unlock()
+			source.Release()
+			c.endCapture(a, want, ContractActorPending)
+			return
+		}
+		key := contractInputsKey(inputs)
+		if key != want.key {
+			a.seq++
+			want.key, want.seq = key, a.seq
+			a.requeues, a.backoff, a.retryOnInputs = 0, 0, false
+		}
+		want.inputs, want.epoch = inputs, captureEpoch
+		want.source = nil
+		a.want = want
+		a.running.contractActorKeySeq = contractActorKeySeq{want.key, want.seq}
+		a.notifyLocked()
+		c.mu.Unlock()
+		if !inputs.State.Accepted {
+			// Capture owns accepted inputs only. A valid in-flight capture is
+			// pending authority, not a failed analysis job or a reusable handle.
+			if err := inputs.Validate(ctx); err != nil {
+				source.Release()
+				c.endInputs(a, want, err)
+				return
+			}
+			baseline := c.admitPendingBaselines(want)
+			if !baseline {
+				if err := inputs.Validate(ctx); err != nil {
+					source.Release()
+					c.endInputs(a, want, err)
+					return
+				}
+			}
+			source.Release()
+			c.park(a, want, baseline)
+			return
+		}
+		freshWant := want
+		freshWant.source = source
+		if c.attached(freshWant) {
+			source.Release()
+			c.endNoop(a, want)
+			return
+		}
+	}
 	snapshot, targets, err := c.options.Capture(ctx, source, want.inputs, want.repo, want.checkout)
 	captureDuration := time.Since(captureStart)
 	inner := snapshot.Release
@@ -1295,6 +1395,7 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	}
 	if err != nil {
 		release()
+		source.Release()
 		if ctx.Err() != nil {
 			c.endCapture(a, want, ContractActorPending)
 			return
@@ -1304,6 +1405,7 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	}
 	if len(targets) == 0 {
 		release()
+		source.Release()
 		c.endNoop(a, want)
 		return
 	}
@@ -1335,11 +1437,12 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 		c.deltaCaches.put(a.id, cached)
 		c.mu.Unlock()
 		release()
+		source.Release()
 		c.endCapture(a, want, ContractActorPending)
 		return
 	}
 	job.delta = session
-	if a.primary() && canContinueFill {
+	if (a.primary() || c.options.LinkedInputs != nil) && canContinueFill {
 		job.otherActorWaiting = func() bool { return c.otherActorWaiting(a) }
 	}
 	// Registered after capture succeeds and before the body starts. Returning
@@ -1392,6 +1495,7 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	outcome := run(job)
 	returnCache(session.cache)
 	release()
+	source.Release()
 	c.endJob(a, want, outcome, time.Since(body), job.publication)
 }
 

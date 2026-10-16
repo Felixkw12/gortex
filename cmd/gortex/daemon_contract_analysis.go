@@ -64,7 +64,7 @@ func installDaemonContractAnalysisWith(state *daemonState, logger *zap.Logger, a
 	// exists; a report before then is dropped.
 	var repair atomic.Pointer[indexer.ContractStuckRepair]
 	captureOptions.SuspectStuck = func(repo string, paths []string) { repair.Load().Suspect(repo, paths) }
-	options := indexer.ContractAnalysisCoordinatorOptions{RequireRepoConfigs: true, Store: store, Leases: materializer.Leases, Registry: state.indexer.Registry(), Config: cfg, Logger: logger, Capture: indexer.NewContractFollowupSourceCapture(captureOptions), Inputs: indexer.NewContractPrimaryInputCapture(materializer), ReconcileBaseline: indexer.NewContractBaselineReconciler(captureOptions), Yield: contractAnalysisYield(state.mcpServer.ContractAnalysisShouldYield)}
+	options := indexer.ContractAnalysisCoordinatorOptions{RequireRepoConfigs: true, Store: store, Leases: materializer.Leases, Registry: state.indexer.Registry(), Config: cfg, Logger: logger, Capture: indexer.NewContractFollowupSourceCapture(captureOptions), Inputs: indexer.NewContractPrimaryInputCapture(materializer), LinkedInputs: indexer.NewContractLinkedInputCapture(materializer), ReconcileBaseline: indexer.NewContractBaselineReconciler(captureOptions), Yield: contractAnalysisYield(state.mcpServer.ContractAnalysisShouldYield)}
 	if adjust != nil {
 		adjust(&options)
 	}
