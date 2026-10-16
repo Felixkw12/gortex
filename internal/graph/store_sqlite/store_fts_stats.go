@@ -548,11 +548,27 @@ func (s *Store) generationPrefixCountTx(ctx context.Context, tx *sql.Tx, generat
 			return n, nil
 		}
 	}
+	// Bounds come from the exact ownership set in this read transaction, not
+	// a cached generation span. Sparse/interleaved generations still need the
+	// membership join; the bounds only keep MATCH out of unrelated rowid runs.
+	var lo, hi int64
+	err := tx.QueryRowContext(ctx, `SELECT fts_rowid FROM symbol_fts_rowid INDEXED BY symbol_fts_rowid_by_generation
+ WHERE view_gen = ? ORDER BY fts_rowid ASC LIMIT 1`, generation).Scan(&lo)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT fts_rowid FROM symbol_fts_rowid INDEXED BY symbol_fts_rowid_by_generation
+ WHERE view_gen = ? ORDER BY fts_rowid DESC LIMIT 1`, generation).Scan(&hi); err != nil {
+		return 0, err
+	}
 	var n int64
 	noteSymbolFTSPrefixWalk()
-	err := tx.QueryRowContext(ctx, `SELECT count(*) FROM symbol_fts
+	err = tx.QueryRowContext(ctx, `SELECT count(*) FROM symbol_fts
   CROSS JOIN symbol_fts_rowid m ON m.fts_rowid = symbol_fts.rowid AND m.view_gen = ?
- WHERE symbol_fts MATCH ?`, generation, term).Scan(&n)
+ WHERE symbol_fts MATCH ? AND symbol_fts.rowid BETWEEN ? AND ?`, generation, term, lo, hi).Scan(&n)
 	return n, err
 }
 
