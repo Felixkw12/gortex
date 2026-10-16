@@ -157,6 +157,9 @@ func TestWALReclaimShrinksABigLogInBoundedSlices(t *testing.T) {
 // A small log keeps the plain TRUNCATE reset: nothing is left to shrink.
 func TestWALReclaimTruncatesASmallLogAtOnce(t *testing.T) {
 	t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "0")
+	// This direct reset fixture owns the checkpoint attempt; a pressure-triggered
+	// background PASSIVE must not acquire its slot while the log is seeded.
+	t.Setenv("GORTEX_SQLITE_WAL_AUTOCHECKPOINT_PAGES", "0")
 	s, path := openWALReclaimStore(t)
 	defer func() { _ = s.Close() }()
 	seedWALChurnTable(t, s)
