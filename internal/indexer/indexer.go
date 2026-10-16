@@ -7711,10 +7711,13 @@ func isRouteContractType(t contracts.ContractType) bool {
 //     they were internal resolution hints.
 func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 	type pending struct {
-		contractID string
-		trail      string
-		fallback   string
-		repoHint   string
+		contractID         string
+		registrationFile   string
+		registrationSymbol string
+		registrationLine   int
+		trail              string
+		fallback           string
+		repoHint           string
 		// srcDir is the directory of the contract's registration site
 		// (the file with the HandleFunc call). Used by lookupHandler
 		// as a tie-breaker when two same-repo functions share a name
@@ -7744,11 +7747,14 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 		// would hand back "pkg\sub" on Windows for a directory the
 		// candidate filter then compares against slash spellings.
 		todo = append(todo, pending{
-			contractID: c.ID,
-			trail:      trail,
-			fallback:   fallback,
-			repoHint:   c.RepoPrefix,
-			srcDir:     path.Dir(c.FilePath),
+			contractID:         c.ID,
+			registrationFile:   c.FilePath,
+			registrationSymbol: c.SymbolID,
+			registrationLine:   c.Line,
+			trail:              trail,
+			fallback:           fallback,
+			repoHint:           c.RepoPrefix,
+			srcDir:             path.Dir(c.FilePath),
 		})
 	}
 	// Always strip the internal handler hints from Meta at the end of
@@ -7882,7 +7888,8 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 			continue
 		}
 		for i, c := range matches {
-			if c.Role != contracts.RoleProvider {
+			if c.Role != contracts.RoleProvider || c.RepoPrefix != p.repoHint ||
+				c.FilePath != p.registrationFile || c.SymbolID != p.registrationSymbol || c.Line != p.registrationLine {
 				continue
 			}
 			// Operate on a copy; Registry entries are values.
