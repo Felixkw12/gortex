@@ -192,3 +192,42 @@ func TestContractBoundaryReceiptBodylessSignature(t *testing.T) {
 	consumer := contractBoundaryReceipt{LookupKeys: []string{contractBoundaryLookupKey("fixture", "symbol_name", "external")}}
 	require.True(t, contractBoundaryAffectedByProducedKeys(consumer, diffContractBoundaryReceipts(&before, &after).ChangedProducedKeys))
 }
+
+// The synthetic hook is attributed to its real implementation, including the
+// complete source span. It must participate in accepted boundary provenance.
+func TestContractBoundaryReceiptDrupalSyntheticHookSpan(t *testing.T) {
+	const source = `<?php
+function mymodule_help($route_name, $route_match) {
+    return "Module help";
+}
+`
+	idx := newTestIndexer(graph.New())
+	idx.graph = nil
+	idx.SetRepoPrefix("fixture")
+	t.Cleanup(idx.Close)
+	parsed, err := languages.NewPHPExtractor().Extract("fixture/mymodule.module", []byte(source))
+	require.NoError(t, err)
+	defer parsed.ReleaseTree()
+	var hook *graph.Node
+	for _, node := range parsed.Nodes {
+		if node != nil && node.ID == "drupal::hook::hook_help" {
+			hook = node
+			break
+		}
+	}
+	require.NotNil(t, hook)
+	require.Equal(t, graph.KindInterface, hook.Kind)
+	require.Equal(t, 2, hook.StartLine)
+	require.Equal(t, 4, hook.EndLine)
+	require.Equal(t, true, hook.Meta["drupal_hook_def"])
+	receipt, err := idx.collectContractBoundaryReceipt(context.Background(), "fixture/mymodule.module", "php", []byte(source), parsed)
+	require.NoError(t, err)
+	key := contractBoundaryLookupKey("fixture", "type_name", "hook_help")
+	require.NotEmpty(t, receipt.ProducedInputs[key], "synthetic hook retains accepted type-name provenance")
+	stored, err := contractCoreStoredReceipt("fixture", "", contractCoreInputChange{
+		FilePath: "fixture/mymodule.module", Current: &receipt, SourceFingerprint: receipt.Source,
+	})
+	require.NoError(t, err)
+	require.False(t, stored.Scope.Unknown)
+	require.Contains(t, stored.ProducedKeys, key)
+}
