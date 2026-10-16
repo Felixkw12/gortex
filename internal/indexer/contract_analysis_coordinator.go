@@ -291,7 +291,7 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 			startMode = viewmetrics.ContractModeDelta
 			if p.identity != job.delta.identity || p.deltas+1 >= contractDeltaRefresh {
 				startMode = viewmetrics.ContractModeCold
-			} else if !p.complete {
+			} else if !p.complete && !p.hasBaseline {
 				startMode = viewmetrics.ContractModeFill
 			}
 		}

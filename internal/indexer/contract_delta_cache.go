@@ -59,8 +59,10 @@ type contractDeltaCache struct {
 	receipts                 map[string]contractDeltaReceipt
 	ownerReaders, keyReaders map[string][]string
 	// deltas counts completed delta jobs since the last cold/fill baseline.
-	deltas           int
-	complete         bool
+	deltas   int
+	complete bool
+	// hasBaseline records a previously completed baseline, not current proof.
+	hasBaseline      bool
 	retainedBytes    int64
 	proofStringBytes int64
 	proofStringCount int
@@ -93,6 +95,7 @@ func checkpointContractDelta(c *contractConvergence, identity contractDeltaIdent
 			}
 		}
 	}
+	p.hasBaseline = p.complete
 	return p
 }
 
@@ -337,7 +340,7 @@ func (p *contractDeltaCache) plan(identity contractDeltaIdentity, census map[str
 			extract[path] = true
 		}
 	} else {
-		if !p.complete {
+		if !p.complete && !p.hasBaseline {
 			result.mode, result.reason = "fill", "coverage_incomplete"
 		}
 		moved, keys := make(map[string]bool), make(map[string]bool)

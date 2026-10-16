@@ -18,6 +18,7 @@ import (
 // remains charged. Fresh evidence, postpasses and seeds belong only to the job.
 type contractDeltaSession struct {
 	continued                                                    bool
+	adopted                                                      bool
 	cache                                                        *contractDeltaCache
 	identity                                                     contractDeltaIdentity
 	knownRaw                                                     map[*contractUnit]int64
@@ -102,6 +103,7 @@ func (s *contractDeltaSession) adopt(c *contractConvergence) {
 	c.units, c.live, c.excluded, c.suspect = p.units, p.live, p.excluded, p.suspect
 	c.retryOwners, c.declarers = p.retryOwners, p.declarers
 	c.clock, c.contentAt, c.maxContent, c.contents = p.clock, p.contentAt, p.maxContent, p.contents
+	s.adopted = true
 	for _, unit := range p.units {
 		if unit.retainedRawBytes > 0 {
 			s.knownRaw[unit] = unit.retainedRawBytes
@@ -154,11 +156,16 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 	}
 	pool := &contractProofStrings{}
 	p := &contractDeltaCache{identity: pool.identity(s.identity), units: cloneContractUnitsMode(c.units, false, pool), live: cloneContractDeltaMap(c.live, pool), excluded: cloneContractDeltaMap(c.excluded, pool), suspect: cloneContractDeltaMap(c.suspect, pool), retryOwners: cloneContractIndex(c.retryOwners, pool), declarers: c.declarers.clone(pool), clock: cloneContractClock(c.clock, pool), contentAt: cloneContractDeltaMap(c.contentAt, pool), maxContent: c.maxContent, contents: cloneContractDeltaMap(c.contents, pool), receipts: cloneContractDeltaReceipts(receipts, pool), complete: complete}
-	if s.cache != nil && c.report.Mode == viewmetrics.ContractModeDelta {
-		p.deltas = s.cache.deltas + 1
-	}
-	if !complete && s.cache != nil && (!s.continued || c.report.Mode != viewmetrics.ContractModeCold) {
+	// An interrupted warm delta retains its baseline lineage and completed-job
+	// count without certifying this checkpoint. A cold rebuild starts a new
+	// lineage, even when it is itself interrupted before publication.
+	warm := s.adopted && s.cache != nil && (s.cache.hasBaseline || s.cache.complete) && c.report.Mode != viewmetrics.ContractModeCold
+	p.hasBaseline = complete || warm
+	if warm {
 		p.deltas = s.cache.deltas
+		if complete && c.report.Mode == viewmetrics.ContractModeDelta {
+			p.deltas++
+		}
 	}
 	p.indexReaders()
 	if s.continued && c.ctx.Err() == nil {
