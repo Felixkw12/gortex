@@ -99,6 +99,7 @@ func daemonContractPublicationAndRepair(t *testing.T, observeRepair func(time.Du
 		})
 	}
 	t.Cleanup(closeState)
+	defer closeState() // Join both owners before the work context's deferred cancellation, including on Fatal.
 	_, err = state.lifecycle.Register(ctx, config.RepoEntry{Name: "tracked", Path: root}, indexer.TrackSourceCLI)
 	require.NoError(t, err)
 	store := state.graph.(*store_sqlite.Store)
@@ -140,19 +141,29 @@ func daemonContractPublicationAndRepair(t *testing.T, observeRepair func(time.Du
 	require.NotNil(t, helper)
 	staged := *helper
 	staged.Accepted, staged.Previous = false, nil
+	repaired := counter("views_contract_repair_total{kind=stuck_receipt}")
+	repairLogs := len(logs.FilterMessage("contract stuck repair").FilterField(zap.String("kind", "stuck_receipt")).All())
 	require.NoError(t, store.SetContractBoundaryReceiptsContext(ctx, []graph.ContractBoundaryReceipt{staged}))
 	var stuckAt time.Time
 	if observeRepair != nil {
 		stuckAt = time.Now()
 	}
-	repaired := counter("views_contract_repair_total{kind=stuck_receipt}")
 	require.NoError(t, os.WriteFile(mainPath, routes("/repaired"), 0o600))
 	_, err = state.multiIndexer.IncrementalReindexRepo("tracked", []string{mainPath})
 	require.NoError(t, err)
 	strictUntil("/repaired", time.Minute)
+	// A current route can publish before the independent repair detects the
+	// helper's open window. Its completion log follows the forced reindex;
+	// the counter alone is only evidence that the repair started.
+	require.Eventually(t, func() bool {
+		return len(logs.FilterMessage("contract stuck repair").FilterField(zap.String("kind", "stuck_receipt")).All()) > repairLogs
+	}, time.Minute, 10*time.Millisecond, "the background worker completed the staged receipt repair")
 	require.Equal(t, repaired+1, counter("views_contract_repair_total{kind=stuck_receipt}"))
-	lines := logs.FilterMessage("contract stuck repair").FilterField(zap.String("kind", "stuck_receipt")).All()
+	lines := logs.FilterMessage("contract stuck repair").FilterField(zap.String("kind", "stuck_receipt")).All()[repairLogs:]
 	require.NotEmpty(t, lines)
+	require.Equal(t, "tracked", lines[0].ContextMap()["repo"])
+	require.Equal(t, "repaired", lines[0].ContextMap()["outcome"])
+	require.Contains(t, lines[0].ContextMap()["paths"], "tracked/helper.go")
 	if observeRepair != nil {
 		observeRepair(lines[0].Time.Sub(stuckAt))
 	}
