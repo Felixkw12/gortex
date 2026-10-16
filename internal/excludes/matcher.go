@@ -233,15 +233,24 @@ func (m *Matcher) HasNegatedDescendant(relDir string) bool {
 			continue
 		}
 		np := strings.TrimSpace(p[1:])
+		rooted := strings.HasPrefix(np, "/")
 		np = strings.TrimPrefix(np, "/")
 		np = strings.TrimSuffix(np, "/")
 		if np == "" {
 			continue
 		}
-		// A negation with no internal slash is unanchored: gitignore
-		// matches it at any depth, so it can re-include something under
-		// any directory. Keep descending.
 		if !strings.Contains(np, "/") {
+			// A leading slash anchors the negation at the root, so it can
+			// only re-include a root entry and what lies under it.
+			if rooted && !strings.ContainsAny(np, "*?[") {
+				if relDir == "" || relDir == np || strings.HasPrefix(relDir, np+"/") {
+					return true
+				}
+				continue
+			}
+			// A negation with no internal slash is unanchored: gitignore
+			// matches it at any depth, so it can re-include something under
+			// any directory. Keep descending.
 			return true
 		}
 		anchor := literalAnchor(np)
