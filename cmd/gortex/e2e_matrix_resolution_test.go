@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zzet/gortex/internal/graph"
 )
 
 // E2E matrix 3: resolution, provenance and manifests.
@@ -133,11 +136,12 @@ const (
 	// manifest does not stop its siblings being indexed" has no sibling.
 	e2eResolutionBrokenSiblingID = issue767FixturePrefix + "/broken/broken.go::GxResolutionBrokenSiblingValue"
 
-	// The dynamic pair: one entry point reached only through
-	// importlib.import_module (unprovable) and one static sibling that resolves
-	// the same target through an ordinary import (provable).
+	// The dynamic pair: one runtime handle from importlib.import_module and
+	// one statically named sibling import. The static target is a positive
+	// identity control; its provenance may itself remain heuristic.
 	e2eResolutionDynDynamicID = issue767FixturePrefix + "/dyn/app.py::run"
 	e2eResolutionDynStaticID  = issue767FixturePrefix + "/dyn/app.py::call_helper"
+	e2eResolutionDynHelperID  = issue767FixturePrefix + "/dyn/helper.py::helper_value"
 
 	// The mixed-language triple. app.ts imports helper.js by name; the decoy
 	// exports the SAME name from a TypeScript file nothing imports. The case
@@ -444,8 +448,8 @@ func e2eResolutionCases() []e2eResolutionCase {
 			What:      "a language file with no manifest of its own kind is still extracted",
 			Falsifier: "no node at all from nometa/nometa.rb, the shape a metadata-gated extractor would produce"},
 		{ID: "dynamic_language_conservative", Gate: "G3", Hazard: "H8 dynamic placement", Needs: []string{"dyn/app.py", "dyn/helper.py"},
-			What:      "a bind reached only through importlib.import_module is distinguishable from the static sibling's bind to the same target — the same standard this matrix applies to origin=text_matched everywhere else",
-			Falsifier: "a bind out of run() onto a concrete repository symbol carrying the same kind, the same target and the same provenance as call_helper()'s proof of that target (observed on the candidate: this case FAILS), or the static sibling producing no bind at all, which would leave nothing to compare a guess against"},
+			What:      "the static sibling reaches its exact imported helper target; any concrete dynamic guess is explicitly heuristic on the public surface and cannot pass an AST-grade filter",
+			Falsifier: "the exact static helper target missing; a dynamic concrete bind with absent, unknown or stronger-than-text provenance; a surfaced guess advertised as non-heuristic or extracted; or the dynamic call surviving min_tier=ast_resolved"},
 		{ID: "mixed_language_imports", Gate: "G1", Hazard: "H8 mixed-language imports", Needs: []string{"mixed/app.ts", "mixed/helper.js", "mixeddecoy/helper.ts"},
 			What:      "the TypeScript entry point binds across the language boundary to the JavaScript file it names, and not to the same-named symbol of the other language in a directory it does not import",
 			Falsifier: "the named bind issue767/mixed/app.ts::mixedEntry -calls-> issue767/mixed/helper.js::mixedHelperValue missing from the served generation; or any edge out of issue767/mixed/ landing on issue767/mixeddecoy/helper.ts::mixedHelperValue (a by-name bind that crossed into the wrong language's file); or that decoy symbol missing from the graph, which would make the not-bound half vacuous"},
@@ -1738,24 +1742,62 @@ func e2eResolutionStageCold(t *testing.T, rec *e2eResolutionRecorder, f *issue76
 	rec.assert("missing_metadata", len(rubyNodes) > 0,
 		"a file whose language has no manifest anywhere in the tree still produced: %v", rubyNodes)
 
-	// The dynamic case, held to the SAME standard the rest of this matrix
-	// applies to origin=text_matched. The previous shape exempted any target
-	// inside /dyn/ from being "unknowable", which let the one bind the case
-	// exists to judge — importlib.import_module(name) reaching a concrete
-	// sibling symbol — through unexamined.
-	//
-	// The corpus carries both halves on purpose: run() reaches
-	// helper_value through a runtime handle (unprovable), call_helper()
-	// reaches the SAME symbol through an ordinary `from . import helper`
-	// (provable). A graph that cannot tell those two apart — identical kind
-	// and identical provenance to the same target — does not degrade a guess
-	// truthfully, and that is the assertion.
+	// Both the static and runtime-handle calls may be name-only guesses.
+	// Text-matched evidence is not a proof, even when the static sibling has
+	// the same weak provenance. Judge dynamic authority independently, then
+	// verify the public labels and strict-tier filter rather than raw DB tier.
 	dynamicBinds := e2eResolutionDynamicEdgeRows(t, db, e2eResolutionDynDynamicID)
 	staticBinds := e2eResolutionDynamicEdgeRows(t, db, e2eResolutionDynStaticID)
-	guesses, indistinguishable := e2eResolutionDynamicGuessVerdict(dynamicBinds, staticBinds)
-	rec.assert("dynamic_language_conservative", len(staticBinds) > 0 && len(indistinguishable) == 0,
-		"edges out of the dynamic entry point (%s): %v; edges out of the static sibling (%s), the control: %v; binds the dynamic import cannot name: %v; of those, indistinguishable from the static sibling's proof of the same target: %v",
-		e2eResolutionDynDynamicID, dynamicBinds, e2eResolutionDynStaticID, staticBinds, guesses, indistinguishable)
+	guesses, dishonest := e2eResolutionDynamicGuessVerdict(dynamicBinds, staticBinds)
+	staticExact := false
+	textGuess := false
+	for _, row := range staticBinds {
+		kind, target, _ := e2eResolutionDynamicEdgeParts(row)
+		staticExact = staticExact || kind == "calls" && target == e2eResolutionDynHelperID
+	}
+	for _, row := range guesses {
+		_, _, provenance := e2eResolutionDynamicEdgeParts(row)
+		textGuess = textGuess || strings.HasPrefix(provenance, "origin=text_matched tier=")
+	}
+	defaultEdges := e2eResolutionPublicCallers(t, f, "")
+	weakEdges := e2eResolutionPublicCallers(t, f, graph.OriginTextMatched)
+	strictEdges := e2eResolutionPublicCallers(t, f, graph.OriginASTResolved)
+	var publicProblems []string
+	weakSeen := false
+	staticPublicExact := false
+	for _, sample := range []struct {
+		name  string
+		edges []*graph.Edge
+	}{{"default", defaultEdges}, {"explicit text", weakEdges}} {
+		for _, edge := range sample.edges {
+			if sample.name == "explicit text" && edge.From == e2eResolutionDynStaticID && edge.To == e2eResolutionDynHelperID && edge.Kind == graph.EdgeCalls {
+				staticPublicExact = true
+			}
+			if edge.From != e2eResolutionDynDynamicID || edge.To != e2eResolutionDynHelperID || edge.Kind != graph.EdgeCalls {
+				continue
+			}
+			if !e2eResolutionExplicitWeakEdge(edge) {
+				publicProblems = append(publicProblems, fmt.Sprintf("%s dynamic edge claims origin=%q tier=%q confidence=%q", sample.name, edge.Origin, edge.Tier, edge.ConfidenceLabel))
+			}
+			if sample.name == "explicit text" {
+				weakSeen = true
+			}
+		}
+	}
+	for _, edge := range strictEdges {
+		if edge.From == e2eResolutionDynDynamicID && edge.To == e2eResolutionDynHelperID && edge.Kind == graph.EdgeCalls {
+			publicProblems = append(publicProblems, "dynamic guess survived min_tier=ast_resolved")
+		}
+	}
+	if !staticPublicExact {
+		publicProblems = append(publicProblems, "exact static helper target absent from public control")
+	}
+	if textGuess && !weakSeen {
+		publicProblems = append(publicProblems, "stored text guess absent from explicit text-tier public control")
+	}
+	rec.assert("dynamic_language_conservative", staticExact && len(dishonest) == 0 && len(publicProblems) == 0,
+		"static exact helper target present=%t; dynamic rows %v; static rows %v; concrete guesses %v; dishonest authority %v; public default/text/strict edge counts=%d/%d/%d; problems %v",
+		staticExact, dynamicBinds, staticBinds, guesses, dishonest, len(defaultEdges), len(weakEdges), len(strictEdges), publicProblems)
 
 	// The mixed-language case, judged on the TARGET of each edge.
 	//
@@ -2004,38 +2046,67 @@ func e2eResolutionDynamicEdgeParts(row string) (kind, target, provenance string)
 	return kind, target, provenance
 }
 
-// e2eResolutionDynamicGuessVerdict applies the matrix's uniform standard for a
-// dynamically reached bind.
-//
-// A guess is a bind out of the dynamic entry point that lands on a concrete
-// repository symbol: the runtime handle names nothing at index time, so the
-// binder cannot have proved it. Unresolved, external and stdlib terminals are
-// NOT guesses — they are the honest shapes a conservative binder is supposed to
-// emit, and this file treats them that way everywhere.
-//
-// A guess is allowed to exist; what it may not do is look exactly like a proof.
-// The static sibling resolves the same target through an ordinary import, so a
-// guess carrying the same edge kind, the same target and the same provenance as
-// that proof leaves the graph unable to tell them apart — which is the failure.
-func e2eResolutionDynamicGuessVerdict(dynamic, static []string) (guesses, indistinguishable []string) {
-	proofs := map[string]bool{}
-	for _, row := range static {
-		kind, target, provenance := e2eResolutionDynamicEdgeParts(row)
-		proofs[kind+"\x00"+target+"\x00"+provenance] = true
-	}
+// Concrete runtime-handle targets must explicitly remain heuristic; a static
+// sibling's tier cannot turn matching weak evidence into proof, or excuse a
+// falsely strong dynamic row. Speculative rows remain hidden by public defaults.
+func e2eResolutionDynamicGuessVerdict(dynamic, _ []string) (guesses, dishonest []string) {
 	for _, row := range dynamic {
-		kind, target, provenance := e2eResolutionDynamicEdgeParts(row)
+		_, target, provenance := e2eResolutionDynamicEdgeParts(row)
 		if strings.Contains(target, "unresolved::") || strings.Contains(target, "external::") || strings.Contains(target, "stdlib") {
 			continue
 		}
 		guesses = append(guesses, row)
-		if proofs[kind+"\x00"+target+"\x00"+provenance] {
-			indistinguishable = append(indistinguishable, row)
+		switch provenance {
+		case "origin=text_matched tier=", "origin=text_matched tier=heuristic", "origin=speculative tier=", "origin=speculative tier=heuristic":
+		default:
+			dishonest = append(dishonest, row)
 		}
 	}
 	sort.Strings(guesses)
-	sort.Strings(indistinguishable)
-	return guesses, indistinguishable
+	sort.Strings(dishonest)
+	return guesses, dishonest
+}
+
+func e2eResolutionExplicitWeakEdge(edge *graph.Edge) bool {
+	return edge != nil && edge.Origin == graph.OriginTextMatched && edge.Tier == "heuristic" &&
+		(edge.ConfidenceLabel == "INFERRED" || edge.ConfidenceLabel == "AMBIGUOUS")
+}
+
+// Use the existing native CLI/daemon path, with declared facade selectors.
+// extractToolResult already returns the SubGraph JSON body; requiring edges
+// prevents a transport/error wrapper from masquerading as an empty result.
+func e2eResolutionPublicCallers(t *testing.T, f *issue767Fixture, minTier string) []*graph.Edge {
+	t.Helper()
+	options := map[string]any{"depth": 1, "limit": 100}
+	if minTier != "" {
+		options["min_tier"] = minTier
+	}
+	request, err := json.Marshal(map[string]any{"operation": "callers", "target": map[string]any{"symbol": e2eResolutionDynHelperID}, "options": options})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := f.tryCommand(10*time.Second, f.primary, "call", "relations", "--index", f.primary, "--json", string(request), "--format", "json")
+	if err != nil {
+		t.Fatalf("public callers min_tier=%q: %v: %s", minTier, err, output)
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(output, &body); err != nil {
+		t.Fatalf("public callers decode min_tier=%q: %v: %s", minTier, err, output)
+	}
+	raw, found := body["edges"]
+	if !found {
+		t.Fatalf("public callers missing edges min_tier=%q: %s", minTier, output)
+	}
+	var edges []*graph.Edge
+	if err := json.Unmarshal(raw, &edges); err != nil {
+		t.Fatalf("public caller edges min_tier=%q: %v: %s", minTier, err, output)
+	}
+	for _, edge := range edges {
+		if edge == nil {
+			t.Fatalf("public callers returned a null edge min_tier=%q: %s", minTier, output)
+		}
+	}
+	return edges
 }
 
 // e2eResolutionIsResolvedReference reports whether a rendered edge row is one of the
@@ -3156,49 +3227,33 @@ func TestE2EMatrixResolutionStripLocationRemovesOnlyTheLocation(t *testing.T) {
 func TestE2EMatrixResolutionDynamicGuessVerdictHoldsGuessAndProofToOneStandard(t *testing.T) {
 	const dynamicTo = "issue767/dyn/app.py::run -calls-> issue767/dyn/helper.py::helper_value"
 	const staticTo = "issue767/dyn/app.py::call_helper -calls-> issue767/dyn/helper.py::helper_value"
-
-	// A bind inside /dyn/ is a guess, not an exemption: this is the case the
-	// whole arm exists for, and the old shape waved it through.
-	guesses, _ := e2eResolutionDynamicGuessVerdict([]string{dynamicTo + " origin=text_matched tier="}, nil)
-	if len(guesses) != 1 {
-		t.Fatalf("a bind reached through importlib to a concrete sibling symbol was not counted as a guess: %v", guesses)
-	}
-
-	// Same provenance as the static sibling's proof of the same target: the
-	// graph cannot tell the guess from the proof.
-	_, indistinguishable := e2eResolutionDynamicGuessVerdict(
-		[]string{dynamicTo + " origin=text_matched tier="},
-		[]string{staticTo + " origin=text_matched tier="})
-	if len(indistinguishable) != 1 {
-		t.Fatalf("a guess wearing exactly the static sibling's provenance was not reported: %v", indistinguishable)
-	}
-
-	// Different provenance: the branch does distinguish them, which is what
-	// the case asks for.
-	_, indistinguishable = e2eResolutionDynamicGuessVerdict(
-		[]string{dynamicTo + " origin=text_matched tier="},
-		[]string{staticTo + " origin=ast_resolved tier=certain"})
-	if len(indistinguishable) != 0 {
-		t.Fatalf("a guess labelled differently from the proof was reported as indistinguishable: %v", indistinguishable)
-	}
-
-	// Honest terminals are not guesses in any of the matrix's arms.
-	for _, terminal := range []string{
-		"issue767/dyn/app.py::run -calls-> unresolved::helper_value origin= tier=",
-		"issue767/dyn/app.py::run -calls-> external::helper_value origin= tier=",
-		"issue767/dyn/app.py::run -calls-> issue767::stdlib::importlib::import_module origin= tier=",
-	} {
-		if guesses, _ := e2eResolutionDynamicGuessVerdict([]string{terminal}, nil); len(guesses) != 0 {
-			t.Errorf("%q was counted as a guess; an honest terminal is the shape a conservative binder is meant to emit", terminal)
+	for _, static := range []string{"origin=text_matched tier=", "origin=ast_resolved tier=ast"} {
+		for _, allowed := range []string{"origin=text_matched tier=", "origin=text_matched tier=heuristic", "origin=speculative tier=heuristic"} {
+			guesses, dishonest := e2eResolutionDynamicGuessVerdict([]string{dynamicTo + " " + allowed}, []string{staticTo + " " + static})
+			if len(guesses) != 1 || len(dishonest) != 0 {
+				t.Errorf("explicit weak evidence is not proof even beside %q: guesses=%v dishonest=%v", static, guesses, dishonest)
+			}
+		}
+		for _, rejected := range []string{"origin= tier=", "origin=unknown tier=heuristic", "origin=ast_resolved tier=ast", "origin=lsp_resolved tier=lsp", "origin=text_matched tier=certain", "origin=text_matched tier=ast"} {
+			_, dishonest := e2eResolutionDynamicGuessVerdict([]string{dynamicTo + " " + rejected}, []string{staticTo + " " + static})
+			if len(dishonest) != 1 {
+				t.Errorf("false dynamic authority %q was accepted beside %q: %v", rejected, static, dishonest)
+			}
 		}
 	}
-
-	// A different target is not the same bind, whatever its provenance.
-	_, indistinguishable = e2eResolutionDynamicGuessVerdict(
-		[]string{dynamicTo + " origin=text_matched tier="},
-		[]string{"issue767/dyn/app.py::call_helper -calls-> issue767/dyn/other.py::other origin=text_matched tier="})
-	if len(indistinguishable) != 0 {
-		t.Errorf("a proof of a DIFFERENT target was matched to the guess: %v", indistinguishable)
+	for _, terminal := range []string{"unresolved::helper_value", "external::helper_value", "issue767::stdlib::importlib::import_module"} {
+		if guesses, _ := e2eResolutionDynamicGuessVerdict([]string{"a -calls-> " + terminal + " origin= tier="}, nil); len(guesses) != 0 {
+			t.Errorf("honest terminal counted as a concrete guess: %v", guesses)
+		}
+	}
+	weak := &graph.Edge{Origin: graph.OriginTextMatched, Tier: "heuristic", ConfidenceLabel: "INFERRED"}
+	if !e2eResolutionExplicitWeakEdge(weak) {
+		t.Fatal("explicit public weak labels rejected")
+	}
+	for _, edge := range []*graph.Edge{nil, {Origin: graph.OriginTextMatched, Tier: "ast", ConfidenceLabel: "INFERRED"}, {Origin: graph.OriginASTResolved, Tier: "ast", ConfidenceLabel: "EXTRACTED"}, {Tier: "heuristic", ConfidenceLabel: "INFERRED"}, {Origin: graph.OriginTextMatched, Tier: "heuristic", ConfidenceLabel: "EXTRACTED"}} {
+		if e2eResolutionExplicitWeakEdge(edge) {
+			t.Errorf("public false strong/unknown authority accepted: %+v", edge)
+		}
 	}
 }
 
