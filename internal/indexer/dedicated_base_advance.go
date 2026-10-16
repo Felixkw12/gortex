@@ -227,7 +227,7 @@ func (p *dedicatedBasePublisher) buildObservedClaim(ctx context.Context, observa
 		// than the resolver will bind over. See ancestryRefFacts for the
 		// evidence; this is the third call site of the same composition, beside
 		// the coordinator's two (ancestryLayerBase).
-		request.Base = commitLayerBase{Reader: view.Reader, facts: newAncestryRefFacts(p.runtime.store, view)}
+		request.Base = commitLayerBase{Reader: view.Reader, cloneSources: view.GenerationSources(), facts: newAncestryRefFacts(p.runtime.store, view)}
 	}
 	return observation.Builder.BuildClaimedDedicatedDelta(ctx, request)
 }

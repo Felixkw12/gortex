@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,6 +65,8 @@ func advanceGit(t *testing.T, root string, args ...string) string {
 // trigger comes from the committed-base publisher. This is the test that the
 // two ends actually meet in a real daemon.
 func TestDaemonLiveHeadChangeAdvancesTheCommittedBase(t *testing.T) {
+	// Exercise the default runtime installed by runDaemon before warmup.
+	t.Setenv("GORTEX_ASYNC_CONTRACTS", "")
 	base := startupPublicationEnv(t)
 	root := startupPublicationRepo(t, base, "live")
 	// A committed base is published only where something can read one, so the
@@ -78,6 +82,17 @@ func TestDaemonLiveHeadChangeAdvancesTheCommittedBase(t *testing.T) {
 	t.Cleanup(func() {
 		if state.shared != nil {
 			_ = state.shared.Close()
+		}
+	})
+	contractRuntime, installErr := installDaemonContractAnalysis(state, zap.NewNop())
+	if installErr != nil || contractRuntime == nil {
+		t.Fatalf("install default contract runtime before warmup: runtime=%v err=%v", contractRuntime != nil, installErr)
+	}
+	t.Cleanup(func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer closeCancel()
+		if closeErr := contractRuntime.Close(closeCtx); closeErr != nil {
+			t.Errorf("close default contract runtime: %v", closeErr)
 		}
 	})
 	if state.basePublisher == nil {
@@ -123,6 +138,11 @@ func TestDaemonLiveHeadChangeAdvancesTheCommittedBase(t *testing.T) {
 		t.Fatalf("warmup published no committed base to advance: %+v", graph)
 	}
 
+	initialInputs, inputErr := store.AtGeneration(initial).ContractInputStatesForRepoContext(ctx, registered.Prefix)
+	if inputErr != nil || len(initialInputs) != 1 || !initialInputs[0].Accepted {
+		t.Fatalf("published predecessor has no single accepted contract input identity: inputs=%+v err=%v", initialInputs, inputErr)
+	}
+
 	// A real commit on the watched branch.
 	if err := os.WriteFile(filepath.Join(root, "live.go"), []byte("package a\n\nfunc Live() {}\n"), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
@@ -165,6 +185,18 @@ func TestDaemonLiveHeadChangeAdvancesTheCommittedBase(t *testing.T) {
 	}
 	if row.DependencyRevision == "" || row.ConfigHash == "" || row.ResolverVersion == "" || row.ExtractorVersions == "" {
 		t.Fatalf("the advanced base carries an incomplete frozen identity: %+v", row)
+	}
+
+	advancedInputs, inputErr := store.AtGeneration(advanced.ActiveGenerationID).ContractInputStatesForRepoContext(ctx, registered.Prefix)
+	if inputErr != nil || len(advancedInputs) != 1 || !advancedInputs[0].Accepted || advancedInputs[0].CheckoutID != advanced.OwnerCheckoutID {
+		t.Fatalf("advanced generation lost its selected contract input identity: inputs=%+v owner=%s err=%v", advancedInputs, advanced.OwnerCheckoutID, inputErr)
+	}
+	// Source eligibility must follow this exact committed addition; an ordinary
+	// helper need not change the contract input fingerprint.
+	liveReceipt, known, receiptErr := store.AtGeneration(advanced.ActiveGenerationID).ContractBoundaryReceiptContext(ctx, registered.Prefix, advanced.OwnerCheckoutID, registered.Prefix+"/live.go")
+	wantSource := fmt.Sprintf("%x", sha256.Sum256([]byte("package a\n\nfunc Live() {}\n")))
+	if receiptErr != nil || !known || liveReceipt == nil || !liveReceipt.Accepted || liveReceipt.Deleted || liveReceipt.SourceFingerprint != wantSource {
+		t.Fatalf("advanced generation has no accepted receipt for the committed bytes: receipt=%+v known=%v want_source=%s err=%v", liveReceipt, known, wantSource, receiptErr)
 	}
 
 	// The replaced base is retained, not retired: an old coherent route stays
