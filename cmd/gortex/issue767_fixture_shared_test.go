@@ -57,6 +57,9 @@ type issue767Fixture struct {
 	log        *os.File
 	run        int
 	lastOutput string
+	// Counts started children until their actual cmd.Wait returns, including
+	// an earlier stop that exhausted its join deadline. Protected by mu.
+	unjoinedChildren int
 	// clientCalls counts every invocation of the measured binary this fixture
 	// made — the harness's own traffic against the daemon. An "idle" window is
 	// only idle if this number does not move inside it, and a floor attributed
@@ -288,7 +291,13 @@ func (f *issue767Fixture) start() {
 	// The child handle becomes visible to other goroutines only here, as one
 	// guarded publication of an already-started process.
 	f.setChild(cmd, done, cancel, log)
-	go func() { done <- cmd.Wait() }()
+	go func() {
+		err := cmd.Wait()
+		f.mu.Lock()
+		f.unjoinedChildren--
+		f.mu.Unlock()
+		done <- err
+	}()
 	f.await("isolated daemon socket", time.Minute, func() bool {
 		select {
 		case err := <-done:
@@ -334,6 +343,16 @@ func (f *issue767Fixture) stop() {
 	}
 }
 
+// stopAndJoin retains stop's errors and deadlines. A detached child handle is
+// not proof of exit: artifact restoration requires every started child to have
+// returned from Wait, including a child whose earlier stop timed out.
+func (f *issue767Fixture) stopAndJoin() bool {
+	f.stop()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.unjoinedChildren == 0
+}
+
 // setChild publishes a started child; takeChild removes it and hands the
 // caller everything needed to shut it down. Both are guarded because a
 // sampler goroutine reads the same fields between them.
@@ -341,6 +360,7 @@ func (f *issue767Fixture) setChild(cmd *exec.Cmd, done chan error, cancel contex
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cmd, f.done, f.cancel, f.log = cmd, done, cancel, log
+	f.unjoinedChildren++
 }
 
 func (f *issue767Fixture) takeChild() (*exec.Cmd, chan error, context.CancelFunc, *os.File) {

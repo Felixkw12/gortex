@@ -1332,11 +1332,59 @@ func e2eResolutionSetup(t *testing.T, binary string, primary []e2eResolutionSour
 	f.git(other, "add", ".")
 	f.git(other, "commit", "-m", "resolution matrix cross-repository producer control")
 	f.write(e2eResolutionConfigPath(f), e2eResolutionConfigYAML(f))
+	var unreadable []struct {
+		path string
+		info fs.FileInfo
+	}
+	// Keep the denial in force for every oracle. Only after the owned daemon
+	// joins may preserved fixture files become readable to artifact upload.
+	// Register before the first denial so a later setup failure restores too.
+	t.Cleanup(func() {
+		if len(unreadable) == 0 {
+			return
+		}
+		if !f.stopAndJoin() {
+			t.Error("post-proof artifact mode restore refused: an owned daemon has not joined")
+			return
+		}
+		for _, file := range unreadable {
+			info, err := os.Lstat(file.path)
+			resolved, resolveErr := filepath.EvalSymlinks(file.path)
+			if err != nil || resolveErr != nil || resolved != file.path || !info.Mode().IsRegular() || !os.SameFile(file.info, info) {
+				t.Errorf("post-proof artifact mode restore refused changed fixture path %s: stat=%v resolve=%v", file.path, err, resolveErr)
+				continue
+			}
+			if err := os.Chmod(file.path, file.info.Mode().Perm()); err != nil {
+				t.Errorf("post-proof artifact mode restore %s: %v", file.path, err)
+				continue
+			}
+			restored, err := os.Lstat(file.path)
+			if err != nil || !os.SameFile(file.info, restored) || restored.Mode().Perm() != file.info.Mode().Perm() {
+				t.Errorf("post-proof artifact mode restore verification failed: %s: %v", file.path, err)
+				continue
+			}
+			t.Logf("post-proof artifact mode restored: path=%s requested_deny_mode=000 observed_pre_restore=%#o original_mode=%#o restored_mode=%#o after_owned_join=true", file.path, info.Mode().Perm(), file.info.Mode().Perm(), restored.Mode().Perm())
+		}
+	})
 	for _, file := range primary {
 		if !file.Unreadable {
 			continue
 		}
-		if err := os.Chmod(filepath.Join(f.primary, filepath.FromSlash(file.Path)), 0); err != nil {
+		filename := filepath.Join(f.primary, filepath.FromSlash(file.Path))
+		relative, err := filepath.Rel(f.primary, filename)
+		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+			t.Fatalf("unreadable fixture path escapes primary: %s", filename)
+		}
+		info, err := os.Lstat(filename)
+		resolved, resolveErr := filepath.EvalSymlinks(filename)
+		if err != nil || resolveErr != nil || resolved != filename || !info.Mode().IsRegular() {
+			t.Fatalf("unreadable fixture path must be an owned regular file without symlinks: %s: stat=%v resolve=%v", filename, err, resolveErr)
+		}
+		unreadable = append(unreadable, struct {
+			path string
+			info fs.FileInfo
+		}{filename, info})
+		if err := os.Chmod(filename, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
