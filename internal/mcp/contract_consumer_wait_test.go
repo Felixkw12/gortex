@@ -411,6 +411,8 @@ func TestContractConsumerNonemptySelectedHandlersUseOneCoherentCohort(t *testing
 		t.Run(test.name+"/"+fmt.Sprint(test.args), func(t *testing.T) {
 			ctx := t.Context()
 			if test.args["output"] != nil {
+				// Facade rows negotiate their surface even when the server is pinned to full.
+				f.srv.NoteSessionToolPolicy("contract-current-facade", FacadeSurfaceVersion, "hide")
 				f.srv.NoteSessionClient("contract-current-facade", "codex", "1")
 				ctx = WithSessionID(ctx, "contract-current-facade")
 			}
