@@ -458,9 +458,9 @@ func e2eResolutionCases() []e2eResolutionCase {
 		{ID: "restub_identity_and_provenance_preserved", Gate: "G3", Needs: []string{"producer/producer.go", "consumer/consumer.go"},
 			What:      "an idempotent re-parse keeps the incoming edge's identity AND loses no provenance-bearing row around the re-parsed file — the provenance half is checked on rows that actually carry provenance, not on the calls edge whose columns are empty",
 			Falsifier: "a provenance-bearing row dropped by the comment-only re-parse measured alone, or the incoming edge changing across it (observed on the candidate: two value_flow rows go, and this case FAILS)"},
-		{ID: "declared_gaps_are_caused_by_the_reparse_alone", Gate: "G3", Needs: []string{"producer/producer.go", "consumer/consumer.go"},
-			What:      "every declared known gap blames the comment-only re-parse, and the re-parse alone — measured before the withdraw/restore sequence — really is what drops its rows",
-			Falsifier: "a declared gap whose row the isolated re-parse measurement did not drop in the projection and direction the gap names"},
+		{ID: "comment_only_reparse_preserves_semantic_projections", Gate: "G3", Needs: []string{"producer/producer.go", "consumer/consumer.go"},
+			What:      "the isolated comment-only re-parse preserves all three observed semantic projections before the withdraw/restore sequence; only the producer declaration's known source-line movement is allowed",
+			Falsifier: "a missing or newly invented semantic row, a projection empty on either side, or a location change other than the producer declaration moving from its original line to the commented revision's line"},
 		{ID: "unresolved_facts_degrade_truthfully", Gate: "G1", Needs: []string{"producer/producer.go"},
 			What:      "a deleted definition leaves no edge claiming a resolved tier and no false rebind",
 			Falsifier: "a surviving call edge whose unresolved terminal still advertises a tier, or one rebound onto the same-named symbol in decoy/, vendor/ or the second repository (observed on the candidate: the decoy rebind, this case FAILS)"},
@@ -1087,53 +1087,21 @@ type e2eResolutionKnownGap struct {
 	Ledger    string
 }
 
-// The gaps observed on this branch at the source identity recorded in the
-// report for this item. All three are the same defect seen through three
-// projections: a comment-only re-parse of a producer file drops the resolved
-// edges that the UNCHANGED consumer file owns, and nothing re-derives them —
-// the served view_gen 0 keeps the `calls` edge (the restub path restores it)
-// but loses the resolved `imports` edge and the `value_flow` edge, both of
-// which a fresh isolated index of the same tree has.
-//
-// The "caused by the re-parse" half of each Why is NOT taken on trust. The
-// oracle at stage 8 runs after a whole mutation sequence and cannot separate
-// one edit from another, so e2eResolutionStageReparse snapshots these projections
-// either side of the comment-only edit alone and e2eResolutionUnattributedGaps fails
-// the run for any gap whose rows that isolated measurement did not drop.
+// No known-gap allowance currently applies to the isolated comment-only
+// re-parse: its three semantic projections are preserved. Later withdrawal
+// and restoration divergences must still fail the strict fresh-index oracle.
 func e2eResolutionKnownGaps() []e2eResolutionKnownGap {
-	return []e2eResolutionKnownGap{
-		{
-			ID: "imports_edge_dropped_on_producer_reparse", Output: "incoming_edges_from_context_files",
-			Direction: "missing", Match: " -imports-> ",
-			Why:    "a comment-only re-parse of the imported file, measured in isolation before any other mutation, drops the importer's resolved imports edge from the served generation and nothing re-derives it",
-			Ledger: e2eResolutionLedgerRow,
-		},
-		{
-			ID: "value_flow_edge_dropped_on_producer_reparse", Output: "capability_dataflow_framework_edges",
-			Direction: "missing", Match: " -value_flow-> ",
-			Why:    "the dataflow edge produced after resolution is not re-derived when only the producer's file is re-parsed; the re-parse stage measures that loss on its own, before the withdraw",
-			Ledger: e2eResolutionLedgerRow,
-		},
-		{
-			// The same lost edge, seen through the provenance projection: a
-			// value_flow edge carries origin=ast_resolved, so its loss is a
-			// provenance row's loss as well. One defect, two lenses — declared
-			// twice so neither lens silently absorbs the other's rows.
-			ID: "value_flow_provenance_dropped_on_producer_reparse", Output: "restub_provenance",
-			Direction: "missing", Match: " -value_flow-> ",
-			Why:    "the same dropped dataflow edge is also the provenance row it carried, and it goes at the same isolated re-parse",
-			Ledger: e2eResolutionLedgerRow,
-		},
-	}
+	return nil
 }
 
-// e2eResolutionGapProjections is the set of projections the declared gaps name, in
-// e2eResolutionOutputs order. It is what the re-parse stage snapshots, so the causal
-// claim is measured on exactly the observables the gaps are declared against.
+// e2eResolutionGapProjections retains the same three re-parse observations
+// independently of the oracle allowance list, so removing an obsolete gap
+// cannot make comment-only preservation vacuous.
 func e2eResolutionGapProjections() []e2eResolutionOutput {
-	wanted := map[string]bool{}
-	for _, gap := range e2eResolutionKnownGaps() {
-		wanted[gap.Output] = true
+	wanted := map[string]bool{
+		"incoming_edges_from_context_files":   true,
+		"capability_dataflow_framework_edges": true,
+		"restub_provenance":                   true,
 	}
 	var outputs []e2eResolutionOutput
 	for _, output := range e2eResolutionOutputs() {
@@ -1865,11 +1833,10 @@ func e2eResolutionStageManifestOnly(t *testing.T, rec *e2eResolutionRecorder, f 
 // Stage 3 — the idempotent re-parse. Returns the provenance row the restore
 // stage has to reproduce exactly.
 //
-// This stage is where the comment-only re-parse is ISOLATED. The oracle at
-// stage 8 runs after the withdraw/restore sequence, which demonstrably destroys
-// edges of its own, so an oracle divergence on its own cannot say which
-// mutation caused it. Every declared gap blames the re-parse; this stage is
-// where that claim is measured, before anything else has happened.
+// This stage isolates comment-only preservation before the withdraw/restore
+// sequence. The later fresh-index oracle cannot attribute a divergence to one
+// particular mutation; this stage directly checks the same three projections
+// even when no historical gap allowance is active.
 func e2eResolutionStageReparse(t *testing.T, rec *e2eResolutionRecorder, f *issue767Fixture, db *sql.DB) string {
 	t.Helper()
 	gapOutputs := e2eResolutionGapProjections()
@@ -1905,12 +1872,27 @@ func e2eResolutionStageReparse(t *testing.T, rec *e2eResolutionRecorder, f *issu
 		"incoming edge before the comment-only re-parse %q; after %q (the declaration moved to line %d, so the re-parse did happen); provenance-bearing rows the re-parse ALONE dropped: %v; rows it gained: %v; rows that merely MOVED with the declaration and are not a loss: %v",
 		before, after, e2eResolutionProduceLine(e2eResolutionProducerCommented), lostProvenance, delta.Gained["restub_provenance"], delta.Moved["restub_provenance"])
 
-	// And the causal claim every declared gap makes, measured rather than
-	// asserted in prose: the re-parse alone has to be what drops the rows.
-	unattributed := e2eResolutionUnattributedGaps(delta, e2eResolutionKnownGaps())
-	rec.assert("declared_gaps_are_caused_by_the_reparse_alone", len(unattributed) == 0,
-		"the comment-only re-parse alone, measured before any withdraw or restore, dropped %v, gained %v and moved %v; declared gaps whose stated cause this measurement does NOT support: %v",
-		delta.Lost, delta.Gained, delta.Moved, unattributed)
+	// No historical gap may excuse semantic damage by this isolated edit.
+	// Keep every projection nonempty, and permit only the exact line movement
+	// this fixture introduced, not arbitrary path or provenance changes.
+	var emptyProjections, unexpectedMoves []string
+	oldLocation := fmt.Sprintf(" @%s/producer/producer.go:%d", issue767FixturePrefix, e2eResolutionProduceLine(e2eResolutionProducerCold))
+	newLocation := fmt.Sprintf(" @%s/producer/producer.go:%d", issue767FixturePrefix, e2eResolutionProduceLine(e2eResolutionProducerCommented))
+	for _, output := range gapOutputs {
+		if len(beforeRows[output.ID]) == 0 || len(afterRows[output.ID]) == 0 {
+			emptyProjections = append(emptyProjections, output.ID)
+		}
+		for _, row := range delta.Moved[output.ID] {
+			expected := strings.Replace(row, oldLocation, newLocation, 1)
+			if e2eResolutionLocationPattern.FindString(row) != oldLocation || len(e2eResolutionSetDifference([]string{expected}, afterRows[output.ID])) != 0 {
+				unexpectedMoves = append(unexpectedMoves, output.ID+": "+row)
+			}
+		}
+	}
+	rec.assert("comment_only_reparse_preserves_semantic_projections",
+		len(delta.Lost) == 0 && len(delta.Gained) == 0 && len(emptyProjections) == 0 && len(unexpectedMoves) == 0,
+		"the comment-only re-parse alone, measured before any withdraw or restore, dropped %v, gained %v and moved %v; empty projections %v; unexpected location changes %v",
+		delta.Lost, delta.Gained, delta.Moved, emptyProjections, unexpectedMoves)
 	return after
 }
 
@@ -2233,9 +2215,9 @@ func TestE2EMatrixResolutionEveryCaseHasItsCorpus(t *testing.T) {
 			}
 		}
 	}
-	// Every declared gap's causal claim has a case that measures it.
-	if !seen["declared_gaps_are_caused_by_the_reparse_alone"] {
-		t.Error("no case measures the cause the declared gaps attribute their rows to; a causal claim with no measurement is prose")
+	// The isolated re-parse keeps its own positive preservation case.
+	if !seen["comment_only_reparse_preserves_semantic_projections"] {
+		t.Error("no case measures the isolated comment-only re-parse's semantic preservation")
 	}
 	// And the H8 hazards each have a case.
 	hazards := map[string]bool{}
@@ -2908,12 +2890,26 @@ func TestE2EMatrixResolutionNormalizeRowHidesOnlyTheObjectNames(t *testing.T) {
 	}
 }
 
+// Synthetic allowances exercise the classifier without allowing those losses
+// in the native matrix's current fresh-index comparison.
+func e2eResolutionSyntheticClassifierGaps() []e2eResolutionKnownGap {
+	return []e2eResolutionKnownGap{
+		{ID: "test_imports", Output: "incoming_edges_from_context_files", Direction: "missing", Match: " -imports-> "},
+		{ID: "test_value_flow", Output: "capability_dataflow_framework_edges", Direction: "missing", Match: " -value_flow-> "},
+		{ID: "test_provenance", Output: "restub_provenance", Direction: "missing", Match: " -value_flow-> "},
+	}
+}
+
 func TestE2EMatrixResolutionClassifyFailsOnAnUndeclaredDivergenceAndOnAStaleGap(t *testing.T) {
-	gaps := e2eResolutionKnownGaps()
+	gaps := e2eResolutionSyntheticClassifierGaps()
 	divergences := []e2eResolutionDivergence{
 		{Output: "incoming_edges_from_context_files", Missing: []string{"a -imports-> b @f:3"}},
 		{Output: "capability_dataflow_framework_edges", Missing: []string{"a -value_flow-> b @f:5 origin=ast_resolved"}},
 		{Output: "restub_provenance", Missing: []string{"a -value_flow-> b @f:5 origin=ast_resolved tier= conf=0.0 label="}},
+	}
+	strict := e2eResolutionClassify(divergences, e2eResolutionKnownGaps())
+	if len(strict.Unmatched) != len(divergences) {
+		t.Fatalf("the native matrix must not excuse obsolete historical losses: %v", strict)
 	}
 	classified := e2eResolutionClassify(divergences, gaps)
 	if len(classified.Unmatched) != 0 {
@@ -3012,13 +3008,18 @@ func TestE2EMatrixResolutionGapProjectionsCoverEveryDeclaredGapsObservable(t *te
 			t.Errorf("gap %s is declared against %s, which the re-parse snapshot does not read — its cause could never be measured", gap.ID, gap.Output)
 		}
 	}
-	if len(covered) == 0 {
-		t.Fatal("the re-parse snapshot reads nothing")
+	for _, id := range []string{"incoming_edges_from_context_files", "capability_dataflow_framework_edges", "restub_provenance"} {
+		if !covered[id] {
+			t.Errorf("removing an obsolete allowance must not remove the re-parse observation %s", id)
+		}
+	}
+	if len(covered) != 3 {
+		t.Fatalf("the re-parse snapshot must retain its three independent projections, got %d", len(covered))
 	}
 }
 
 func TestE2EMatrixResolutionUnattributedGapsNeedsTheReparseToHaveDroppedTheRows(t *testing.T) {
-	gaps := e2eResolutionKnownGaps()
+	gaps := e2eResolutionSyntheticClassifierGaps()
 	full := e2eResolutionReparseDelta{Lost: map[string][]string{}, Gained: map[string][]string{}}
 	for _, gap := range gaps {
 		row := "issue767/a.go::A" + gap.Match + "issue767/b.go::B"
