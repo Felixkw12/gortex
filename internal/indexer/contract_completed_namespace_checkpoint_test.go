@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -82,10 +83,94 @@ func TestContractCompletedNamespaceCheckpointKeepsHistoricalWorkDelta(t *testing
 		report := run()
 		require.Equal(t, viewmetrics.ContractModeDelta, report.Mode)
 		require.Equal(t, 1, report.Files)
+		require.Zero(t, report.Revalidated, "unchanged guarded readers must not replay the whole namespace")
 		require.Equal(t, []string{"fixture/routes.go"}, report.ChangedFiles)
 		require.Equal(t, i+1, cache.deltas)
 		current := w.view(t)
 		require.Equal(t, contractMeta(coldContracts(t, files)), contractMeta(w.contracts(t, current)))
 		current.Close()
+	}
+}
+
+func completedNamespaceProofFixture(t *testing.T) (*contractConvergence, *contractDeltaCache, []graph.ContractWork) {
+	t.Helper()
+	c, p, work := continuationProofFixture(t)
+	work = append(work, graph.ContractWork{Token: "complete-census", OriginGeneration: 7, RepoPrefix: "repo", FilePath: "repo/", InputVersion: "v", InputFingerprint: "f", State: graph.ContractWorkPending, Scope: graph.ContractWorkScope{Unknown: true, Causes: []string{"full_core_census_complete"}}})
+	c.coverage = newContractWorkCoverage(work)
+	c.coverage.anchored = true
+	c.coverage.observe(c)
+	for _, unit := range c.units {
+		c.coverage.extracted(unit, "repo/producer.go", "repo/reader.go")
+		c.noteFillRead(unit)
+	}
+	p.continuation = checkpointContractFill(c, p, &contractProofStrings{})
+	require.NotNil(t, p.continuation)
+	p.continuation.namespaceBaseline = true
+	p.hasBaseline = true
+	c.coverage = newContractWorkCoverage(work)
+	c.coverage.anchored = true
+	return c, p, work
+}
+
+func TestContractCompletedNamespaceProofReusesOnlyCurrentGuards(t *testing.T) {
+	for _, name := range []string{"unrelated_work", "changed_work_row", "new_namespace", "new_unknown_dependency", "changed_census", "writing_guard", "changed_source", "selection"} {
+		t.Run(name, func(t *testing.T) {
+			c, p, work := completedNamespaceProofFixture(t)
+			switch name {
+			case "unrelated_work":
+				work = append(work, graph.ContractWork{Token: "unrelated", RepoPrefix: "repo", FilePath: "repo/unrelated.go", State: graph.ContractWorkPending})
+			case "changed_work_row":
+				work[0].Token += "-new"
+			case "new_namespace":
+				work[1].Token += "-new"
+			case "new_unknown_dependency":
+				work = append(work, graph.ContractWork{Token: "new-unknown", RepoPrefix: "repo", FilePath: "repo/unrelated.go", State: graph.ContractWorkPending, Scope: graph.ContractWorkScope{Causes: []string{"dependency_membership_unknown"}}})
+			case "changed_census":
+				c.clock.lastCensus["repo/new.go"] = true
+			case "writing_guard":
+				stamp := c.clock.last["repo/producer.go"]
+				stamp.Writing = true
+				c.clock.last["repo/producer.go"] = stamp
+			case "changed_source":
+				stamp := c.clock.last["repo/producer.go"]
+				stamp.SourceFingerprint = "new-source"
+				c.clock.last["repo/producer.go"] = stamp
+			case "selection":
+				c.req.delta.identity.selection = "other"
+			}
+			c.coverage = newContractWorkCoverage(work)
+			c.coverage.anchored = true
+			p.continuation.resume(c, p)
+			require.Equal(t, name == "unrelated_work", c.coverage.readSatisfied(c.units["repo/reader.go"]), "only identical barrier plus individually current row/census/source/read guards can reuse")
+		})
+	}
+}
+
+func TestContractCompletedNamespaceProofSurvivesWarmInterruption(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprint("cancelled=", cancelled), func(t *testing.T) {
+			c, p, work := completedNamespaceProofFixture(t)
+			p.continuation.resume(c, p)
+			c.report = &ContractFollowupReport{Mode: viewmetrics.ContractModeDelta}
+			c.logger = zap.NewNop()
+			c.snap.Work = work
+			session := &contractDeltaSession{cache: p, identity: p.identity, adopted: true}
+			c.req.delta = session
+			if cancelled {
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				c.ctx = ctx
+			}
+			session.finish(c, false)
+			require.NotNil(t, session.cache)
+			require.False(t, session.cache.complete, "an interrupted delta is not complete")
+			require.True(t, session.cache.hasBaseline)
+			if cancelled {
+				require.Nil(t, session.cache.continuation, "cancelled context cannot mint fresh continuation provenance")
+			} else {
+				require.NotNil(t, session.cache.continuation)
+				require.True(t, session.cache.continuation.completedBarrierCurrent(session.identity, work))
+			}
+		})
 	}
 }

@@ -177,8 +177,11 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 	// broad capture, so identical historical barriers need not force another
 	// cold extraction. New barriers and every changed own/read guard still
 	// require the ordinary current-job proof.
-	if (s.continued || complete && c.coverage.broad) && c.ctx.Err() == nil {
+	if (s.continued || (complete || warm) && c.coverage.broad) && c.ctx.Err() == nil {
 		p.continuation = checkpointContractFill(c, p, pool)
+		if p.continuation != nil {
+			p.continuation.namespaceBaseline = complete || warm && s.cache.continuation.completedBarrierCurrent(s.identity, c.coverage.work)
+		}
 	}
 	// Charge proof structures without traversing unchanged raw metadata again.
 	proofUnits := make(map[string]*contractUnit, len(p.units))

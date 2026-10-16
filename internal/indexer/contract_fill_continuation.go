@@ -17,7 +17,10 @@ import (
 // Unit pointers alias exactly the immutable units in the same checkpoint;
 // guard stamps come from that checkpoint's immutable change-clock map.
 type contractFillContinuation struct {
-	identity                     contractDeltaIdentity
+	identity contractDeltaIdentity
+	// namespaceBaseline certifies only these exact completed barrier rows.
+	// Current own/read stamps, row identities and guards remain mandatory.
+	namespaceBaseline            bool
 	barrierRows, allRows, census [sha256.Size]byte
 	paths                        []string
 	rows                         [][sha256.Size]byte
@@ -279,7 +282,7 @@ func (proof *contractFillContinuation) resume(c *contractConvergence, p *contrac
 		if entry.flags&contractFillOwn != 0 && ownCurrent && proof.row(unit.path) == rows.own(unit.path) {
 			w.own[unit.path] = unit
 		}
-		if entry.flags&contractFillRead == 0 || len(unit.torn) != 0 || c.suspect[unit.path] || (w.broad && proof.allRows != rows.all) {
+		if entry.flags&contractFillRead == 0 || len(unit.torn) != 0 || c.suspect[unit.path] || (w.broad && proof.allRows != rows.all && !proof.completedBarrierCurrent(c.req.delta.identity, w.work)) {
 			continue
 		}
 		if contractFillNamespaceRead(w, unit) && (entry.flags&contractFillNamespace == 0 || proof.census != census) {
@@ -336,4 +339,10 @@ func (proof *contractFillContinuation) metadataSize() int64 {
 
 func (proof *contractFillContinuation) resumesBarrier(identity contractDeltaIdentity, work []graph.ContractWork) bool {
 	return proof != nil && proof.identity == identity && proof.barrierRows == contractFillBarrierRows(work)
+}
+
+// Completed namespace debt remains in immutable ancestry. New local work may
+// reuse only individually current proofs; changed namespace/unknown debt cannot.
+func (proof *contractFillContinuation) completedBarrierCurrent(identity contractDeltaIdentity, work []graph.ContractWork) bool {
+	return proof != nil && proof.namespaceBaseline && proof.resumesBarrier(identity, work)
 }
