@@ -141,8 +141,8 @@ func TestAgedRetirementBetweenSavesKeepsTheBoundedBurst(t *testing.T) {
 	}
 }
 
-// A burst nobody waits on runs past its bounded budget, and still gives the
-// lane to an edit that queues within 100 ms.
+// A burst nobody waits on gives the lane to a queued edit at the next quantum
+// boundary once its bounded budget has elapsed.
 func TestExtendedRetirementBurstGivesTheLaneToAQueuedEdit(t *testing.T) {
 	extendedBurstYieldsTo(t, ViewBuildInteractive)
 }
@@ -171,32 +171,81 @@ func extendedBurstYieldsTo(t *testing.T, priority ViewBuildPriority) {
 			}
 		}
 	}()
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	quantumStarted, releaseQuantum := make(chan struct{}), make(chan struct{})
+	var release sync.Once
+	unpark := func() { release.Do(func() { close(releaseQuantum) }) }
 	var wg sync.WaitGroup
-	defer func() { cancel(); wg.Wait() }()
+	defer func() { cancel(); unpark(); wg.Wait() }()
+	// Exercise boundary ordering, not SQLite or host scheduling latency. The
+	// extended burst still has its normal idle budget; only the bounded-budget
+	// comparison is shortened through the existing fixture seam.
+	l.retirementBurst = time.Nanosecond
+	quantaSeen := 0
+	var committed store_sqlite.PayloadRetirementProgress
+	l.retireQuantum = func(ctx context.Context, id int64, inUse func(int64) bool) (store_sqlite.PayloadRetirementProgress, error) {
+		quantaSeen++
+		if quantaSeen != 1 {
+			return store_sqlite.PayloadRetirementProgress{}, fmt.Errorf("retirement began another quantum while a build was queued")
+		}
+		close(quantumStarted)
+		select {
+		case <-releaseQuantum:
+		case <-ctx.Done():
+			return store_sqlite.PayloadRetirementProgress{}, ctx.Err()
+		}
+		progress, err := l.store.RetirePayloadGenerationQuantum(ctx, id, inUse)
+		committed = progress
+		return progress, err
+	}
+	sweepDone := make(chan error, 1)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _, _ = l.SweepDeferredRetirements(ctx)
+		_, _, err := l.SweepDeferredRetirements(ctx)
+		sweepDone <- err
 	}()
 	bursting := func() bool {
 		st := gate.Stats()
 		return st.Active && st.Holder != nil && st.Holder.Kind == "payload_retirement"
 	}
-	require.Eventually(t, bursting, 30*time.Second, time.Millisecond)
-	burstSeen := time.Now()
-	time.Sleep(4 * deferredRetirementBurstDuration)
-	require.True(t, bursting(), "a burst nobody waits on ended at its bounded budget")
-	queued := time.Now()
-	permit, err := gate.Acquire(ctx, priority)
-	require.NoError(t, err)
-	waited := time.Since(queued)
-	permit()
-	t.Logf("%v build waited %s after a burst running %s", priority, waited, queued.Sub(burstSeen))
-	// The bound the bounded burst keeps for a queued edit.
-	require.LessOrEqual(t, waited, 100*time.Millisecond)
-	cancel()
+	select {
+	case <-quantumStarted:
+	case <-ctx.Done():
+		t.Fatal("retirement did not enter its first quantum")
+	}
+	require.True(t, bursting())
+	buildDone := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		permit, err := gate.Acquire(ctx, priority)
+		if err == nil {
+			permit()
+		}
+		buildDone <- err
+	}()
+	require.Eventually(t, func() bool {
+		stats := gate.Stats()
+		return stats.InteractiveQueued+stats.BackgroundQueued == 1
+	}, 30*time.Second, time.Millisecond)
+	unpark()
+	select {
+	case err := <-buildDone:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal("queued build did not acquire at the quantum boundary")
+	}
+	select {
+	case err := <-sweepDone:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal("retirement did not finish after yielding")
+	}
 	wg.Wait()
+	require.Equal(t, 1, quantaSeen, "retirement must not begin another quantum before yielding")
+	require.Positive(t, committed.ChunksCommitted, "the real in-flight quantum must commit before yielding")
+	require.Positive(t, committed.RowsDeleted)
 	requireCatalogGenerationPresentOrRetiring(t, l.store, ids[0])
 }
 
