@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -744,6 +745,149 @@ func (p *contractNameImportPage) add(node *graph.Node) bool {
 	return len(p.nodes) < contractFrontierReadBatchSize || p.flush()
 }
 
+// Probe only private scratch, in bounded groups. The selected visitor is
+// synchronous and cannot mutate scratch. Its losing rows must never be encoded:
+// a pre-existing/earlier ID may have unencodable or oversized selected metadata.
+type contractNameImportProbes struct {
+	page         *contractNameImportPage
+	probe        func([]string) (map[string]*graph.Node, error)
+	nodes        []*graph.Node
+	ids          map[string]bool
+	boundedBytes int
+}
+
+func (p *contractNameImportProbes) flush() bool {
+	if len(p.nodes) == 0 {
+		return p.page.evidence.err == nil
+	}
+	ids := make([]string, len(p.nodes))
+	for i, node := range p.nodes {
+		ids[i] = node.ID
+	}
+	present, err := p.probe(ids)
+	if err != nil {
+		p.page.evidence.fail(err)
+		return false
+	}
+	for _, node := range p.nodes {
+		if present[node.ID] == nil && !p.page.add(node) {
+			return false
+		}
+	}
+	p.nodes, p.ids, p.boundedBytes = nil, nil, 0
+	return true
+}
+
+func (p *contractNameImportProbes) add(node *graph.Node) bool {
+	if ctx := p.page.evidence.ctx; ctx != nil && ctx.Err() != nil {
+		p.page.evidence.fail(ctx.Err())
+		return false
+	}
+	if p.ids[node.ID] || p.page.ids[node.ID] {
+		return true
+	}
+	bound, bounded := contractNameImportCandidateBound(node, p.page.byteLimit)
+	remaining := func() int {
+		return p.page.byteLimit - contractNameImportEnvelopeBytes - p.page.encodedBytes
+	}
+	if len(p.nodes) != 0 && (!bounded || bound > remaining()-p.boundedBytes) {
+		if !p.flush() {
+			return false
+		}
+	}
+	if !bounded || bound > remaining() {
+		// Preserve precedence before encoding or rejecting an unusual/large row.
+		// Draining probes above does not commit a short import page.
+		present, err := p.probe([]string{node.ID})
+		if err != nil {
+			p.page.evidence.fail(err)
+			return false
+		}
+		return present[node.ID] != nil || p.page.add(node)
+	}
+	if p.ids == nil {
+		p.ids = make(map[string]bool)
+	}
+	p.ids[node.ID] = true
+	p.nodes = append(p.nodes, node)
+	p.boundedBytes += bound
+	// A possible full write page must be resolved before the next visitor row.
+	return len(p.nodes) < contractFrontierReadBatchSize-len(p.page.nodes) || p.flush()
+}
+
+// Bound both detached pending storage and its possible JSON representation,
+// without encoding a row before scratch precedence is known. Ordinary decoded
+// JSON metadata batches; custom/unsupported values take the single-probe path.
+// The bound only chooses probe grouping, never refuses a selected row.
+func contractNameImportCandidateBound(node *graph.Node, limit int) (int, bool) {
+	remaining := limit
+	charge := func(n int) bool {
+		if n > remaining {
+			return false
+		}
+		remaining -= n
+		return true
+	}
+	text := func(s string) bool {
+		return charge(64) && len(s) <= remaining/6 && charge(6*len(s))
+	}
+	// Traversal limits only choose the existing single-probe fallback.
+	// In particular, a deep/cyclic loser must not exhaust the worker stack.
+	visited := 0
+	var value func(any, int) bool
+	value = func(v any, depth int) bool {
+		if depth > 64 || visited >= 4096 {
+			return false
+		}
+		visited++
+		switch v := v.(type) {
+		case nil, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+			return charge(64)
+		case float32:
+			return !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) && charge(64)
+		case float64:
+			return !math.IsNaN(v) && !math.IsInf(v, 0) && charge(64)
+		case string:
+			return text(v)
+		case []any:
+			if !charge(64) {
+				return false
+			}
+			for _, item := range v {
+				if !charge(16) || !value(item, depth+1) {
+					return false
+				}
+			}
+			return true
+		case map[string]any:
+			if !charge(512) {
+				return false
+			}
+			for key, item := range v {
+				if !charge(64) || !text(key) || !value(item, depth+1) {
+					return false
+				}
+			}
+			return true
+		default:
+			return false
+		}
+	}
+	// Fixed field names, numeric fields, time encoding, headers and a separator.
+	if !node.FetchedAt.IsZero() || !charge(1024) {
+		return 0, false
+	}
+	for _, s := range []string{node.ID, string(node.Kind), node.Name, node.QualName, node.FilePath, node.Language, node.RepoPrefix, node.WorkspaceID, node.ProjectID, node.AbsoluteFilePath, node.Origin} {
+		if !text(s) {
+			return 0, false
+		}
+	}
+	if !value(node.Meta, 0) {
+		return 0, false
+	}
+	return limit - remaining, true
+}
+
 func (e *contractFollowupEvidence) AddNode(node *graph.Node) { e.AddBatch([]*graph.Node{node}, nil) }
 func (e *contractFollowupEvidence) AddEdge(edge *graph.Edge) { e.AddBatch(nil, []*graph.Edge{edge}) }
 func (e *contractFollowupEvidence) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
@@ -1313,6 +1457,9 @@ func (e *contractFollowupEvidence) findNodesByNames(names []string) map[string][
 	}
 	count := 0
 	page := contractNameImportPage{evidence: e, byteLimit: contractFollowupCompactLimit}
+	probes := contractNameImportProbes{page: &page, probe: func(ids []string) (map[string]*graph.Node, error) {
+		return e.scratch.GetNodesByIDsContext(e.ctx, ids)
+	}}
 	pending := names
 	newCounts := make(map[string]int, len(names))
 	cacheable := e.core != nil
@@ -1361,20 +1508,12 @@ func (e *contractFollowupEvidence) findNodesByNames(names []string) map[string][
 		if copyNode == nil {
 			return false
 		}
-		prior, readErr := e.scratch.GetNodesByIDsContext(e.ctx, []string{copyNode.ID})
-		if readErr != nil {
-			e.fail(readErr)
-			return false
-		}
-		if prior[copyNode.ID] == nil {
-			return page.add(copyNode)
-		}
-		return true
+		return probes.add(copyNode)
 	})
 	if err != nil {
 		e.fail(err)
 	}
-	if e.err != nil || !page.flush() {
+	if e.err != nil || !probes.flush() || !page.flush() {
 		return nil
 	}
 	out := make(map[string][]*graph.Node)
