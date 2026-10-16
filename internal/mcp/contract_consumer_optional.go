@@ -69,6 +69,8 @@ func (s *Server) bindOptionalContractConsumer(ctx context.Context, req mcp.CallT
 		// no mutex/Once is copied, and no local-only context replacement is used.
 		binding.views, binding.releaseCohort = opened.views, opened.releaseCohort
 		binding.served = status.allowServed
+		binding.recovered = opened.recovered
+		status.receiptsUnknown = opened.recovered
 		opened.views, opened.releaseCohort = nil, nil
 	}
 	if openErr == nil {
@@ -97,7 +99,7 @@ func (s *Server) bindOptionalContractConsumer(ctx context.Context, req mcp.CallT
 		return err
 	}
 	if status.allowServed && s.contractAnalysisRuntime.AcquireLastPublishedCohort != nil {
-		previous, _, previousErr := s.openPublishedContractConsumerBinding(ctx, selected, checkout, repos, actor)
+		previous, _, previousErr := s.openContractPredecessorBinding(ctx, selected, checkout, repos, actor)
 		if previousErr == nil {
 			adopt(previous)
 			status.state, status.reason, status.fresh = graphview.StateBuilding, "contract_analysis_pending", false
@@ -126,6 +128,9 @@ func optionalContractFacts(status *contractConsumerStatus) map[string]any {
 	fields := map[string]any{"capability": graphview.CapContracts, "state": status.state, "fresh": status.fresh}
 	if status.reason != "" {
 		fields["reason"] = status.reason
+	}
+	if status.receiptsUnknown {
+		fields["changed_files_known"] = false
 	}
 	if status.retryAfter > 0 {
 		fields["retry_after"] = int64((status.retryAfter + time.Second - 1) / time.Second)

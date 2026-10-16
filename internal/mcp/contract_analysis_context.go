@@ -33,6 +33,7 @@ type contractAnalysisContext struct {
 	closeOnce     sync.Once
 	releaseCohort func()
 	served        bool
+	recovered     bool
 	lazy          func(context.Context) error
 	lazyOnce      sync.Once
 	lazyErr       error

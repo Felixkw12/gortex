@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -10,6 +11,10 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
+
+// ErrContractPublishedCohortAbsent permits restart recovery only when no owned
+// metadata exists. Invalid/retired retained proof never becomes this sentinel.
+var ErrContractPublishedCohortAbsent = fmt.Errorf("no retained contract publication: %w", graph.ErrContractProjectionIncomplete)
 
 // ContractPublishedTarget identifies the actual immutable winner, including a
 // competing publication that won before this job's atomic transaction.
@@ -153,6 +158,9 @@ func (c *ContractAnalysisCoordinator) AcquireLastPublishedCohort(ctx context.Con
 	}
 	c.mu.Unlock()
 	cohort = cloneContractPublishedCohort(cohort)
+	if cohort == nil {
+		return nil, nil, ErrContractPublishedCohortAbsent
+	}
 	if !contractPublishedCohortComplete(cohort) || cohort == nil || len(cohort.Targets) == 0 || len(cohort.Witnesses) == 0 {
 		return nil, nil, graph.ErrContractProjectionIncomplete
 	}
@@ -196,7 +204,10 @@ func (c *ContractAnalysisCoordinator) AcquireLastPublishedCohort(ctx context.Con
 		if err != nil {
 			return fail(err)
 		}
-		if !found || state.State != store_sqlite.ViewGenerationReady && state.State != store_sqlite.ViewGenerationSuperseded {
+		if !found || state.State == store_sqlite.ViewGenerationRetiring {
+			return fail(graph.ErrContractPredecessorRetired)
+		}
+		if state.State != store_sqlite.ViewGenerationReady && state.State != store_sqlite.ViewGenerationSuperseded {
 			return fail(graph.ErrContractProjectionStale)
 		}
 	}
@@ -205,7 +216,10 @@ func (c *ContractAnalysisCoordinator) AcquireLastPublishedCohort(ctx context.Con
 		if err != nil {
 			return fail(err)
 		}
-		if current == nil || current.PayloadGeneration != target.PayloadGeneration {
+		if current == nil {
+			return fail(graph.ErrContractPredecessorRetired)
+		}
+		if current.PayloadGeneration != target.PayloadGeneration {
 			return fail(graph.ErrContractProjectionStale)
 		}
 		states, err := c.options.Store.AtGeneration(target.PayloadGeneration).ProducerStates()

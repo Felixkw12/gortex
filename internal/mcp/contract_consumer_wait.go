@@ -69,14 +69,15 @@ func (s *Server) ContractAnalysisShouldYield() bool {
 type contractConsumerContextKey struct{}
 
 type contractConsumerStatus struct {
-	mode        contractConsumerMode
-	state       graphview.CapabilityState
-	reason      string
-	navigate    bool
-	allowServed bool
-	fresh       bool
-	consulted   bool
-	retryAfter  time.Duration
+	mode            contractConsumerMode
+	state           graphview.CapabilityState
+	reason          string
+	navigate        bool
+	allowServed     bool
+	fresh           bool
+	consulted       bool
+	retryAfter      time.Duration
+	receiptsUnknown bool
 }
 
 func contractConsumerStatusFromContext(ctx context.Context) *contractConsumerStatus {
@@ -185,10 +186,11 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 			return ctx, contractWaitRefusal(ctx.Err(), retry)
 		}
 		if status.allowServed && runtime.AcquireLastPublishedCohort != nil {
-			binding, proof, openErr := s.openPublishedContractConsumerBinding(ctx, selected, checkout, repos, actor)
+			binding, proof, openErr := s.openContractPredecessorBinding(ctx, selected, checkout, repos, actor)
 			if openErr == nil {
 				status.state, status.reason, status.fresh = graphview.StateBuilding, "contract_analysis_pending", false
-				if arrivalSeq > 0 && proof.Seq >= arrivalSeq {
+				status.receiptsUnknown = binding.recovered
+				if arrivalSeq > 0 && proof != nil && proof.Seq >= arrivalSeq {
 					status.state, status.reason, status.fresh = graphview.StateComplete, "", true
 				}
 				if view != nil {
@@ -258,9 +260,9 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 			return fallback(err, retry)
 		}
 		if status.allowServed && arrivalSeq > 0 && runtime.AcquireLastPublishedCohort != nil {
-			binding, proof, openErr := s.openPublishedContractConsumerBinding(ctx, selected, checkout, repos, actor)
+			binding, proof, openErr := s.openContractPredecessorBinding(ctx, selected, checkout, repos, actor)
 			if openErr == nil {
-				if proof.Seq >= arrivalSeq {
+				if proof != nil && proof.Seq >= arrivalSeq {
 					status.state, status.reason, status.fresh = graphview.StateComplete, "", true
 					if view != nil {
 						view.contractCompleteness = &status.state
@@ -476,6 +478,9 @@ func decorateContractConsumerResult(ctx context.Context, result *mcp.CallToolRes
 	fields := map[string]any{"capability": graphview.CapContracts, "state": status.state, "fresh": fresh}
 	if status.reason != "" {
 		fields["reason"] = status.reason
+	}
+	if status.receiptsUnknown {
+		fields["changed_files_known"] = false
 	}
 	if status.retryAfter > 0 {
 		fields["retry_after"] = int64((status.retryAfter + time.Second - 1) / time.Second)
