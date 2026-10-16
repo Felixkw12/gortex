@@ -32,11 +32,9 @@ func TestRetirementSuccessorWaitsOutsideWriterGate(t *testing.T) {
 	for _, mode := range []string{"quantum", "slice", "full", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
 			s := openPayloadStore(t)
-			// Twice the production quantum: the first quantum is parked inside
-			// its DELETE until the successor queues, and that wait counts
-			// against its real-time budget. If its budget runs out it rolls the
-			// DELETE back. Missing even double the budget means a real slowdown.
-			s.retirementQuantumOverride = 2 * payloadRetirementQuantumDuration
+			// This checks fence ownership, independent of a host's ability to
+			// reach the SQL rendezvous inside the production quantum deadline.
+			// The unchanged real-time scenario runs in the performance flow.
 			seedPayloadBase(t, s)
 			seedPayloadControlPlane(t, s)
 			id, _, err := s.BeginPayloadGeneration(t.Context(), payloadRequest())
@@ -77,6 +75,16 @@ func TestRetirementSuccessorWaitsOutsideWriterGate(t *testing.T) {
 				progress PayloadRetirementProgress
 				err      error
 			}
+			// Keep the real bounded retirement transaction and all fences. The
+			// outer context bounds rendezvous/join liveness; chunk/row limits
+			// make progress deterministic without a subsecond throughput oracle.
+			retireQuantum := func(ctx context.Context) (PayloadRetirementProgress, error) {
+				var p PayloadRetirementProgress
+				e := s.retirePayloadGeneration(ctx, id, nil, payloadSweepBudget{
+					maxRows: payloadSweepMinBatch, maxChunks: 1, quantum: &p,
+				})
+				return p, e
+			}
 			firstDone, secondDone := make(chan result, 1), make(chan result, 1)
 			firstJoined, secondJoined, secondStarted := false, false, false
 			defer func() {
@@ -97,7 +105,7 @@ func TestRetirementSuccessorWaitsOutsideWriterGate(t *testing.T) {
 					}
 				}
 			}()
-			go func() { p, e := s.RetirePayloadGenerationQuantum(ctx, id, nil); firstDone <- result{p, e} }()
+			go func() { p, e := retireQuantum(ctx); firstDone <- result{p, e} }()
 			select {
 			case <-entered:
 			case <-ctx.Done():
@@ -115,7 +123,7 @@ func TestRetirementSuccessorWaitsOutsideWriterGate(t *testing.T) {
 				case "full":
 					e = s.RetirePayloadGeneration(secondCtx, id, nil)
 				default:
-					p, e = s.RetirePayloadGenerationQuantum(secondCtx, id, nil)
+					p, e = retireQuantum(secondCtx)
 				}
 				secondDone <- result{p, e}
 			}()
@@ -153,7 +161,7 @@ func TestRetirementSuccessorWaitsOutsideWriterGate(t *testing.T) {
 			require.False(t, errors.Is(first.err, ErrPayloadRetirementWriteWanted))
 			if mode == "cancel" {
 				require.ErrorIs(t, second.err, context.Canceled)
-				p, e := s.RetirePayloadGenerationQuantum(ctx, id, nil)
+				p, e := retireQuantum(ctx)
 				require.NoError(t, e)
 				require.True(t, p.CatalogRemoved)
 			} else {
