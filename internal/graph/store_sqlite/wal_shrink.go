@@ -83,17 +83,28 @@ var errWALResetNotRestarted = errors.New("store_sqlite: wal in-place reset: the 
 // the next write (thousands of page reads per edit). The copies stay on the
 // checkpoint connection; a PASSIVE backfill does not change the header.
 func (s *Store) resetWALForReclaim(ctx context.Context) (walCheckpointResult, error) {
+	return s.resetWALForReclaimWithBusyTimeout(ctx, int64(walResetBusyMillis))
+}
+
+// A pressure reset is already under a short writer credit. Its first SQLite
+// lock probe must return Busy without spending that same credit waiting: only
+// an actual Busy result admits the existing reader drain outside the writer.
+func (s *Store) resetWALForPressure(ctx context.Context) (walCheckpointResult, error) {
+	return s.resetWALForReclaimWithBusyTimeout(ctx, 0)
+}
+
+func (s *Store) resetWALForReclaimWithBusyTimeout(ctx context.Context, busyMillis int64) (walCheckpointResult, error) {
 	walPath := s.dbPath + "-wal"
 	if walFileSize(walPath) < walShrinkInPlaceBytes {
 		var result walCheckpointResult
-		err := s.withWriterResetConn(ctx, func(conn *sql.Conn) error {
+		err := s.withWriterResetConnWithBusyTimeout(ctx, busyMillis, func(conn *sql.Conn) error {
 			var err error
 			result, err = checkpointWALOnceOn(ctx, conn, "TRUNCATE")
 			return err
 		})
 		return result, err
 	}
-	return s.resetWALInPlaceLocked(ctx)
+	return s.resetWALInPlaceLockedWithBusyTimeout(ctx, busyMillis)
 }
 
 // walResetBusyMillis bounds how long a reset on the writer connection waits on
@@ -107,13 +118,17 @@ var walResetBusyMillis = sqliteCheckpointBusyTimeoutMillis
 // writeMu. A store without a separate writer pool (in-memory) or inside a
 // bulk window uses the active write connection as it is.
 func (s *Store) withWriterResetConn(ctx context.Context, fn func(conn *sql.Conn) error) error {
+	return s.withWriterResetConnWithBusyTimeout(ctx, int64(walResetBusyMillis), fn)
+}
+
+func (s *Store) withWriterResetConnWithBusyTimeout(ctx context.Context, busyMillis int64, fn func(conn *sql.Conn) error) error {
 	conn, release, err := s.activeWriteConnLocked(ctx)
 	if err != nil {
 		return err
 	}
 	defer release()
 	if s.bulkConn == nil {
-		busy := int64(walResetBusyMillis)
+		busy := busyMillis
 		if deadline, ok := ctx.Deadline(); ok {
 			if left := time.Until(deadline).Milliseconds(); left < busy {
 				busy = max(left, 0)
@@ -131,7 +146,11 @@ func (s *Store) withWriterResetConn(ctx context.Context, fn func(conn *sql.Conn)
 
 // resetWALInPlaceLocked restarts the log at its first frame without shrinking
 // the file (see the file comment). The caller holds writeMu.
-func (s *Store) resetWALInPlaceLocked(ctx context.Context) (result walCheckpointResult, err error) {
+func (s *Store) resetWALInPlaceLocked(ctx context.Context) (walCheckpointResult, error) {
+	return s.resetWALInPlaceLockedWithBusyTimeout(ctx, int64(walResetBusyMillis))
+}
+
+func (s *Store) resetWALInPlaceLockedWithBusyTimeout(ctx context.Context, busyMillis int64) (result walCheckpointResult, err error) {
 	if err := s.setWriterJournalLimitLocked(ctx, -1); err != nil {
 		return result, fmt.Errorf("wal in-place reset: lift the writer's journal_size_limit: %w", err)
 	}
@@ -143,7 +162,7 @@ func (s *Store) resetWALInPlaceLocked(ctx context.Context) (result walCheckpoint
 			_ = s.setWriterJournalLimitLocked(context.Background(), walShrinkKeepBytes)
 		}
 	}()
-	err = s.withWriterResetConn(ctx, func(conn *sql.Conn) error {
+	err = s.withWriterResetConnWithBusyTimeout(ctx, busyMillis, func(conn *sql.Conn) error {
 		return s.restartWALInPlaceOn(ctx, conn, &result)
 	})
 	if err != nil {

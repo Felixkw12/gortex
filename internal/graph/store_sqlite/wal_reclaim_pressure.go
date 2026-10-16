@@ -257,7 +257,7 @@ func (s *Store) reclaimWALPressureResetOnce(ctx context.Context, ckptDB *sql.DB,
 		resetCtx, stopYield = s.yieldToWriters(resetCtx)
 		defer stopYield()
 	}
-	result, err := s.resetWALForReclaim(resetCtx)
+	result, err := s.resetWALForPressure(resetCtx)
 	if preemptible && err != nil && errors.Is(context.Cause(resetCtx), errWALReclaimWriterWaiting) {
 		err = errWALReclaimWriterWaiting
 	}

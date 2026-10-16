@@ -10,9 +10,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// All readers/writers use actual pools; the only timing seam shortens SQLite's
-// Busy wait so its positive result precedes the unchanged50ms outer credit.
+// Existing controls use real pools with a shorter SQLite Busy wait. The
+// production-policy regression below retains both default Busy and hold values.
 func pressureReaderDrainFixture(t *testing.T) (*Store, chan struct{}, func() error) {
+	t.Helper()
+	return pressureReaderDrainFixturePolicy(t, false)
+}
+
+func pressureReaderDrainFixturePolicy(t *testing.T, productionPolicy bool) (*Store, chan struct{}, func() error) {
 	t.Helper()
 	t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "0")
 	t.Setenv("GORTEX_SQLITE_LAZY_INDEXES", "off")
@@ -27,10 +32,12 @@ func pressureReaderDrainFixture(t *testing.T) (*Store, chan struct{}, func() err
 	// runner gets headroom, and missing even double the budget means an
 	// unacceptable slowdown. Set after the checkpoint loop stopped, so no
 	// background reclaim reads it concurrently.
-	s.walPressureHoldOverride = 2 * walReclaimPressureHold
-	oldBusy := walResetBusyMillis
-	walResetBusyMillis = 10
-	t.Cleanup(func() { walResetBusyMillis = oldBusy })
+	if !productionPolicy {
+		s.walPressureHoldOverride = 2 * walReclaimPressureHold
+		oldBusy := walResetBusyMillis
+		walResetBusyMillis = 10
+		t.Cleanup(func() { walResetBusyMillis = oldBusy })
+	}
 	nodes, items := ftsDocs("drain", 2, func(int) string { return "rare" })
 	s.AddBatch(nodes, nil)
 	require.NoError(t, s.BatchUpsertSymbolFTS(items))
@@ -101,8 +108,54 @@ func TestPressureBusyResetDrainsOutsideWriterBeforeNewReaders(t *testing.T) {
 func TestPressureAdaptiveBusyResetDrainsWithoutRenewingCredit(t *testing.T) {
 	testPressureReaderDrain(t, true)
 }
+
+// The default policy must obtain a real SQLite Busy witness before its short
+// writer credit expires. The old equal-budget Busy wait returned only a
+// deadline, so it never reached the bounded outside-writer drain below.
+func TestPressureDefaultBusyResetWitnessDrainsOutsideWriter(t *testing.T) {
+	for _, inPlace := range []bool{false, true} {
+		name := "truncate"
+		if inPlace {
+			name = "restart"
+		}
+		t.Run(name, func(t *testing.T) {
+			if inPlace {
+				// Scale only the file-size branch, retaining the actual default
+				// Busy timeout, writer credit and reader-drain allowance.
+				prior := walShrinkInPlaceBytes
+				walShrinkInPlaceBytes = 1
+				t.Cleanup(func() { walShrinkInPlaceBytes = prior })
+			}
+			testPressureReaderDrainPolicy(t, false, true, inPlace)
+		})
+	}
+}
+
 func testPressureReaderDrain(t *testing.T, adaptive bool) {
-	s, release, joinReader := pressureReaderDrainFixture(t)
+	testPressureReaderDrainPolicy(t, adaptive, false, false)
+}
+
+func testPressureReaderDrainPolicy(t *testing.T, adaptive, productionPolicy, inPlace bool) {
+	s, release, joinReader := pressureReaderDrainFixturePolicy(t, productionPolicy)
+	busyWitness := make(chan walCheckpointResult, 1)
+	if productionPolicy {
+		require.Zero(t, s.walPressureHoldOverride)
+		require.EqualValues(t, sqliteCheckpointBusyTimeoutMillis, walResetBusyMillis)
+		priorObserver := walCheckpointResultObserver
+		expectedMode := "TRUNCATE"
+		if inPlace {
+			expectedMode = "RESTART"
+		}
+		walCheckpointResultObserver = func(mode string, _ time.Time, _ time.Duration, result walCheckpointResult, scanErr error) {
+			if mode == expectedMode && scanErr == nil && result.Busy > 0 {
+				select {
+				case busyWitness <- result:
+				default:
+				}
+			}
+		}
+		t.Cleanup(func() { walCheckpointResultObserver = priorObserver })
+	}
 	ckpt, err := openWALReclaimCheckpointDB(s.dbPath)
 	require.NoError(t, err)
 	defer ckpt.Close()
@@ -152,6 +205,14 @@ func testPressureReaderDrain(t *testing.T, adaptive bool) {
 		}
 	}
 	require.True(t, s.readGate.closed.Load(), "old pressure source never closes admission after realBusy")
+	if productionPolicy {
+		select {
+		case witness := <-busyWitness:
+			require.Positive(t, witness.Busy)
+		default:
+			t.Fatal("reader drain was not admitted by an actual SQLite Busy result")
+		}
+	}
 	// Drain waits without holding the writer.
 	require.NoError(t, s.writeMu.LockContext(ctx))
 	s.writeMu.Unlock()
@@ -184,7 +245,16 @@ func testPressureReaderDrain(t *testing.T, adaptive bool) {
 	}
 	snap, ok := readWALIndexSnapshot(s.dbPath)
 	require.True(t, ok)
-	require.Zero(t, snap.MxFrame)
+	if inPlace {
+		require.LessOrEqual(t, snap.MxFrame, uint32(walShrinkMaxRestartFrames))
+	} else {
+		require.Zero(t, snap.MxFrame)
+	}
+	if productionPolicy {
+		var restoredBusy int
+		require.NoError(t, s.writerDB.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&restoredBusy))
+		require.Equal(t, sqliteBusyTimeoutMillis, restoredBusy, "pressure probe must restore the writer's ordinary timeout")
+	}
 }
 
 func TestPressureReaderDrainReopensForCancellationAndForegroundWrite(t *testing.T) {
