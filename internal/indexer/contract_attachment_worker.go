@@ -442,6 +442,9 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 		// closed with the prepared cohort, on failure too.
 		prepared.scratch, prepared.scratchDir = engine.scratch, engine.scratchDir
 		if runErr != nil {
+			// A superseded cohort still performed the work recorded by the
+			// engine; keep it for the batch failure's mode and work metrics.
+			prepared.report = report
 			return report, runErr
 		}
 		prepared.coverage = engine.coverage.sealed
