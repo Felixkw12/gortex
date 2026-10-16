@@ -436,6 +436,7 @@ func (s *Store) symbolFTSScoringSnapshot(ctx context.Context, prefixes []string,
 	// The added generations' rows, read once for every term.
 	addedRows := map[int64][]SymbolFTSRow{}
 	addedCounted := map[int64]int64{}
+	streams := newSymbolFTSAddedStreams(tx, prefixes, state.terms, revs, stats.Rows, addedCounted)
 	out := make(map[string]int64, len(prefixes))
 	for _, prefix := range prefixes {
 		term := ftsPrefixTerm(prefix)
@@ -486,10 +487,24 @@ func (s *Store) symbolFTSScoringSnapshot(ctx context.Context, prefixes []string,
 			out[prefix] = n
 			continue
 		}
-		addedHits, err := s.generationsPrefixCountTx(ctx, tx, added, folded, term, addedRows)
+		var addedHits int64
+		var remaining []int64
+		for _, generation := range added {
+			n, streamed, err := streams.count(ctx, generation, folded)
+			if err != nil {
+				return SymbolFTSStats{}, nil, err
+			}
+			if streamed {
+				addedHits += n
+			} else {
+				remaining = append(remaining, generation)
+			}
+		}
+		fallbackHits, err := s.generationsPrefixCountTx(ctx, tx, remaining, folded, term, addedRows)
 		if err != nil {
 			return SymbolFTSStats{}, nil, err
 		}
+		addedHits += fallbackHits
 		count := base.count + addedHits
 		state.terms[folded] = &symbolFTSPrefixBaseline{count: count, rows: stats.Rows, revs: cloneRevs(revs)}
 		out[prefix] = count
