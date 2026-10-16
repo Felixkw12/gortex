@@ -4062,7 +4062,11 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 	}
 	importPath := spec[:sep]
 	symbol := spec[sep+2:]
-	callerRepo := r.callerRepoPrefix(e)
+	caller := r.cachedGetNode(e.From)
+	callerRepo := ""
+	if caller != nil {
+		callerRepo = caller.RepoPrefix
+	}
 
 	// Python absolute imports carry a dotted module path, which the
 	// directory match below cannot read — see python_absolute_imports.go.
@@ -4084,6 +4088,13 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 		stats.Unresolved++
 		return
 	}
+	// A Go selector into a caller-local package must agree with resolveImport,
+	// which prefers the caller's own instance of a duplicated module. Keep the
+	// first eligible foreign candidate as a fallback instead of letting global
+	// candidate order hide a later local package. The ownership and path guards
+	// below still decide eligibility; this does not invent package evidence.
+	preferLocal := callerRepo != "" && caller != nil && caller.Language == "go"
+	var foreignFallback *graph.Node
 	for _, c := range candidates {
 		if c.Kind != graph.KindFunction && c.Kind != graph.KindMethod && c.Kind != graph.KindType && c.Kind != graph.KindInterface {
 			continue
@@ -4104,13 +4115,29 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 			matches = strings.HasSuffix(dir, "/"+lastPathComponent(importPath)) || dir == importPath || strings.HasSuffix(dir, importPath)
 		}
 		if matches {
+			if preferLocal && crossRepo {
+				if foreignFallback == nil {
+					foreignFallback = c
+				}
+				continue
+			}
 			e.To = c.ID
 			if crossRepo {
 				e.CrossRepo = true
+			} else if preferLocal {
+				// A restub can retain the prior target's foreign flag.
+				e.CrossRepo = false
 			}
 			stats.Resolved++
 			return
 		}
+	}
+
+	if foreignFallback != nil {
+		e.To = foreignFallback.ID
+		e.CrossRepo = true
+		stats.Resolved++
+		return
 	}
 
 	// Pass 2: classify the import path. "stdlib::" when the path looks
