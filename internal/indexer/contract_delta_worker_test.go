@@ -183,13 +183,13 @@ func TestContractDeltaUnitRetainsItsMeasuredRawSize(t *testing.T) {
 	sizes := map[string]int64{}
 	for path, unit := range cache.units {
 		require.Positive(t, unit.retainedRawBytes, "even an empty raw slice has owned header storage")
-		require.Equal(t, contractRetainedSize(reflect.ValueOf(unit.raw)), unit.retainedRawBytes)
+		require.Equal(t, contractRetainedSize(reflect.ValueOf(unit.raw))+contractRetainedSize(reflect.ValueOf(unit.router)), unit.retainedRawBytes)
 		sizes[path] = unit.retainedRawBytes
 	}
 	f.save("routes.go", strings.ReplaceAll(jobRoutes, "RoutePath", `"/after"`))
 	runCachedContractFixture(t, f, &cache)
 	for path, unit := range cache.units {
-		require.Equal(t, contractRetainedSize(reflect.ValueOf(unit.raw)), unit.retainedRawBytes)
+		require.Equal(t, contractRetainedSize(reflect.ValueOf(unit.raw))+contractRetainedSize(reflect.ValueOf(unit.router)), unit.retainedRawBytes)
 		if path != "fixture/routes.go" {
 			require.Equal(t, sizes[path], unit.retainedRawBytes)
 		}

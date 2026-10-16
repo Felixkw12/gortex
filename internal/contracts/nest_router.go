@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -31,31 +32,51 @@ var (
 // maps each `@Module` to the controllers it declares, and composes the two into
 // controllerClass -> mounted prefix.
 func buildNestModulePrefixes(files map[string]bool, srcFor func(string) []byte) map[string]string {
-	modulePrefix := map[string]string{}    // module class -> mounted prefix
-	controllerModule := map[string]string{} // controller class -> module class
-
+	paths := make([]string, 0, len(files))
+	facts := make(map[string]RouterFacts, len(files))
 	for path := range files {
-		src := srcFor(path)
-		if src == nil {
-			continue
-		}
-		text := string(src)
-		if strings.Contains(text, "RouterModule.") {
-			for _, call := range []string{"RouterModule.register(", "RouterModule.forRoot(", "RouterModule.forChild("} {
-				for _, idx := range indexAll(text, call) {
-					if arr, end := balancedSlice(text, idx, '[', ']'); end >= 0 {
-						walkNestRouterRoutes(arr, "", modulePrefix)
-					}
+		paths = append(paths, path)
+		mp, cm := nestFileModuleFacts(string(srcFor(path)))
+		facts[path] = RouterFacts{ModulePrefix: mp, ControllerModule: cm}
+	}
+	sort.Strings(paths)
+	return joinNestModuleFacts(paths, facts)
+}
+
+func nestFileModuleFacts(text string) (map[string]string, map[string]string) {
+	modulePrefix := map[string]string{}
+	controllerModule := map[string]string{}
+	if strings.Contains(text, "RouterModule.") {
+		for _, call := range []string{"RouterModule.register(", "RouterModule.forRoot(", "RouterModule.forChild("} {
+			for _, idx := range indexAll(text, call) {
+				if arr, end := balancedSlice(text, idx, '[', ']'); end >= 0 {
+					walkNestRouterRoutes(arr, "", modulePrefix)
 				}
 			}
 		}
-		if strings.Contains(text, "@Module(") {
-			for _, mod := range extractNestModules(text) {
-				for _, ctrl := range mod.controllers {
-					if _, ok := controllerModule[ctrl]; !ok {
-						controllerModule[ctrl] = mod.name
-					}
+	}
+	if strings.Contains(text, "@Module(") {
+		for _, mod := range extractNestModules(text) {
+			for _, ctrl := range mod.controllers {
+				if _, ok := controllerModule[ctrl]; !ok {
+					controllerModule[ctrl] = mod.name
 				}
+			}
+		}
+	}
+	return detachRouterMap(modulePrefix), detachRouterMap(controllerModule)
+}
+
+func joinNestModuleFacts(paths []string, facts map[string]RouterFacts) map[string]string {
+	modulePrefix := map[string]string{}
+	controllerModule := map[string]string{}
+	for _, path := range paths {
+		for mod, prefix := range facts[path].ModulePrefix {
+			modulePrefix[mod] = prefix
+		}
+		for ctrl, mod := range facts[path].ControllerModule {
+			if _, ok := controllerModule[ctrl]; !ok {
+				controllerModule[ctrl] = mod
 			}
 		}
 	}

@@ -270,6 +270,10 @@ func cloneContractUnitsMode(in map[string]*contractUnit, copyRaw bool, pool ...*
 		v.stamp = cloneContractDeltaStamp(u.stamp, pool...)
 		if copyRaw {
 			v.raw = cloneContractDeltaRaw(u.raw)
+			if u.router != nil {
+				facts := u.router.Clone()
+				v.router = &facts
+			}
 		}
 		v.owners, v.keys, v.torn = cloneContractDeltaMap(u.owners, pool...), cloneContractDeltaMap(u.keys, pool...), cloneContractDeltaMap(u.torn, pool...)
 		v.declared = cloneContractDeltaStrings(u.declared, pool...)

@@ -133,7 +133,7 @@ func (s *contractDeltaSession) ownRaw(unit *contractUnit) {
 		}
 	}
 	unit.raw = cloneContractDeltaRaw(unit.raw)
-	unit.retainedRawBytes = contractRetainedSize(reflect.ValueOf(unit.raw))
+	unit.retainedRawBytes = contractRetainedSize(reflect.ValueOf(unit.raw)) + contractRetainedSize(reflect.ValueOf(unit.router))
 	s.knownRaw[unit] = unit.retainedRawBytes
 	s.normalizedRaw++
 }
@@ -169,6 +169,7 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 	for path, unit := range p.units {
 		v := *unit
 		v.raw = nil
+		v.router = nil
 		if v.ledgerAliases {
 			v.owners, v.keys = nil, nil
 		}

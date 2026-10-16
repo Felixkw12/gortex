@@ -149,12 +149,13 @@ func contractJobOutcomeOf(err error) string {
 
 // contractUnit is one file's proven extraction.
 type contractUnit struct {
-	// Retained raw size travels with its immutable unit; zero is unmeasured.
+	// Retained raw and router-fact size travels with its immutable unit; zero is unmeasured.
 	retainedRawBytes int64
 	path             string
 	stamp            ContractReceiptStamp
 	round            uint64
 	raw              []contracts.Contract
+	router           *contracts.RouterFacts
 	owners           map[string]bool
 	keys             map[string]bool
 	declared         []string
@@ -740,9 +741,10 @@ func contractQuantile(samples []time.Duration, q float64) time.Duration {
 // inputs were last shown current at, the digest of every live unit's records,
 // and its own recorded reads.
 type contractEnrichment struct {
-	round  uint64
-	raws   map[string]string
-	ledger *contractUnitLedger
+	round   uint64
+	raws    map[string]string
+	ledger  *contractUnitLedger
+	routers []contractRouterProof
 	// stale is set when a re-check found a recorded input changed.
 	stale bool
 	// torn holds the files the round read that were not quiescent at its R0
@@ -1561,6 +1563,10 @@ func (c *contractConvergence) extract(idx *Indexer, evidence *contractFollowupEv
 			found[i].ProjectID = file.ProjectID
 		}
 	}
+	if contractRouterSupported(file, found) {
+		facts := contracts.RouterFileFacts(file.Path, src)
+		unit.router = &facts
+	}
 	unit.raw = cloneContractRecords(found)
 	digest, ok := contractAnswerDigest(unit.raw)
 	if !ok {
@@ -2064,7 +2070,7 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 				unproven = append(unproven, path)
 				continue
 			}
-			if own.identity() != p.unit.stamp.identity() && c.contentChangedSince(path, p.unit.round) {
+			if (p.unit.router != nil && own.SourceFingerprint != p.unit.stamp.SourceFingerprint) || (own.identity() != p.unit.stamp.identity() && c.contentChangedSince(path, p.unit.round)) {
 				extract = append(extract, c.dropForExtraction(path))
 				continue
 			}
@@ -2673,6 +2679,11 @@ func (c *contractConvergence) staleUnits(stale map[string]string) {
 	}
 	for path, unit := range c.units {
 		last := c.clock.last[path]
+		if !unit.excluded && unit.router != nil && unit.stamp.SourceFingerprint != last.SourceFingerprint {
+			stale[path] = viewmetrics.ContractFilesStale
+			c.dropUnit(path)
+			continue
+		}
 		if !unit.excluded && unit.stamp != last && !c.contentChangedSince(path, unit.round) {
 			// Its receipt moved without moving its contract content: the unit
 			// describes the current stamp.
@@ -3167,7 +3178,7 @@ func (c *contractConvergence) enrichmentHolds() bool {
 	if c.pp == nil || c.pp.stale || c.registry == nil {
 		return false
 	}
-	return maps.Equal(c.unitRaws(), c.pp.raws)
+	return maps.Equal(c.unitRaws(), c.pp.raws) && c.routerProofsHold(c.pp.routers)
 }
 
 // unitRaws is the record digest of every live unit the enrichment round
@@ -3379,6 +3390,7 @@ func (c *contractConvergence) enrichFrom(r0 ContractFollowupScan, clock uint64) 
 			return false, graph.ErrContractProjectionLimit
 		}
 	}
+	var routerProofs []contractRouterProof
 	prefixes := make([]string, 0, len(indexers))
 	for repo := range indexers {
 		prefixes = append(prefixes, repo)
@@ -3394,8 +3406,14 @@ func (c *contractConvergence) enrichFrom(r0 ContractFollowupScan, clock uint64) 
 		idx.extractDIContracts(local)
 		idx.upgradeContractBareTypeRefs(local)
 		idx.resolveProviderHandlers(local)
-		if scans := idx.routerPrefixScanFiles(local); len(scans) > 0 {
-			contracts.JoinRouterPrefixes(local, scans, idx.contractFileSrc)
+		if contractRouterEligible(local) {
+			before := cloneContractRecords(local.All())
+			contracts.JoinRouterPrefixFacts(local, c.routerFacts(repo, local))
+			digest, ok := contractAnswerDigest(local.All())
+			if !ok {
+				return false, fmt.Errorf("contract followup: unencodable router result")
+			}
+			routerProofs = append(routerProofs, contractRouterProof{repo: repo, records: before, digest: digest})
 		}
 		contracts.BindSpringConfig(evidence, contracts.SpringConfigScope{RepoPrefix: repo, RepoRoot: idx.rootPath, WorkspaceID: idx.workspaceID, ReadSource: func(path string) ([]byte, error) {
 			data, err := reader.read(path)
@@ -3476,7 +3494,7 @@ func (c *contractConvergence) enrichFrom(r0 ContractFollowupScan, clock uint64) 
 		c.hooks.afterPP()
 	}
 	c.registry = registry
-	c.pp = &contractEnrichment{round: clock, raws: raws, ledger: ledger, torn: torn}
+	c.pp = &contractEnrichment{round: clock, raws: raws, ledger: ledger, torn: torn, routers: routerProofs}
 	return true, nil
 }
 
