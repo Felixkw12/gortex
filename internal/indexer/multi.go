@@ -108,6 +108,10 @@ type MultiIndexer struct {
 	// an old watcher instance on a second lane.
 	repositoryMutationMu sync.Mutex
 	repositoryMutations  map[string]*repositoryMutationCoordinator
+	// Set only by the explicit daemon-managed watcher constructor, for this
+	// MultiIndexer's lifetime. Default/custom watcher callers do not opt in.
+	configManagedExcludes atomic.Bool
+
 	// outputAuthority is the process-wide output-generation authority the stack
 	// installed (NewSharedServer). Every per-repository Indexer this
 	// MultiIndexer owns resolves to it, so the owned lanes and the standalone
@@ -2786,6 +2790,13 @@ func (mi *MultiIndexer) incrementalReindexRepoRawMode(repoPrefix string, paths [
 	}
 	if idx == nil {
 		return nil, fmt.Errorf("repository mutation executor has no live indexer: %s", repoPrefix)
+	}
+
+	// Refresh the producer under its already-held repository lane. A watcher
+	// admission refresh alone would still leave unignored source excluded by
+	// the long-lived Indexer's construction-time matcher.
+	if mi.configManagedExcludes.Load() {
+		idx.refreshEffectiveExcludePatterns(mi.configMgr.EffectiveExclude(repoPrefix))
 	}
 
 	// The stable per-repository lane is held before this executor runs. Take

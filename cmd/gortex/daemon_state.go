@@ -1257,7 +1257,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 	for prefix := range state.multiIndexer.AllMetadata() {
 		watchCfgs[prefix] = state.configManager.GetRepoConfig(prefix).Watch
 	}
-	mw, err := indexer.NewMultiWatcher(state.multiIndexer, watchCfgs, logger)
+	mw, err := indexer.NewConfigManagedMultiWatcher(state.multiIndexer, watchCfgs, logger)
 	if err != nil {
 		logger.Warn("daemon: multi-watcher init failed", zap.Error(err))
 		timings.watchers = finishWatchers(zap.String("outcome", "init_failed"), zap.Error(err))

@@ -121,6 +121,9 @@ type MultiWatcher struct {
 	stopDone             chan struct{}
 	stopErr              error
 
+	// Immutable after construction; inherited by later AddRepo watchers.
+	configManagedExcludes bool
+
 	// symbolChangeCb is the OnSymbolChange callback registered by the
 	// MCP server (or any other consumer). It's fanned out to every
 	// per-repo Watcher and re-applied at AddRepo time so newly-tracked
@@ -175,6 +178,35 @@ func NewMultiWatcher(
 	return mw, nil
 }
 
+// NewConfigManagedMultiWatcher opts the daemon's MultiIndexer into live
+// ConfigManager exclusion policy for that MultiIndexer's lifetime. Stopping a
+// watcher does not revert producer policy. NewMultiWatcher retains its existing
+// caller-supplied exclusion semantics and does not enable this behavior.
+func NewConfigManagedMultiWatcher(mi *MultiIndexer, configs map[string]config.WatchConfig, logger *zap.Logger) (*MultiWatcher, error) {
+	if mi == nil || mi.configMgr == nil {
+		return nil, fmt.Errorf("config-managed watcher requires a ConfigManager")
+	}
+	mw, err := NewMultiWatcher(mi, configs, logger)
+	if err != nil {
+		return nil, err
+	}
+	mw.configManagedExcludes = true
+	for prefix, w := range mw.watchers {
+		mw.configureManagedExcludes(prefix, w)
+	}
+	mi.configManagedExcludes.Store(true)
+	return mw, nil
+}
+
+// configureManagedExcludes runs only before a watcher is published or started.
+func (mw *MultiWatcher) configureManagedExcludes(prefix string, w *Watcher) {
+	w.currentExcludePatterns = func() []string {
+		return mw.multi.configMgr.EffectiveExclude(prefix)
+	}
+	w.excludePolicyPatterns = w.config.Exclude
+	w.excludePolicyMatcher = w.excludes
+}
+
 // createWatcher creates a per-repo Watcher for the given prefix.
 func (mw *MultiWatcher) createWatcher(prefix string, cfg config.WatchConfig) error {
 	meta := mw.multi.GetMetadata(prefix)
@@ -196,6 +228,9 @@ func (mw *MultiWatcher) createWatcher(prefix string, cfg config.WatchConfig) err
 	w, err := NewWatcher(idx, cfg, mw.logger.With(zap.String("repo", prefix)))
 	if err != nil {
 		return fmt.Errorf("creating watcher for %s: %w", prefix, err)
+	}
+	if mw.configManagedExcludes {
+		mw.configureManagedExcludes(prefix, w)
 	}
 	// The watcher outlives an IndexRepo replacement. Its construction-time
 	// Indexer remains the stable lane carrier; graph work selects the current

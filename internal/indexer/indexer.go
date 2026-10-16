@@ -6459,6 +6459,24 @@ func (idx *Indexer) SetExcludePatterns(patterns []string) {
 	idx.excludes.Store(excludes.New(effectiveExcludePatterns(patterns)))
 }
 
+// sameImmutableExcludeSnapshot compares only ConfigManager's shared immutable
+// snapshots. It is not a content comparison for arbitrary caller-owned slices.
+func sameImmutableExcludeSnapshot(a, b []string) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
+}
+
+// refreshEffectiveExcludePatterns consumes ConfigManager's immutable snapshot
+// after repository mutation admission. Steady-state passes retain their matcher.
+func (idx *Indexer) refreshEffectiveExcludePatterns(patterns []string) {
+	idx.excludeMu.Lock()
+	defer idx.excludeMu.Unlock()
+	if sameImmutableExcludeSnapshot(idx.config.Exclude, patterns) {
+		return
+	}
+	idx.config.Exclude = patterns
+	idx.excludes.Store(excludes.New(effectiveExcludePatterns(patterns)))
+}
+
 // effectiveExcludePatterns falls back to the builtin baseline when the
 // list is empty. A nil/empty list from upstream means "no layering was
 // applied" (e.g. a direct caller of indexer.New without ConfigManager),

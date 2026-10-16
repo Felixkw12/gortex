@@ -158,13 +158,19 @@ type Watcher struct {
 	// backend, relying on the adaptive poller + git hooks instead.
 	degradedNoFsnotify bool
 	excludes           *excludes.Matcher
-	events             chan GraphChangeEvent
-	history            []GraphChangeEvent
-	historyMu          sync.Mutex
-	pending            map[string]*time.Timer
-	pendingGeneration  map[string]uint64
-	mutationWaiters    map[string]map[uint64]chan MutationResult
-	nextGeneration     uint64
+	// currentExcludePatterns is installed by MultiWatcher for its configured
+	// repository. ConfigManager returns immutable, shared policy snapshots.
+	currentExcludePatterns func() []string
+	excludePolicyMu        sync.Mutex
+	excludePolicyPatterns  []string
+	excludePolicyMatcher   *excludes.Matcher
+	events                 chan GraphChangeEvent
+	history                []GraphChangeEvent
+	historyMu              sync.Mutex
+	pending                map[string]*time.Timer
+	pendingGeneration      map[string]uint64
+	mutationWaiters        map[string]map[uint64]chan MutationResult
+	nextGeneration         uint64
 	// mutationRetryDelayFn and pointMutationPatch are deterministic test seams.
 	// Production retries use mutationRetryBackoff and the complete point pipeline.
 	mutationRetryDelayFn   func(int) time.Duration
@@ -3218,8 +3224,34 @@ func (w *Watcher) isExcluded(path string) bool {
 	if pathguard.SymlinkEscapes(path, root) {
 		return true
 	}
+	m := w.currentExcludeMatcher()
 	if root == "" {
-		return w.excludes.MatchRel(filepath.Base(path))
+		return m.MatchRel(filepath.Base(path))
 	}
-	return w.excludes.MatchAbs(path, root)
+	return m.MatchAbs(path, root)
+}
+
+// currentExcludeMatcher refreshes only when ConfigManager's immutable merged
+// snapshot changes. The cached chain lookup also observes ancestor ignore files
+// outside the watched root, which cannot be invalidated by local events alone.
+func (w *Watcher) currentExcludeMatcher() *excludes.Matcher {
+	if w.currentExcludePatterns == nil {
+		return w.excludes
+	}
+	w.excludePolicyMu.Lock()
+	patterns := w.currentExcludePatterns()
+	changed := !sameImmutableExcludeSnapshot(w.excludePolicyPatterns, patterns)
+	if changed {
+		w.excludePolicyPatterns = patterns
+		w.excludePolicyMatcher = excludes.New(effectiveExcludePatterns(patterns))
+	}
+	m := w.excludePolicyMatcher
+	w.excludePolicyMu.Unlock()
+	if changed {
+		// A policy change affects existing payload too. Reuse the bounded,
+		// coalesced full reconcile to withdraw newly ignored files and discover
+		// newly unignored source even when those files receive no own event.
+		w.triggerOverflowReconcile("exclude-policy-changed")
+	}
+	return m
 }
