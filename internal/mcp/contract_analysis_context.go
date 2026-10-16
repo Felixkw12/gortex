@@ -30,6 +30,9 @@ type contractAnalysisContext struct {
 	composed      graph.Reader
 	composedLayer *contractIdentityLayer
 	composedErr   error
+	closeOnce     sync.Once
+	releaseCohort func()
+	served        bool
 }
 
 func withContractAnalysisContext(ctx context.Context, binding *contractAnalysisContext) context.Context {
@@ -45,9 +48,14 @@ func (binding *contractAnalysisContext) close() {
 	if binding == nil {
 		return
 	}
-	for _, view := range binding.views {
-		view.Close()
-	}
+	binding.closeOnce.Do(func() {
+		for _, view := range binding.views {
+			view.Close()
+		}
+		if binding.releaseCohort != nil {
+			binding.releaseCohort()
+		}
+	})
 }
 
 func (binding *contractAnalysisContext) recordReadError(err error) {
@@ -102,7 +110,13 @@ func (binding *contractAnalysisContext) validate(ctx context.Context) error {
 		return err
 	}
 	for _, view := range binding.views {
-		if err := view.Validate(ctx); err != nil {
+		var err error
+		if binding.served {
+			err = view.ValidateServed(ctx)
+		} else {
+			err = view.Validate(ctx)
+		}
+		if err != nil {
 			return err
 		}
 	}

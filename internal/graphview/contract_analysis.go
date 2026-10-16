@@ -30,6 +30,7 @@ type ContractAnalysisView struct {
 	lease          *Lease
 	inputs         *SelectedContractInputs
 	closeOnce      sync.Once
+	servedSources  *ContractServedSources
 }
 
 // SearchBackend reads only this leased analysis payload's native symbol index.
@@ -75,6 +76,12 @@ func (m *Materializer) OpenContractAnalysisForInputs(ctx context.Context, view *
 		analysis.Close()
 		return nil, err
 	}
+	sources, err := m.AcquireContractServedSources(ctx, inputs)
+	if err != nil {
+		analysis.Close()
+		return nil, err
+	}
+	analysis.servedSources = sources
 	analysis.inputs = inputs
 	analysis.RegistryReader.(*contractRegistryReader).sources = inputs.SourceReaders()
 	return analysis, nil
@@ -92,9 +99,29 @@ func (v *ContractAnalysisView) Validate(ctx context.Context) error {
 	return v.Layer.checkContractInputRevision(ctx)
 }
 
+// ValidateServed checks custody and immutable payload identity without changing
+// arrival-bound freshness when live logical inputs move.
+func (v *ContractAnalysisView) ValidateServed(ctx context.Context) error {
+	if v == nil || v.Layer == nil || v.lease == nil || v.lease.Holders() == 0 {
+		return graph.ErrContractProjectionStale
+	}
+	if v.servedSources == nil {
+		return graph.ErrContractInputVector
+	}
+	if err := v.servedSources.Validate(ctx); err != nil {
+		return err
+	}
+	return v.Layer.checkContractInputRevision(ctx)
+}
+
 func (v *ContractAnalysisView) Close() {
 	if v != nil {
-		v.closeOnce.Do(func() { v.lease.Release() })
+		v.closeOnce.Do(func() {
+			v.lease.Release()
+			if v.servedSources != nil {
+				v.servedSources.Close()
+			}
+		})
 	}
 }
 

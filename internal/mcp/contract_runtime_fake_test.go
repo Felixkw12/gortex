@@ -18,6 +18,7 @@ import (
 // capture of its inputs.
 type contractRuntimeFake struct {
 	t         *testing.T
+	acquire   func(context.Context, indexer.ContractActor) (*indexer.ContractPublishedCohort, func(), error)
 	schedule  func(context.Context, indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error)
 	waitActor func(context.Context, indexer.ContractActor, uint64) (indexer.ContractActorStatus, error)
 	epoch     atomic.Uint64
@@ -38,7 +39,7 @@ func (f *contractRuntimeFake) runtime() *ContractAnalysisRuntime {
 		}
 		return nil
 	}
-	return &ContractAnalysisRuntime{
+	runtime := &ContractAnalysisRuntime{
 		Schedule: func(ctx context.Context, req indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error) {
 			f.schedules.Add(1)
 			if f.schedule == nil {
@@ -64,6 +65,8 @@ func (f *contractRuntimeFake) runtime() *ContractAnalysisRuntime {
 		},
 		WaitInputs: func(ctx context.Context, since uint64) error { return waitFor(ctx, &f.epoch, since) },
 	}
+	runtime.AcquireLastPublishedCohort = f.acquire
+	return runtime
 }
 
 // installForbiddenContractRuntime installs a runtime whose every schedule or

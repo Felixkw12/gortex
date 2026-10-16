@@ -24,12 +24,13 @@ import (
 // for the input epoch (InputEpoch) to move. None of them waits for ordinary
 // core publication.
 type ContractAnalysisRuntime struct {
-	Schedule      func(context.Context, indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error)
-	WaitActor     func(context.Context, indexer.ContractActor, uint64) (indexer.ContractActorStatus, error)
-	WaitCapacity  func(context.Context, uint64) error
-	CapacityEpoch func() uint64
-	InputEpoch    func() uint64
-	WaitInputs    func(context.Context, uint64) error
+	AcquireLastPublishedCohort func(context.Context, indexer.ContractActor) (*indexer.ContractPublishedCohort, func(), error)
+	Schedule                   func(context.Context, indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error)
+	WaitActor                  func(context.Context, indexer.ContractActor, uint64) (indexer.ContractActorStatus, error)
+	WaitCapacity               func(context.Context, uint64) error
+	CapacityEpoch              func() uint64
+	InputEpoch                 func() uint64
+	WaitInputs                 func(context.Context, uint64) error
 }
 
 // SetContractAnalysisRuntime is a startup-only installation seam. Leaving it
@@ -68,10 +69,12 @@ func (s *Server) ContractAnalysisShouldYield() bool {
 type contractConsumerContextKey struct{}
 
 type contractConsumerStatus struct {
-	mode     contractConsumerMode
-	state    graphview.CapabilityState
-	reason   string
-	navigate bool
+	mode        contractConsumerMode
+	state       graphview.CapabilityState
+	reason      string
+	navigate    bool
+	allowServed bool
+	fresh       bool
 }
 
 func contractConsumerStatusFromContext(ctx context.Context) *contractConsumerStatus {
@@ -120,6 +123,9 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 			status.navigate = true
 		}
 	}
+	// Only explicitly declared required capabilities forbid predecessor answers;
+	// tool-inferred strictness and require_complete defaults are distinct.
+	status.allowServed = !freshness.requireExact && len(want.required) == 0
 	ctx = context.WithValue(ctx, contractConsumerContextKey{}, status)
 	if mode == contractConsumerOptional {
 		ctx = withContractAnalysisContext(ctx, &contractAnalysisContext{})
@@ -160,6 +166,29 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 	}
 	runtime := s.contractAnalysisRuntime
 	actor := indexer.NewContractActor(checkout, repos)
+	var arrivalSeq uint64
+	fallback := func(cause error, retry time.Duration) (context.Context, *mcp.CallToolResult) {
+		if ctx.Err() != nil {
+			return ctx, contractWaitRefusal(ctx.Err(), retry)
+		}
+		if status.allowServed && runtime.AcquireLastPublishedCohort != nil {
+			binding, proof, openErr := s.openPublishedContractConsumerBinding(ctx, selected, checkout, repos, actor)
+			if openErr == nil {
+				status.state, status.reason, status.fresh = graphview.StateBuilding, "contract_analysis_pending", false
+				if arrivalSeq > 0 && proof.Seq >= arrivalSeq {
+					status.state, status.reason, status.fresh = graphview.StateComplete, "", true
+				}
+				if view != nil {
+					// Completeness of the served immutable payload is separate from
+					// whether the current logical key is still building.
+					complete := graphview.StateComplete
+					view.contractCompleteness = &complete
+				}
+				return withContractAnalysisContext(ctx, binding), nil
+			}
+		}
+		return ctx, contractWaitRefusal(cause, retry)
+	}
 	// scheduled holds the input epoch each key was last scheduled at: a key
 	// is asked for at most once per epoch, so a promise that resolved
 	// without its attachment opening waits for the inputs to move instead
@@ -167,35 +196,41 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 	scheduled := make(map[graph.ContractAttachmentKey]uint64)
 	for {
 		if err := waitCtx.Err(); err != nil {
-			return ctx, contractWaitRefusal(err, 0)
+			return fallback(err, 0)
 		}
 		// Sampled before the capture: an accept landing after it moves the
 		// epoch past this sample.
 		epoch := runtime.InputEpoch()
 		binding, pending, err := s.openContractConsumerBinding(waitCtx, selected, checkout, repos)
 		if err == nil {
-			status.state, status.reason = graphview.StateComplete, ""
+			status.state, status.reason, status.fresh = graphview.StateComplete, "", true
+			binding.served = status.allowServed
 			if view != nil {
 				view.contractCompleteness = &status.state
 			}
 			return withContractAnalysisContext(ctx, binding), nil
 		}
 		if waitCtx.Err() != nil {
-			return ctx, contractWaitRefusal(waitCtx.Err(), 0)
+			return fallback(waitCtx.Err(), 0)
 		}
 		if pending == nil {
 			return ctx, mcp.NewToolResultError(err.Error())
 		}
-		if at, seen := scheduled[pending.key]; pending.stale || seen && at >= epoch {
+		// A missing entry differs from a scheduled entry at epoch zero: cold
+		// startup still schedules once before waiting for an input notification.
+		if at, seen := scheduled[pending.key]; pending.stale || (seen && at >= epoch) {
 			// Superseded inputs are captured again once they move; never
 			// schedule the stale vector, nor one vector twice per epoch.
 			if err := s.waitContractInputs(waitCtx, epoch); err != nil {
-				return ctx, contractWaitRefusal(err, 0)
+				return fallback(err, 0)
 			}
 			continue
 		}
 		scheduled[pending.key] = epoch
 		result, retry, err := s.scheduleAndWaitContractAnalysis(waitCtx, actor, selected, pending, epoch)
+		if arrivalSeq == 0 {
+			arrivalSeq = pending.arrivalSeq
+		}
 		switch {
 		case errors.Is(err, indexer.ErrContractUnsupported):
 			return ctx, mcp.NewToolResultError(graphview.NewViewError(graphview.CodeCapabilityUnavailable, "contract analysis cannot build the selected historical inputs").Error())
@@ -203,21 +238,34 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 			// The selected view's handoff could not be taken any more.
 			delete(scheduled, pending.key)
 			if err := s.waitContractInputs(waitCtx, epoch); err != nil {
-				return ctx, contractWaitRefusal(err, 0)
+				return fallback(err, 0)
 			}
 			continue
 		case err != nil:
-			return ctx, contractWaitRefusal(err, retry)
+			return fallback(err, retry)
+		}
+		if status.allowServed && arrivalSeq > 0 && runtime.AcquireLastPublishedCohort != nil {
+			binding, proof, openErr := s.openPublishedContractConsumerBinding(ctx, selected, checkout, repos, actor)
+			if openErr == nil {
+				if proof.Seq >= arrivalSeq {
+					status.state, status.reason, status.fresh = graphview.StateComplete, "", true
+					if view != nil {
+						view.contractCompleteness = &status.state
+					}
+					return withContractAnalysisContext(ctx, binding), nil
+				}
+				binding.close()
+			}
 		}
 		switch result.Result {
 		case indexer.ContractActorFailed, indexer.ContractActorStalled, indexer.ContractActorPanic:
-			return ctx, contractWaitRefusal(fmt.Errorf("contract analysis of these inputs %s", result.Result), result.RetryAfter)
+			return fallback(fmt.Errorf("contract analysis of these inputs %s", result.Result), result.RetryAfter)
 		case indexer.ContractActorInputsStale:
 			// The request's capture can no longer be taken: capture the
 			// inputs again once they moved, and ask for them again.
 			delete(scheduled, pending.key)
 			if err := s.waitContractInputs(waitCtx, epoch); err != nil {
-				return ctx, contractWaitRefusal(err, 0)
+				return fallback(err, 0)
 			}
 		}
 		// Published, found published, or replaced by newer inputs: open the
@@ -226,8 +274,8 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 }
 
 // scheduleAndWaitContractAnalysis asks the scheduler for the pending inputs
-// and waits on the actor's promise; a full scheduler is waited out until its
-// capacity frees. A waiting contract RPC cannot be foreground demand that
+// and waits on the actor's promise. A runtime with publication custody returns
+// queue-full immediately for predecessor selection; legacy runtimes wait for capacity. A waiting contract RPC cannot be foreground demand that
 // parks its own producer: the counter balances cancellation, error and
 // callback panics.
 func (s *Server) scheduleAndWaitContractAnalysis(ctx context.Context, actor indexer.ContractActor, selected *graphview.RepoView, pending *pendingContractBinding, epoch uint64) (indexer.ContractActorStatus, time.Duration, error) {
@@ -243,6 +291,9 @@ func (s *Server) scheduleAndWaitContractAnalysis(ctx context.Context, actor inde
 		scheduled, err := runtime.Schedule(ctx, indexer.ContractScheduleRequest{Actor: actor, Key: pending.key, Inputs: pending.inputs, Source: source, Epoch: epoch})
 		var full *indexer.ContractQueueFullError
 		if errors.As(err, &full) {
+			if runtime.AcquireLastPublishedCohort != nil {
+				return indexer.ContractActorStatus{}, full.RetryAfter, err
+			}
 			if waitErr := runtime.WaitCapacity(ctx, capacity); waitErr != nil {
 				return indexer.ContractActorStatus{}, full.RetryAfter, fmt.Errorf("%w: %w", err, waitErr)
 			}
@@ -251,6 +302,7 @@ func (s *Server) scheduleAndWaitContractAnalysis(ctx context.Context, actor inde
 		if err != nil {
 			return indexer.ContractActorStatus{}, 0, err
 		}
+		pending.arrivalSeq = scheduled.ArrivalSeq
 		status, err := runtime.WaitActor(ctx, scheduled.Actor, scheduled.ArrivalSeq)
 		return status, status.RetryAfter, err
 	}
@@ -268,9 +320,10 @@ func (s *Server) waitContractInputs(ctx context.Context, since uint64) error {
 }
 
 type pendingContractBinding struct {
-	key    graph.ContractAttachmentKey
-	inputs *graphview.SelectedContractInputs
-	stale  bool
+	key        graph.ContractAttachmentKey
+	inputs     *graphview.SelectedContractInputs
+	stale      bool
+	arrivalSeq uint64
 }
 
 // contractConsumerRepos follows the same workspace/project/repo admission as
@@ -390,7 +443,24 @@ func decorateContractConsumerResult(ctx context.Context, result *mcp.CallToolRes
 	if status == nil || result == nil || result.IsError {
 		return result
 	}
-	fields := map[string]any{"capability": graphview.CapContracts, "state": status.state}
+	fresh := status.fresh
+	if result.Meta != nil {
+		if freshness, ok := result.Meta.AdditionalFields["freshness"].(map[string]any); ok {
+			if value, ok := freshness["fresh"].(bool); ok && !value {
+				fresh = false
+			}
+		}
+	}
+	text, isText := singleTextContent(result)
+	var object map[string]any
+	if isText && json.Unmarshal([]byte(text), &object) == nil && object != nil {
+		if freshness, ok := object["freshness"].(map[string]any); ok {
+			if value, ok := freshness["fresh"].(bool); ok && !value {
+				fresh = false
+			}
+		}
+	}
+	fields := map[string]any{"capability": graphview.CapContracts, "state": status.state, "fresh": fresh}
 	if status.reason != "" {
 		fields["reason"] = status.reason
 	}
@@ -399,7 +469,7 @@ func decorateContractConsumerResult(ctx context.Context, result *mcp.CallToolRes
 	if !ok {
 		return result
 	}
-	var object map[string]any
+	object = nil
 	if json.Unmarshal([]byte(text), &object) == nil && object != nil {
 		object["contract_analysis"] = fields
 		if body, err := json.Marshal(object); err == nil {
@@ -407,7 +477,7 @@ func decorateContractConsumerResult(ctx context.Context, result *mcp.CallToolRes
 		}
 	}
 	if status.state != graphview.StateComplete {
-		return rebuildTextResult(result, text+"\n\nContract analysis is incomplete; contract-derived rows are not certified current.")
+		return rebuildTextResult(result, text+"\n\nContract analysis is rebuilding; the served attachment is not certified current.")
 	}
 	return result
 }
