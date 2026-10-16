@@ -104,6 +104,7 @@ func TestContractCoreSelectedBackendColdRestageCarriesOnce(t *testing.T) {
 			ctx := context.Background()
 			const path = "fixture/retry.go"
 			target, backend := selectedBackendOverBuildingTarget(t, path)
+			backend.fullNamespace = true
 			require.NoError(t, backend.beginFullCoreNamespace(ctx))
 			_, err := stageRetryReceipt(t, backend, path, "v1")
 			require.NoError(t, err)

@@ -456,7 +456,9 @@ func (b *contractCoreStorageBackend) AcceptBoundaryMutation(ctx context.Context)
 func (b *contractCoreStorageBackend) beginFullCoreNamespace(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.cold {
+	// Sparse positive generations already journal their selected per-file
+	// changes. Their narrowed source walk is not a full namespace census.
+	if b.cold || b.generation > 0 && !b.fullNamespace {
 		return nil
 	}
 	changes := []contractCoreInputChange{{FilePath: b.repo + "/", Delta: contractBoundaryDelta{Scope: graph.ContractWorkScope{Unknown: true, Causes: []string{"full_core_census_pending"}}}}}
