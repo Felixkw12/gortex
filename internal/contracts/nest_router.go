@@ -2,7 +2,6 @@ package contracts
 
 import (
 	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -25,23 +24,6 @@ var (
 	}
 	nestControllersListRE = regexp.MustCompile(`controllers\s*:\s*\[([^\]]*)\]`)
 )
-
-// buildNestModulePrefixes resolves, across all scanned files, the mounted route
-// prefix for every NestJS controller class: it walks the RouterModule route
-// tree (module -> mounted prefix, inheriting parent paths through `children`),
-// maps each `@Module` to the controllers it declares, and composes the two into
-// controllerClass -> mounted prefix.
-func buildNestModulePrefixes(files map[string]bool, srcFor func(string) []byte) map[string]string {
-	paths := make([]string, 0, len(files))
-	facts := make(map[string]RouterFacts, len(files))
-	for path := range files {
-		paths = append(paths, path)
-		mp, cm := nestFileModuleFacts(string(srcFor(path)))
-		facts[path] = RouterFacts{ModulePrefix: mp, ControllerModule: cm}
-	}
-	sort.Strings(paths)
-	return joinNestModuleFacts(paths, facts)
-}
 
 func nestFileModuleFacts(text string) (map[string]string, map[string]string) {
 	modulePrefix := map[string]string{}
@@ -147,20 +129,6 @@ func extractNestModules(text string) []nestModule {
 		out = append(out, nestModule{name: name, controllers: controllers})
 	}
 	return out
-}
-
-// nestControllerClass returns the @Controller-decorated class name in a
-// contract's file — the key into the module-prefix map.
-func nestControllerClass(c Contract, srcFor func(string) []byte) string {
-	src := srcFor(c.FilePath)
-	if src == nil {
-		return ""
-	}
-	text := string(src)
-	if idx := strings.Index(text, "@Controller"); idx >= 0 {
-		return firstSubmatch(nestControllerClassRE, text[idx:])
-	}
-	return ""
 }
 
 // --- small parsing helpers ----------------------------------------------

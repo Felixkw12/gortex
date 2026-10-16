@@ -157,7 +157,7 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 	if s.cache != nil && c.report.Mode == viewmetrics.ContractModeDelta {
 		p.deltas = s.cache.deltas + 1
 	}
-	if !complete && s.cache != nil && !(s.continued && c.report.Mode == viewmetrics.ContractModeCold) {
+	if !complete && s.cache != nil && (!s.continued || c.report.Mode != viewmetrics.ContractModeCold) {
 		p.deltas = s.cache.deltas
 	}
 	p.indexReaders()

@@ -1060,9 +1060,10 @@ func TestContractSchedulerRegistryEvictsOnlyTheLeastRecentIdleActor(t *testing.T
 	for i := 0; i < contractSchedulerMaxActors; i++ {
 		id := NewContractActor(fmt.Sprintf("checkout-%d", i), []string{"r"})
 		a := c.registerLocked(id, base.Add(time.Duration(i)*time.Second))
-		if i == 0 {
+		switch i {
+		case 0:
 			active, a.state = id, contractActorRunning
-		} else if i == 1 {
+		case 1:
 			oldestIdle = id
 		}
 	}
