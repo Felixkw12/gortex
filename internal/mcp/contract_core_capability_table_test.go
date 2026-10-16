@@ -404,6 +404,7 @@ func contractCoreNonStoreInterfaces() []contractCoreCapName {
 		{"OverlayDetachedNodeReader", capOf[graph.OverlayDetachedNodeReader]},
 		{"OverlayDetachedSummaryReader", capOf[graph.OverlayDetachedSummaryReader]},
 		{"OverlayLayerConstantValueReader", capOf[graph.OverlayLayerConstantValueReader]},
+		{"OverlayLayerSemanticBindingTypeReader", capOf[graph.OverlayLayerSemanticBindingTypeReader]},
 		{"OverlayLayerEdgeEndpointReader", capOf[graph.OverlayLayerEdgeEndpointReader]},
 		{"OverlayLayerNodeKindsByIDsReader", capOf[graph.OverlayLayerNodeKindsByIDsReader]},
 		{"OverlayLayerOutgoingMetadataReader", capOf[graph.OverlayLayerOutgoingMetadataReader]},

@@ -43,6 +43,7 @@ var editDeltaAbsentCapabilities = map[string]string{
 	"anonymous{EdgesByKindKindFirst}":             "asserted by the delta on the store at the bottom of its own stack (the kind-first scan of a whole corpus), never on the delta",
 	"graph.OverlayLayerProjectionReader":          "a capability of an immutable overlay layer the delta composes over, asserted on the layers below, never on the delta",
 	"graph.OverlayLayerConstantValueReader":       "checked physical-layer constant projection; DeltaWriter is the composed reader that resolves accepted file ownership, not a physical ancestry layer",
+	"graph.OverlayLayerSemanticBindingTypeReader": "checked physical-layer compiler bindings; the selected OverlaidView composes accepted file ownership, while DeltaWriter is not a persisted ancestry layer",
 	"graph.OverlayLayerContractProjectionReader":  "checked physical-layer contract projection; DeltaWriter is the composed reader that applies visibility and sibling groups, not a physical ancestry layer",
 	"graph.OverlayLayerContractFileNodesReader":   "checked physical-layer file-node projection; ContractFileNodesContext dispatches DeltaWriter explicitly through its composed view, preserving delta ownership instead of forwarding a physical layer",
 	"graph.OverlayLayerScopedNameReader":          "a capability of the layers a delta composes over, not of a store: the engine asks it of each layer below the delta, and a DeltaWriter is never a layer below another delta",
