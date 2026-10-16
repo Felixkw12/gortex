@@ -1090,3 +1090,133 @@ func TestContractSchedulerRegistryEvictsOnlyTheLeastRecentIdleActor(t *testing.T
 		t.Fatal("eviction must notify waiters on the removed actor")
 	}
 }
+
+func TestContractSchedulerContinuesPrimaryFillAfterOtherActor(t *testing.T) {
+	p := newSchedulerProbe(t, nil)
+	p.hold("a/@k")
+	p.hold("b/@k")
+	resumed := make(chan struct{})
+	resume := make(chan struct{})
+	var resumedOnce sync.Once
+	defer resumedOnce.Do(func() { close(resume) })
+	p.c.run = func(job *contractAnalysisJob) string {
+		if job.snapshot.Key.InputFingerprint == "a/@k" {
+			p.mu.Lock()
+			n := p.jobs["a/@k"]
+			p.mu.Unlock()
+			if n == 1 {
+				close(resumed)
+				select {
+				case <-resume:
+				case <-p.c.ctx.Done():
+				}
+			}
+		}
+		return p.run(job)
+	}
+	p.outcome = func(key string, n int) string {
+		if key == "a/@k" && n == 1 {
+			return viewmetrics.ContractJobFillContinued
+		}
+		return viewmetrics.ContractJobPublished
+	}
+	a := p.schedule("", []string{"a"}, "a", "k")
+	p.waitStarts(1)
+	b := p.schedule("", []string{"b"}, "b", "k")
+	require.Eventually(t, func() bool {
+		p.c.mu.Lock()
+		actor := p.c.actors[a.Actor]
+		p.c.mu.Unlock()
+		return p.c.otherActorWaiting(actor)
+	}, 10*time.Second, time.Millisecond)
+	p.release("a/@k")
+	require.Equal(t, []string{"a/@k", "b/@k"}, p.waitStarts(2))
+	p.c.mu.Lock()
+	actor := p.c.actors[a.Actor]
+	require.Less(t, actor.resolved, a.ArrivalSeq, "continuation does not resolve the attachment waiter")
+	require.Zero(t, actor.failures)
+	require.Zero(t, actor.stalled.cycles)
+	require.Empty(t, actor.lastPublished.key)
+	p.c.mu.Unlock()
+	require.GreaterOrEqual(t, p.releases.Load(), int64(1), "first snapshot released before another actor runs")
+	p.release("b/@k")
+	p.wait(b)
+	select {
+	case <-resumed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("primary fill was not recaptured")
+	}
+	p.mu.Lock()
+	require.Equal(t, 2, p.captures["a/@k"])
+	p.mu.Unlock()
+	resumedOnce.Do(func() { close(resume) })
+	p.wait(a)
+}
+
+func TestContractSchedulerLinkedJobCannotContinueWithoutFreshSource(t *testing.T) {
+	p := newSchedulerProbe(t, nil)
+	var released atomic.Int64
+	observed := make(chan bool, 1)
+	p.c.run = func(job *contractAnalysisJob) string {
+		observed <- job.otherActorWaiting == nil
+		return p.run(job)
+	}
+	result, err := p.c.Schedule(t.Context(), ContractScheduleRequest{Actor: NewContractActor("wt", []string{"r"}), Key: graph.ContractAttachmentKey{RepoPrefix: "r", CheckoutID: "wt"}, Inputs: schedulerInputs([]string{"r"}, "k"), Source: &ContractCaptureSource{onRelease: func() { released.Add(1) }}})
+	require.NoError(t, err)
+	p.wait(result)
+	require.True(t, <-observed, "linked jobs keep their complete single-capture execution path")
+	require.EqualValues(t, 1, released.Load(), "the prepared source is consumed exactly once")
+}
+
+func TestContractSchedulerLostFillCheckpointRunsToCompletion(t *testing.T) {
+	p := newSchedulerProbe(t, nil)
+	callbacks := make(chan bool, 2)
+	loss := make(chan ContractFillCheckpointStatus, 1)
+	p.c.run = func(job *contractAnalysisJob) string {
+		callbacks <- job.otherActorWaiting != nil
+		if job.otherActorWaiting == nil {
+			loss <- p.c.Status(NewContractActor("", []string{"a"})).FillCheckpoint
+		}
+		return p.run(job)
+	}
+	p.outcome = func(_ string, n int) string {
+		if n == 1 {
+			// This fake retains no checkpoint, like a rejected LRU admission.
+			return viewmetrics.ContractJobFillContinued
+		}
+		return viewmetrics.ContractJobPublished
+	}
+	a := p.schedule("", []string{"a"}, "a", "k")
+	p.wait(a)
+	require.True(t, <-callbacks)
+	require.False(t, <-callbacks, "missing partial state must not repeatedly refill the same prefix")
+	require.Equal(t, []string{"a/@k", "a/@k"}, p.started())
+	require.Equal(t, ContractFillCheckpointMissing, <-loss, "loss is explicitly observable; this fallback still needs bounded fair custody")
+}
+
+func TestContractSchedulerNewSequenceRetainsSuccessfulContinuation(t *testing.T) {
+	p := newSchedulerProbe(t, nil)
+	p.hold("a/@old")
+	observed := make(chan bool, 1)
+	p.c.run = func(job *contractAnalysisJob) string {
+		if job.snapshot.Key.InputFingerprint == "a/@old" {
+			unit := &contractUnit{path: "a/file.go"}
+			job.delta.cache = &contractDeltaCache{identity: job.delta.identity, units: map[string]*contractUnit{unit.path: unit}, continuation: &contractFillContinuation{identity: job.delta.identity, units: []contractFillUnitProof{{unit: unit}}}}
+		} else {
+			observed <- job.delta.cache != nil && job.delta.cache.continuation != nil
+		}
+		return p.run(job)
+	}
+	p.outcome = func(key string, _ int) string {
+		if key == "a/@old" {
+			return viewmetrics.ContractJobFillContinued
+		}
+		return viewmetrics.ContractJobPublished
+	}
+	p.schedule("", []string{"a"}, "a", "old")
+	p.waitStarts(1)
+	newer := p.schedule("", []string{"a"}, "a", "new")
+	p.release("a/@old")
+	p.wait(newer)
+	require.True(t, <-observed, "a new actor sequence alone does not erase an already proven obligation anchor")
+}

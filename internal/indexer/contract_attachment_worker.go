@@ -146,6 +146,8 @@ type ContractFollowupRequest struct {
 	// after a short pause.
 	PublishedEpoch func() uint64
 	WaitPublished  func(context.Context, uint64, time.Time) bool
+	// OtherActorWaiting permits a fill to return a resumable checkpoint.
+	OtherActorWaiting func() bool
 	// convergenceHooks are test seams at the job's interleaving points.
 	convergenceHooks *contractConvergenceHooks
 	delta            *contractDeltaSession
@@ -219,6 +221,7 @@ type ContractFollowupBatchRequest struct {
 	Yield                  func(context.Context) error
 	PublishedEpoch         func() uint64
 	WaitPublished          func(context.Context, uint64, time.Time) bool
+	OtherActorWaiting      func() bool
 	convergenceHooks       *contractConvergenceHooks
 	delta                  *contractDeltaSession
 }
@@ -296,7 +299,7 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 		snap := req.Snapshot
 		snap.Key, snap.Work, snap.Release = target.Key, target.Work, func() {}
 		single := ContractFollowupRequest{Snapshot: snap, RebuildReason: req.RebuildReason, Payload: target.Payload, Catalog: target.Catalog, Registry: req.Registry, Config: req.Config, Logger: req.Logger, Leases: req.Leases, WorkspaceID: req.WorkspaceID, ProjectID: req.ProjectID, RepoConfigs: req.RepoConfigs, ScratchParent: req.ScratchParent, Yield: req.Yield,
-			PublishedEpoch: req.PublishedEpoch, WaitPublished: req.WaitPublished, convergenceHooks: req.convergenceHooks, delta: req.delta}
+			PublishedEpoch: req.PublishedEpoch, WaitPublished: req.WaitPublished, OtherActorWaiting: req.OtherActorWaiting, convergenceHooks: req.convergenceHooks, delta: req.delta}
 		report, targetErr := buildContractFollowupPrepared(ctx, single, prepared)
 		batch.Targets[i].Report = report
 		if targetErr != nil {

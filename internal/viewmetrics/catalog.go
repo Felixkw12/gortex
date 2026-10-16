@@ -263,6 +263,7 @@ var contractModes = []string{ContractModeCold, ContractModeFill, ContractModeDel
 // superseded outcomes name why the job's inputs moved before it could publish.
 const (
 	ContractJobPublished                = "published"
+	ContractJobFillContinued            = "fill_continued"
 	ContractJobSupersededKeyMoved       = "superseded_key_moved"
 	ContractJobSupersededInputsMoving   = "superseded_inputs_moving"
 	ContractJobSupersededReadUnsettled  = "superseded_read_unsettled"
@@ -781,7 +782,7 @@ var catalog = map[string]spec{
 	ContractAnalysisJobsTotal: {kind: kindCounter, labels: []labelSpec{
 		{name: LabelMode, values: contractModes},
 		{name: LabelOutcome, values: []string{
-			ContractJobPublished, ContractJobSupersededKeyMoved,
+			ContractJobPublished, ContractJobFillContinued, ContractJobSupersededKeyMoved,
 			ContractJobSupersededInputsMoving, ContractJobSupersededReadUnsettled,
 			ContractJobSupersededPublishRefused, ContractJobPreempted,
 			ContractJobFailed, ContractJobPanic, ContractJobDeferred,

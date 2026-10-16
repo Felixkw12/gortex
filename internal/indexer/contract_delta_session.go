@@ -17,6 +17,7 @@ import (
 // A session owns the actor's values exclusively while its LRU reservation
 // remains charged. Fresh evidence, postpasses and seeds belong only to the job.
 type contractDeltaSession struct {
+	continued                                                    bool
 	cache                                                        *contractDeltaCache
 	identity                                                     contractDeltaIdentity
 	knownRaw                                                     map[*contractUnit]int64
@@ -156,10 +157,13 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 	if s.cache != nil && c.report.Mode == viewmetrics.ContractModeDelta {
 		p.deltas = s.cache.deltas + 1
 	}
-	if !complete && s.cache != nil {
+	if !complete && s.cache != nil && !(s.continued && c.report.Mode == viewmetrics.ContractModeCold) {
 		p.deltas = s.cache.deltas
 	}
 	p.indexReaders()
+	if s.continued && c.ctx.Err() == nil {
+		p.continuation = checkpointContractFill(c, p, pool)
+	}
 	// Charge proof structures without traversing unchanged raw metadata again.
 	proofUnits := make(map[string]*contractUnit, len(p.units))
 	for path, unit := range p.units {
@@ -172,9 +176,11 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 	}
 	withoutUnits := *p
 	withoutUnits.units = nil
+	withoutUnits.continuation = nil
 	p.proofStringCount, p.proofStringBytes = pool.seal()
 	pooledBacking := p.proofStringBytes
 	p.retainedBytes = contractRetainedSizeMode(reflect.ValueOf(&withoutUnits), false) + contractRetainedSizeMode(reflect.ValueOf(proofUnits), false) + pooledBacking
+	p.retainedBytes += p.continuation.metadataSize()
 	proofBytes := p.retainedBytes
 	rawBytes := int64(0)
 	for _, unit := range p.units {

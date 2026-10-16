@@ -60,9 +60,10 @@ type contractAnalysisJob struct {
 	targets     []ContractFollowupTarget
 	// trigger is what queued the job and queuedAt when; capture is how long
 	// capturing its snapshot took.
-	trigger  string
-	queuedAt time.Time
-	capture  time.Duration
+	trigger           string
+	queuedAt          time.Time
+	capture           time.Duration
+	otherActorWaiting func() bool
 }
 
 // contractJobTriggerInterest queues a job for a request's interest in its key.
@@ -302,8 +303,8 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 		zap.String("trigger", job.trigger), zap.Float64("since_trigger_ms", contractMillis(dispatch)),
 		zap.Float64("since_accept_ms", sinceAccept), zap.Float64("capture_ms", contractMillis(job.capture)))
 	report, err := RunContractFollowupBatch(c.ctx, ContractFollowupBatchRequest{Snapshot: job.snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: c.options.Registry, Config: c.options.Config, RepoConfigs: job.snapshot.RepoConfigs, Logger: c.options.Logger, Leases: c.options.Leases, ScratchParent: c.options.ScratchParent, Yield: c.options.Yield,
-		PublishedEpoch: c.publishedEpoch, WaitPublished: c.waitPublished, delta: job.delta})
-	if err != nil {
+		PublishedEpoch: c.publishedEpoch, WaitPublished: c.waitPublished, OtherActorWaiting: job.otherActorWaiting, delta: job.delta})
+	if err != nil && !errors.As(err, new(*ContractFillContinued)) {
 		c.options.Logger.Warn("contract cohort analysis failed", zap.Error(err))
 	}
 	var targetErr error
@@ -313,7 +314,9 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 		}
 		if result.Err != nil {
 			targetErr = result.Err
-			c.options.Logger.Warn("contract target publication failed", zap.String("repo", result.Key.RepoPrefix), zap.Error(result.Err))
+			if !errors.As(result.Err, new(*ContractFillContinued)) {
+				c.options.Logger.Warn("contract target publication failed", zap.String("repo", result.Key.RepoPrefix), zap.Error(result.Err))
+			}
 		}
 	}
 	if err == nil {

@@ -3,6 +3,7 @@ package indexer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -121,11 +122,19 @@ var (
 	errContractJobReadUnsettled = errors.New("contract analysis: reads did not settle through consecutive rounds that proved nothing")
 )
 
+// ContractFillContinued ends a fill at a proven checkpoint so another actor
+// can use the job slot. It neither publishes nor settles attachment waiters.
+type ContractFillContinued struct{}
+
+func (*ContractFillContinued) Error() string { return "contract analysis: fill checkpoint continued" }
+
 // contractJobOutcomeOf classifies a job error for the jobs counter.
 func contractJobOutcomeOf(err error) string {
 	switch {
 	case err == nil:
 		return viewmetrics.ContractJobPublished
+	case errors.As(err, new(*ContractFillContinued)):
+		return viewmetrics.ContractJobFillContinued
 	case errors.Is(err, errContractJobKeyMoved):
 		return viewmetrics.ContractJobSupersededKeyMoved
 	case errors.Is(err, errContractJobInputsMoving):
@@ -802,16 +811,20 @@ type contractConvergenceHooks struct {
 }
 
 type contractConvergence struct {
-	coverage *contractWorkCoverage
-	ctx      context.Context
-	req      ContractFollowupRequest
-	snap     ContractFollowupSnapshot
-	repos    map[string]bool
-	logger   *zap.Logger
-	files    map[string]ContractFollowupFile
-	live     map[string]bool
-	excluded map[string]bool
-	units    map[string]*contractUnit
+	coverage         *contractWorkCoverage
+	fillReadCensus   map[*contractUnit][sha256.Size]byte
+	fillCensusDigest [sha256.Size]byte
+	fillCensusClock  uint64
+	fillCensusKnown  bool
+	ctx              context.Context
+	req              ContractFollowupRequest
+	snap             ContractFollowupSnapshot
+	repos            map[string]bool
+	logger           *zap.Logger
+	files            map[string]ContractFollowupFile
+	live             map[string]bool
+	excluded         map[string]bool
+	units            map[string]*contractUnit
 	// suspect units are kept with their recorded reads but are not proven at
 	// the current clock: an owner or a key they looked up moved, or their own
 	// receipt was rewritten with the same identity. They are revalidated by
@@ -1857,6 +1870,7 @@ func (c *contractConvergence) prove(units []*contractUnit, r0 ContractFollowupSc
 			guards = append(guards, owner)
 		}
 		c.coverage.extracted(unit, guards...)
+		c.noteFillRead(unit)
 		proven = append(proven, unit)
 	}
 	return proven, nil
@@ -2252,6 +2266,7 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 			p.unit.round, p.unit.stamp, p.unit.torn = clock, p.own, nil
 			if p.forced {
 				c.coverage.record(p.unit, p.bracket)
+				c.noteFillRead(p.unit)
 			}
 			c.report.Revalidated++
 			proven = append(proven, p.unit)
@@ -2745,6 +2760,9 @@ func (c *contractConvergence) rounds(pending map[string]string) error {
 				}
 			}
 			if len(suspects) > 0 {
+				if c.fillContended() {
+					suspects = suspects[:min(16, len(suspects))]
+				}
 				for _, path := range suspects {
 					delete(pending, path)
 				}
@@ -2769,12 +2787,12 @@ func (c *contractConvergence) rounds(pending map[string]string) error {
 				continue
 			}
 			paths = extracted
-			for _, path := range paths {
-				countContractFiles(pending[path], 1)
-			}
 			size := contractRoundFiles
 			if c.hooks != nil && c.hooks.roundFiles > 0 {
 				size = c.hooks.roundFiles
+			}
+			if c.fillContended() {
+				size = min(size, 16)
 			}
 			// A first round is not accounted, but its retry waits for what
 			// its refusals name, beside what the files already unproven
@@ -2784,6 +2802,9 @@ func (c *contractConvergence) rounds(pending map[string]string) error {
 			}
 			for start := 0; start < len(paths); start += size {
 				chunk := paths[start:min(start+size, len(paths))]
+				for _, path := range chunk {
+					countContractFiles(pending[path], 1)
+				}
 				epoch := c.wake()
 				proven, missed, err := c.round(chunk, false)
 				if err != nil {
@@ -2793,6 +2814,9 @@ func (c *contractConvergence) rounds(pending map[string]string) error {
 					delete(pending, path)
 				}
 				c.accept(proven, pending)
+				if err := c.continueFill(len(proven), len(pending) > 0 || len(unproven) > 0 || len(missed) > 0); err != nil {
+					return err
+				}
 				if len(missed) > 0 {
 					if len(unproven) == 0 {
 						since = epoch
@@ -2840,6 +2864,26 @@ func (c *contractConvergence) rounds(pending map[string]string) error {
 	return nil
 }
 
+// fillCanContinue restricts cooperative checkpoints to resumable cache jobs.
+func (c *contractConvergence) fillCanContinue() bool {
+	return c.req.delta != nil && (c.report.Mode == viewmetrics.ContractModeFill || c.report.Mode == viewmetrics.ContractModeCold) && c.req.OtherActorWaiting != nil
+}
+
+func (c *contractConvergence) fillContended() bool {
+	return c.fillCanContinue() && c.req.OtherActorWaiting()
+}
+
+func (c *contractConvergence) continueFill(proven int, more bool) error {
+	if err := c.ctx.Err(); err != nil {
+		return err
+	}
+	if proven > 0 && more && c.fillContended() {
+		c.req.delta.continued = true
+		return &ContractFillContinued{}
+	}
+	return nil
+}
+
 // settle proves paths in point rounds, right after a wake or at an
 // iteration's start: a path with no unit is extracted in its own point round,
 // then the suspects are revalidated together, and one whose answers changed is
@@ -2867,33 +2911,43 @@ func (c *contractConvergence) settle(paths []string, pending map[string]string, 
 		}
 		missed = append(missed, miss...)
 	}
-	extractEach := func(paths []string) error {
+	extractEach := func(paths []string, moreAfter bool) error {
 		countContractFiles(reason, len(paths))
-		for _, path := range paths {
+		for index, path := range paths {
 			epoch := c.wake()
 			proven, miss, err := c.round([]string{path}, true)
 			if err != nil {
 				return err
 			}
 			c.accept(proven, pending)
+			if err := c.continueFill(len(proven), moreAfter || index+1 < len(paths) || len(pending) > 0 || len(missed) > 0 || len(miss) > 0); err != nil {
+				return err
+			}
 			note(epoch, miss)
 		}
 		return nil
 	}
 	// Files whose own content moved go first: their new declarations are
 	// what a suspect's reads are checked against.
-	if err := extractEach(retried); err != nil {
+	if err := extractEach(retried, len(suspects) > 0); err != nil {
 		return 0, nil, since, err
 	}
-	if len(suspects) > 0 {
+	size := max(1, len(suspects))
+	if c.fillContended() {
+		size = min(size, 16)
+	}
+	for start := 0; start < len(suspects); start += size {
 		epoch := c.wake()
-		proven, extract, miss, err := c.revalidate(suspects)
+		proven, extract, miss, err := c.revalidate(suspects[start:min(start+size, len(suspects))])
 		if err != nil {
 			return 0, nil, since, err
 		}
 		c.accept(proven, pending)
+		if err := c.continueFill(len(proven), start+size < len(suspects) || len(extract) > 0 || len(pending) > 0 || len(missed) > 0 || len(miss) > 0); err != nil {
+			return 0, nil, since, err
+		}
 		note(epoch, miss)
-		if err := extractEach(extract); err != nil {
+		if err := extractEach(extract, start+size < len(suspects)); err != nil {
 			return 0, nil, since, err
 		}
 	}
@@ -2936,7 +2990,11 @@ func (c *contractConvergence) run() error {
 			return readErr
 		}
 		c.coverage.receiptKeys(receipts)
-		plan := session.cache.plan(session.identity, first.Census, receipts, session.membershipUnknown || contractDeltaMembershipUnknown(c.snap.Work))
+		membershipUnknown := session.membershipUnknown || contractDeltaMembershipUnknown(c.snap.Work)
+		if session.cache != nil && session.cache.continuation.resumesBarrier(session.identity, c.coverage.work) {
+			membershipUnknown = false
+		}
+		plan := session.cache.plan(session.identity, first.Census, receipts, membershipUnknown)
 		c.report.Mode, c.report.CacheReason, c.report.ChangedFiles = plan.mode, plan.reason, slices.Clone(plan.extract)
 		frontier, _ := json.Marshal(plan.extract)
 		c.logger.Info("contract delta plan", zap.String("mode", plan.mode), zap.String("reason", plan.reason), zap.Int("extract_count", len(plan.extract)), zap.Strings("extract_paths", plan.extract[:min(16, len(plan.extract))]), zap.String("extract_digest", contractInputHash(frontier)), zap.Int("revalidate_count", len(plan.revalidate)), zap.Strings("revalidate_paths", plan.revalidate[:min(16, len(plan.revalidate))]), zap.Int("removed_count", len(plan.removed)))
@@ -2944,6 +3002,9 @@ func (c *contractConvergence) run() error {
 			c.report.RebuildReason = ContractFollowupChangedBoundary
 		} else {
 			c.report.RebuildReason = ContractFollowupColdBaseline
+		}
+		if session.cache != nil {
+			session.cache.continuation.resume(c, session.cache)
 		}
 		for _, path := range plan.removed {
 			c.dropUnit(path)

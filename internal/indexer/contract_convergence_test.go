@@ -303,14 +303,16 @@ func (f *contractJobFixture) job(hooks *contractConvergenceHooks, yield func(con
 // layer's creation order, a snapshot adjustment, the Published source and the
 // job's logger.
 type contractFixtureJob struct {
-	cache  **contractDeltaCache
-	hooks  *contractConvergenceHooks
-	yield  func(context.Context) error
-	layer  int
-	adjust func(*ContractFollowupSnapshot)
-	epoch  func() uint64
-	wait   func(context.Context, uint64, time.Time) bool
-	logger *zap.Logger
+	otherActorWaiting func() bool
+	scratchParent     string
+	cache             **contractDeltaCache
+	hooks             *contractConvergenceHooks
+	yield             func(context.Context) error
+	layer             int
+	adjust            func(*ContractFollowupSnapshot)
+	epoch             func() uint64
+	wait              func(context.Context, uint64, time.Time) bool
+	logger            *zap.Logger
 }
 
 // runFixtureContractJob captures the primary fixture repository's current
@@ -339,7 +341,7 @@ func runFixtureContractJob(t *testing.T, options ContractFollowupCaptureOptions,
 		logger = zap.NewNop()
 	}
 	req := ContractFollowupRequest{RebuildReason: ContractFollowupUnknownInterval, Snapshot: snapshot, Payload: payload, Catalog: targets[0].Catalog, Registry: options.Registry, Config: options.Config, RepoConfigs: snapshot.RepoConfigs, Leases: options.Materializer.Leases, Logger: logger, Yield: yield,
-		PublishedEpoch: job.epoch, WaitPublished: job.wait, convergenceHooks: job.hooks}
+		PublishedEpoch: job.epoch, WaitPublished: job.wait, OtherActorWaiting: job.otherActorWaiting, ScratchParent: job.scratchParent, convergenceHooks: job.hooks}
 	if job.cache != nil {
 		session, sessionErr := newContractDeltaSession(*job.cache, snapshot, options.Config)
 		require.NoError(t, sessionErr)

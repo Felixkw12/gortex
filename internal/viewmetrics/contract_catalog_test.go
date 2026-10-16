@@ -26,7 +26,7 @@ func contractSeries() []struct {
 	var rows []row
 	modes := []string{viewmetrics.ContractModeCold, viewmetrics.ContractModeFill, viewmetrics.ContractModeDelta}
 	outcomes := []string{
-		viewmetrics.ContractJobPublished, viewmetrics.ContractJobSupersededKeyMoved,
+		viewmetrics.ContractJobPublished, viewmetrics.ContractJobFillContinued, viewmetrics.ContractJobSupersededKeyMoved,
 		viewmetrics.ContractJobSupersededInputsMoving, viewmetrics.ContractJobSupersededReadUnsettled,
 		viewmetrics.ContractJobSupersededPublishRefused, viewmetrics.ContractJobPreempted,
 		viewmetrics.ContractJobFailed, viewmetrics.ContractJobPanic, viewmetrics.ContractJobDeferred,

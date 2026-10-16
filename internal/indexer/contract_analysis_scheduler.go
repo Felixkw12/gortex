@@ -198,14 +198,27 @@ const (
 	ContractActorKeyMoved ContractActorResult = "key_moved"
 )
 
+// ContractFillCheckpointStatus distinguishes retained progress from losing its
+// continuation authority. A loss never means an attachment was published.
+type ContractFillCheckpointStatus string
+
+const (
+	ContractFillCheckpointNone     ContractFillCheckpointStatus = ""
+	ContractFillCheckpointRetained ContractFillCheckpointStatus = "retained"
+	ContractFillCheckpointMissing  ContractFillCheckpointStatus = "missing"
+	ContractFillCheckpointEvicted  ContractFillCheckpointStatus = "evicted"
+	ContractFillCheckpointRejected ContractFillCheckpointStatus = "rejected"
+)
+
 // ContractActorStatus is an actor's state and, for WaitActor, how the seq
 // waited on resolved.
 type ContractActorStatus struct {
-	Result     ContractActorResult
-	Seq        uint64
-	State      string
-	Stalled    bool
-	RetryAfter time.Duration
+	FillCheckpoint ContractFillCheckpointStatus
+	Result         ContractActorResult
+	Seq            uint64
+	State          string
+	Stalled        bool
+	RetryAfter     time.Duration
 }
 
 type contractActorState int
@@ -313,9 +326,12 @@ type contractActor struct {
 	interestUntil time.Time
 	// interestExpired remembers work suspended when its interest ran out.
 	interestExpired bool
-	lastUsed        time.Time
-	seq             uint64
-	changed         chan struct{}
+	// A lost/rejected partial checkpoint must not restart the same prefix forever.
+	fillNeedsCheckpoint bool
+	fillCheckpoint      ContractFillCheckpointStatus
+	lastUsed            time.Time
+	seq                 uint64
+	changed             chan struct{}
 }
 
 func (a *contractActor) primary() bool { return a.id.Checkout == "" }
@@ -710,7 +726,7 @@ func (c *ContractAnalysisCoordinator) Status(actor ContractActor) ContractActorS
 	if a == nil {
 		return ContractActorStatus{State: contractActorIdle.String()}
 	}
-	return ContractActorStatus{Result: a.resolvedResult, Seq: a.resolved, State: a.state.String(), Stalled: a.stalled.cycles > 0, RetryAfter: c.retryAfterLocked()}
+	return ContractActorStatus{Result: a.resolvedResult, Seq: a.resolved, State: a.state.String(), FillCheckpoint: a.fillCheckpoint, Stalled: a.stalled.cycles > 0, RetryAfter: c.retryAfterLocked()}
 }
 
 // WaitActor waits until the actor's promise for seq resolves: a job published
@@ -730,7 +746,7 @@ func (c *ContractAnalysisCoordinator) WaitActor(ctx context.Context, actor Contr
 			// An evicted actor had no work: ask again.
 			return ContractActorStatus{Result: ContractActorKeyMoved, Seq: seq}, nil
 		}
-		status := ContractActorStatus{Seq: seq, State: a.state.String(), Stalled: a.stalled.cycles > 0, RetryAfter: c.retryAfterLocked()}
+		status := ContractActorStatus{Seq: seq, State: a.state.String(), FillCheckpoint: a.fillCheckpoint, Stalled: a.stalled.cycles > 0, RetryAfter: c.retryAfterLocked()}
 		switch {
 		case a.lastPublished.seq >= seq:
 			status.Result = ContractActorPublished
@@ -1294,6 +1310,16 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	job := &contractAnalysisJob{id: id, snapshot: snapshot, targets: targets, trigger: trigger, queuedAt: triggeredAt, capture: captureDuration}
 	c.mu.Lock()
 	cached := c.deltaCaches.borrow(a.id)
+	canContinueFill := !a.fillNeedsCheckpoint || (cached != nil && cached.continuation != nil)
+	if a.fillNeedsCheckpoint && !canContinueFill {
+		switch a.fillCheckpoint {
+		case ContractFillCheckpointRetained:
+			a.fillCheckpoint = ContractFillCheckpointEvicted
+		case ContractFillCheckpointRejected:
+		default:
+			a.fillCheckpoint = ContractFillCheckpointMissing
+		}
+	}
 	retainedBytes := c.deltaCaches.bytes
 	cacheComplete, cacheBytes := false, int64(0)
 	if cached != nil {
@@ -1313,13 +1339,29 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 		return
 	}
 	job.delta = session
+	if a.primary() && canContinueFill {
+		job.otherActorWaiting = func() bool { return c.otherActorWaiting(a) }
+	}
 	// Registered after capture succeeds and before the body starts. Returning
 	// cache custody precedes panic recovery; a panic discards its unproven state.
 	returnedCache := false
 	returnCache := func(p *contractDeltaCache) {
 		if !returnedCache {
 			c.mu.Lock()
+			if p != nil && (ctx.Err() != nil) {
+				p.continuation = nil
+			}
 			admission := c.deltaCaches.put(a.id, p)
+			if session.continued {
+				switch {
+				case p == nil || p.continuation == nil:
+					a.fillCheckpoint = ContractFillCheckpointMissing
+				case admission.reason != "admitted":
+					a.fillCheckpoint = ContractFillCheckpointRejected
+				default:
+					a.fillCheckpoint = ContractFillCheckpointRetained
+				}
+			}
 			c.mu.Unlock()
 			returnedCache = true
 			c.options.Logger.Info("contract cache admission", zap.String("actor", a.id.String()), zap.String("reason", admission.reason), zap.Int64("requested_bytes", admission.requested), zap.Int64("budget_bytes", admission.budget), zap.Int64("retained_bytes", admission.retained), zap.Int("evicted", admission.evicted), zap.Bool("checkpoint_present", p != nil))
@@ -1353,6 +1395,18 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	c.endJob(a, want, outcome, time.Since(body), job.publication)
 }
 
+// otherActorWaiting includes dispatchers already waiting for a global slot.
+func (c *ContractAnalysisCoordinator) otherActorWaiting(current *contractActor) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, actor := range c.actors {
+		if actor != current && (actor.state == contractActorQueued || actor.state == contractActorCapturing) {
+			return true
+		}
+	}
+	return false
+}
+
 // endJob moves an actor out of its job by how the job ended.
 func (c *ContractAnalysisCoordinator) endJob(a *contractActor, want contractActorWant, outcome string, elapsed time.Duration, publication ...*ContractPublishedCohort) {
 	// Job-owned proof is immutable once installed. Clone corpus-sized values
@@ -1383,7 +1437,14 @@ func (c *ContractAnalysisCoordinator) endJob(a *contractActor, want contractActo
 		a.lastPublished = contractActorKeySeq{want.key, want.seq}
 		a.resolveLocked(want.seq, ContractActorNoop)
 		c.setStateLocked(a, contractActorIdle)
+	case viewmetrics.ContractJobFillContinued:
+		a.fillNeedsCheckpoint = true
+		// Cache custody and all job resources returned before this transition.
+		// This is scheduling progress, not an attachment result or retry failure.
+		c.enqueueLocked(a, contractJobTriggerRequeue, now)
 	case viewmetrics.ContractJobPublished:
+		a.fillNeedsCheckpoint = false
+		a.fillCheckpoint = ContractFillCheckpointNone
 		if owned != nil {
 			a.lastCohort = owned
 		}
