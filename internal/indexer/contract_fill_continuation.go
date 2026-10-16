@@ -11,7 +11,8 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// This proof belongs only to an unfinished installation. Paths, full-row
+// This proof belongs to one captured installation, including completed
+// namespace debt retained in immutable ancestry. Paths, full-row
 // identities and guard indices are shared across all of its admitted units.
 // Unit pointers alias exactly the immutable units in the same checkpoint;
 // guard stamps come from that checkpoint's immutable change-clock map.

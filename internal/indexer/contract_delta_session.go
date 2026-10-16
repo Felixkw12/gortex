@@ -172,7 +172,12 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 		}
 	}
 	p.indexReaders()
-	if s.continued && c.ctx.Err() == nil {
+	// Immutable selected ancestry retains its original namespace debt after
+	// publication. Keep the same guarded continuation proof after a complete
+	// broad capture, so identical historical barriers need not force another
+	// cold extraction. New barriers and every changed own/read guard still
+	// require the ordinary current-job proof.
+	if (s.continued || complete && c.coverage.broad) && c.ctx.Err() == nil {
 		p.continuation = checkpointContractFill(c, p, pool)
 	}
 	// Charge proof structures without traversing unchanged raw metadata again.
