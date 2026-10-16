@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -651,10 +652,7 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 			if err != nil {
 				return nil, err
 			}
-			if contractInputHash(bytes) != sourceFingerprint {
-				return nil, errContractSourceMoved
-			}
-			return bytes, nil
+			return contractPinnedSourceAtFingerprint(bytes, sourceFingerprint)
 		}
 		snapshot.Seeds = func(ctx context.Context, repo string) ([]*graph.Node, []*graph.Edge, bool, error) {
 			handles := handlesByRepo[repo]
@@ -791,4 +789,23 @@ func captureAcceptedContractInventory(ctx context.Context, core graph.Reader, ha
 		return nil, err
 	}
 	return out, nil
+}
+
+// Git text checkouts can carry CRLF while their accepted tree bytes are LF.
+// Recover only byte-for-byte accepted content: the full receipt fingerprint,
+// not a newline-equivalence assertion, remains mandatory. As with the accepted
+// byte cache, the current receipt/source/policy fences still govern its use.
+func contractPinnedSourceAtFingerprint(data []byte, fingerprint string) ([]byte, error) {
+	if contractInputHash(data) == fingerprint {
+		return data, nil
+	}
+	// Bound the additional reconstruction allocation by the existing accepted
+	// source envelope. No other byte rewriting or weaker digest is permitted.
+	if len(data) <= contractFollowupCompactLimit && bytes.Contains(data, []byte("\r\n")) {
+		canonical := bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+		if contractInputHash(canonical) == fingerprint {
+			return canonical, nil
+		}
+	}
+	return nil, errContractSourceMoved
 }
