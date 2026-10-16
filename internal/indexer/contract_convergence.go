@@ -2877,7 +2877,7 @@ func (c *contractConvergence) rounds(pending map[string]string) error {
 
 // fillCanContinue restricts cooperative checkpoints to resumable cache jobs.
 func (c *contractConvergence) fillCanContinue() bool {
-	return c.req.delta != nil && (c.report.Mode == viewmetrics.ContractModeFill || c.report.Mode == viewmetrics.ContractModeCold) && c.req.OtherActorWaiting != nil
+	return c.req.delta != nil && !c.req.delta.disabled && (c.report.Mode == viewmetrics.ContractModeFill || c.report.Mode == viewmetrics.ContractModeCold) && c.req.OtherActorWaiting != nil
 }
 
 func (c *contractConvergence) fillContended() bool {
@@ -2992,7 +2992,7 @@ func (c *contractConvergence) run() error {
 	pending := make(map[string]string)
 	c.coverage.observe(c)
 	c.report.Mode = viewmetrics.ContractModeCold
-	if session := c.req.delta; session != nil {
+	if session := c.req.delta; session != nil && !session.disabled {
 		if session.cache != nil {
 			c.coverage.receiptKeys(session.cache.receipts)
 		}
@@ -3040,6 +3040,10 @@ func (c *contractConvergence) run() error {
 		// changes whose boundary and ProducedInputs digest stayed equal.
 		c.staleUnits(pending)
 	} else {
+		if c.snap.opaqueContractInputs {
+			c.report.CacheReason = "receipt_envelope_exceeded"
+			c.report.RebuildReason = ContractFollowupColdBaseline
+		}
 		for path := range c.live {
 			pending[path] = viewmetrics.ContractFilesCold
 		}

@@ -39,3 +39,22 @@ func reuseContractBaselineCurrentReceipt(idx *Indexer, file ContractFollowupFile
 	}
 	return receipt, true
 }
+
+// A bounded overflow can be retained only as accepted source provenance. The
+// baseline still verifies its bytes and folds its exact standing row under CAS.
+func reuseContractBaselineOverflowReceipt(idx *Indexer, file ContractFollowupFile, accepted ContractAcceptedSource, row *graph.ContractBoundaryReceipt) bool {
+	policy, overflow := contractReceiptOverflowPolicy(row)
+	if !overflow || !row.Accepted || row.RepoPrefix != file.RepoPrefix || row.CheckoutID != "" || row.FilePath != file.Path || row.SourceFingerprint != accepted.SourceFingerprint || accepted.SourceFingerprint != contractInputHash(accepted.Bytes) {
+		return false
+	}
+	projected, err := idx.contractFollowupPolicyMode(file.Language, policy)
+	if err != nil {
+		return false
+	}
+	if projected {
+		rel := strings.TrimPrefix(file.Path, file.RepoPrefix+"/")
+		_, recognized := generatedTreeSitterParserProjection(rel, file.Language, accepted.Bytes)
+		return recognized
+	}
+	return true
+}

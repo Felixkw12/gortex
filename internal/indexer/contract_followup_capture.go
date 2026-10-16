@@ -498,19 +498,26 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 					if e != nil {
 						return ContractFollowupSnapshot{}, e
 					}
-					if !known || prior == nil {
+					policy := ""
+					opaque := false
+					if known && prior != nil {
+						policy = prior.Policy
+					} else if markerPolicy, overflow := contractReceiptOverflowPolicy(row); overflow && row.Accepted && row.RepoPrefix == repo && row.CheckoutID == actor && row.FilePath == path {
+						policy, opaque = markerPolicy, true
+					} else {
 						return ContractFollowupSnapshot{}, graph.ErrContractProjectionIncomplete
 					}
-					if prior.Policy != file.Policy {
-						projected, policyErr := idx.contractFollowupPolicyMode(language, prior.Policy)
+					if policy != file.Policy {
+						projected, policyErr := idx.contractFollowupPolicyMode(language, policy)
 						if policyErr != nil || !projected || !contractGeneratedFileHint(readers[repo].GetNode(path), path) {
 							return ContractFollowupSnapshot{}, graph.ErrContractProjectionStale
 						}
 						// This is an admission hint from the exact accepted receipt
 						// and selected file. The worker revalidates accepted bytes
 						// and every public projection fact before omitting C parsing.
-						file.Policy = prior.Policy
+						file.Policy = policy
 					}
+					snapshot.opaqueContractInputs = snapshot.opaqueContractInputs || opaque
 					file.SourceFingerprint = row.SourceFingerprint
 					break
 				}

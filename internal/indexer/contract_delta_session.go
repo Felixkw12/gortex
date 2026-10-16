@@ -49,7 +49,11 @@ func newContractDeltaSession(p *contractDeltaCache, snap ContractFollowupSnapsho
 	if err != nil {
 		return nil, err
 	}
-	return &contractDeltaSession{cache: p, identity: contractDeltaIdentity{selection: snap.Key.CheckoutID + "\x00" + strings.Join(repos, "\x00"), config: contractInputHash(encoded), modules: contractInputHash(modules), receiptVersion: contractBoundaryReceiptVersion}, knownRaw: make(map[*contractUnit]int64)}, nil
+	session := &contractDeltaSession{cache: p, identity: contractDeltaIdentity{selection: snap.Key.CheckoutID + "\x00" + strings.Join(repos, "\x00"), config: contractInputHash(encoded), modules: contractInputHash(modules), receiptVersion: contractBoundaryReceiptVersion}, knownRaw: make(map[*contractUnit]int64)}
+	if snap.opaqueContractInputs {
+		session.disabled, session.disabledReason = true, "receipt_envelope_exceeded"
+	}
+	return session, nil
 }
 
 // Receipt payloads are parsed only for changed fingerprints; immutable facts
@@ -97,7 +101,7 @@ func (s *contractDeltaSession) readReceipts(c *contractConvergence, stamps map[s
 
 func (s *contractDeltaSession) adopt(c *contractConvergence) {
 	p := s.cache
-	if p == nil || p.identity != s.identity || p.deltas+1 >= contractDeltaRefresh {
+	if s.disabled || p == nil || p.identity != s.identity || p.deltas+1 >= contractDeltaRefresh {
 		return
 	}
 	c.units, c.live, c.excluded, c.suspect = p.units, p.live, p.excluded, p.suspect

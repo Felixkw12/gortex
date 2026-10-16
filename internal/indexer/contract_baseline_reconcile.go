@@ -203,6 +203,10 @@ func reconcilePrimaryContractBaseline(ctx context.Context, options ContractFollo
 			}
 			idx := &Indexer{config: cfg, registry: options.Registry, repoPrefix: repo, workspaceID: file.WorkspaceID, projectID: file.ProjectID, logger: options.Logger}
 			idx.extractionOptions.Store(&opts)
+			if reuseContractBaselineOverflowReceipt(idx, file, accepted, prior[file.Path]) {
+				idx.Close()
+				continue // Fold the standing bounded Unknown row, not empty facts.
+			}
 			receipt, reused := reuseContractBaselineCurrentReceipt(idx, file, accepted, prior[file.Path])
 			var collectErr error
 			if !reused {
@@ -217,7 +221,12 @@ func reconcilePrimaryContractBaseline(ctx context.Context, options ContractFollo
 				return err
 			}
 			if row.Scope.Unknown {
-				return fmt.Errorf("contract baseline: incomplete receipt %q", file.Path)
+				if _, overflow := contractReceiptOverflowPolicy(&row); !overflow {
+					return fmt.Errorf("contract baseline: incomplete receipt %q", file.Path)
+				}
+				rows = append(rows, row)
+				reconstructed[file.Path] = row.Payload
+				continue // Fold the exact bounded source/policy marker.
 			}
 			rows = append(rows, row)
 			receipt.Source = "" // Source bytes certify eligibility, not contract identity.

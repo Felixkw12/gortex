@@ -437,6 +437,9 @@ func (s *contractStampScanner) deltaReceipts(ctx context.Context, stamps map[str
 		if !stamp.quiescent() || row.Deleted || row.Fingerprint != contractInputHash(row.Payload) {
 			continue
 		}
+		if _, overflow := contractReceiptOverflowPolicy(row); overflow {
+			continue // A source witness supplies no dependency/no-change facts.
+		}
 		var receipt contractBoundaryReceipt
 		if json.Unmarshal(row.Payload, &receipt) != nil || receipt.Version != contractBoundaryReceiptVersion || receipt.FilePath != path {
 			continue

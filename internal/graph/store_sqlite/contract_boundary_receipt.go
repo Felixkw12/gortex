@@ -327,11 +327,14 @@ func (s *Store) setContractBoundaryReceiptsTx(ctx context.Context, tx *sql.Tx, r
 		}
 		// Repeated failed edits cannot grow the staged union without bound. Refuse
 		// before committing core admission instead of dropping invalidation evidence.
-		var keyCount, keyBytes int64
-		if err := tx.QueryRowContext(ctx, `SELECT count(*),coalesce(sum(length(lookup_key)+length(repo_prefix)+length(checkout_id)+length(file_path)),0) FROM generation_contract_boundary_keys WHERE view_gen=? AND repo_prefix=? AND checkout_id=? AND file_path=?`, s.viewGen, row.RepoPrefix, row.CheckoutID, row.FilePath).Scan(&keyCount, &keyBytes); err != nil {
+		var keyCount, keyBytes, unknownMetadata int64
+		if err := tx.QueryRowContext(ctx, `SELECT count(*),coalesce(sum(length(lookup_key)+length(repo_prefix)+length(checkout_id)+length(file_path)),0),coalesce(sum(CASE WHEN key_kind='lookup' AND lookup_key=? THEN 1 ELSE 0 END),0) FROM generation_contract_boundary_keys WHERE view_gen=? AND repo_prefix=? AND checkout_id=? AND file_path=?`, graph.ContractBoundaryUnknownMembershipKey, s.viewGen, row.RepoPrefix, row.CheckoutID, row.FilePath).Scan(&keyCount, &keyBytes, &unknownMetadata); err != nil {
 			return err
 		}
-		if keyCount > contractBoundaryKeyLimit || keyBytes > 4*contractBoundaryPayloadLimit {
+		// Keep all prior memberships while a normal 4096-key row crosses an
+		// opaque source witness. One reserved lookup metadata row can make the
+		// physical pending union 4097; ordinary keys and byte caps do not grow.
+		if unknownMetadata > 1 || keyCount-unknownMetadata > contractBoundaryKeyLimit || keyCount > contractBoundaryKeyLimit+1 || keyBytes > 4*contractBoundaryPayloadLimit {
 			return ErrContractBoundaryReceiptLimit
 		}
 	}

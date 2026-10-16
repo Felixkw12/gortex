@@ -89,7 +89,7 @@ func TestContractCoreReceiptOversizedOptionalKeyIsBoundedUnknown(t *testing.T) {
 	require.NoError(t, err, "optional key overflow cannot reject the ordinary core parse")
 	require.True(t, row.Scope.Unknown)
 	require.False(t, row.Deleted)
-	require.Empty(t, row.LookupKeys)
+	require.Equal(t, []string{contractOverflowLookupKey}, row.LookupKeys, "only explicit unknown-membership sentinel survives")
 	require.Empty(t, row.Scope.LookupKeys)
 	require.Less(t, len(row.Payload), 1024)
 }

@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -12,6 +13,35 @@ import (
 const contractCoreReceiptPayloadLimit = 8 << 20
 const contractCoreReceiptKeyLimit = 4096
 const contractCoreReceiptKeyBytes = 8192
+
+// Missing opaque memberships can depend on any changed producer key. This one
+// indexed sentinel records uncertainty, not an invented dependency certificate.
+const contractOverflowLookupKey = graph.ContractBoundaryUnknownMembershipKey
+
+// An overflow certifies accepted source identity only, never dependency facts.
+// SourceFingerprint intentionally remains in the payload's content identity:
+// two oversized versions must not become a no-change certificate.
+type contractOverflowSourceReceipt struct {
+	Version, FilePath, Uncertainty, SourceFingerprint, Policy string
+}
+
+func contractReceiptOverflowPolicy(row *graph.ContractBoundaryReceipt) (string, bool) {
+	if row == nil || row.Deleted || row.Version != contractBoundaryReceiptVersion || len(row.Payload) > contractCoreReceiptPayloadLimit || row.Fingerprint != contractInputHash(row.Payload) {
+		return "", false
+	}
+	if !row.Scope.Unknown || row.Scope.Deleted || len(row.Scope.Causes) != 1 || row.Scope.Causes[0] != "contract_receipt_envelope_exceeded" || len(row.Scope.Groups)+len(row.Scope.SymbolIDs)+len(row.Scope.LookupKeys) != 0 {
+		return "", false
+	}
+	if len(row.LookupKeys) != 1 || row.LookupKeys[0] != contractOverflowLookupKey || len(row.ProducedKeys) != 0 {
+		return "", false
+	}
+	var marker contractOverflowSourceReceipt
+	if json.Unmarshal(row.Payload, &marker) != nil || marker.Version != row.Version || marker.FilePath != row.FilePath || marker.Uncertainty != "contract_receipt_envelope_exceeded" || marker.SourceFingerprint == "" || marker.SourceFingerprint != row.SourceFingerprint || marker.Policy == "" {
+		return "", false
+	}
+	canonical, err := json.Marshal(marker)
+	return marker.Policy, err == nil && bytes.Equal(canonical, row.Payload)
+}
 
 func contractCoreStoredReceipt(repo, checkout string, change contractCoreInputChange) (graph.ContractBoundaryReceipt, error) {
 	row := graph.ContractBoundaryReceipt{
@@ -55,10 +85,15 @@ func contractCoreStoredReceipt(repo, checkout string, change contractCoreInputCh
 		}
 		row.LookupKeys, row.ProducedKeys = nil, nil
 		var err error
-		row.Payload, err = json.Marshal(struct {
-			Version, FilePath, Uncertainty string
-			Deleted                        bool
-		}{contractBoundaryReceiptVersion, row.FilePath, reason, row.Deleted})
+		if reason == "contract_receipt_envelope_exceeded" && change.Current != nil && change.Current.Source == row.SourceFingerprint && change.Current.Policy != "" {
+			row.Payload, err = json.Marshal(contractOverflowSourceReceipt{contractBoundaryReceiptVersion, row.FilePath, reason, row.SourceFingerprint, change.Current.Policy})
+			row.LookupKeys = []string{contractOverflowLookupKey}
+		} else {
+			row.Payload, err = json.Marshal(struct {
+				Version, FilePath, Uncertainty string
+				Deleted                        bool
+			}{contractBoundaryReceiptVersion, row.FilePath, reason, row.Deleted})
+		}
 		if err != nil {
 			return row, err
 		}

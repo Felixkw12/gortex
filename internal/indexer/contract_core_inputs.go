@@ -286,7 +286,10 @@ func (j *contractCoreInputJournal) begin(paths []string) error {
 			return fmt.Errorf("contract core inputs: missing accepted boundary input for %s", path)
 		}
 		if len(change.Delta.ChangedProducedKeys) > 0 {
-			dependents, err := j.backend.BoundaryDependents(j.ctx, change.Delta.ChangedProducedKeys)
+			// A bounded opaque receipt cannot list its real memberships. Include
+			// its indexed uncertainty sentinel without scanning any registry.
+			keys := appendUniqueSorted([]string{contractOverflowLookupKey}, change.Delta.ChangedProducedKeys...)
+			dependents, err := j.backend.BoundaryDependents(j.ctx, keys)
 			if ctxErr := j.ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}

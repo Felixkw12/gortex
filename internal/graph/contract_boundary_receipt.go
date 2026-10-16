@@ -2,6 +2,10 @@ package graph
 
 import "context"
 
+// ContractBoundaryUnknownMembershipKey is fixed metadata for a bounded opaque
+// source witness. It makes no claim that dependency memberships are known.
+const ContractBoundaryUnknownMembershipKey = `["*","contract_membership_unknown","*"]`
+
 // ContractBoundaryReceipt is a file-owned parser result. Payload is opaque to
 // storage; keys drive indexed dependency lookup even when no records exist.
 // Staging retains one accepted predecessor and the union of all in-flight key

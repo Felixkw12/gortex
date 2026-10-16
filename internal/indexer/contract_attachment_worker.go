@@ -99,7 +99,9 @@ type ContractFollowupSnapshot struct {
 	// fingerprint. Nil means no move is known to keep a file's contract
 	// content.
 	ReceiptContents func(context.Context, map[string]ContractReceiptStamp) (map[string]string, error)
-	deltaReceipts   func(context.Context, map[string]ContractReceiptStamp) (map[string]contractDeltaReceipt, error)
+	// Opaque overflow sources require full analysis with no retained delta state.
+	opaqueContractInputs bool
+	deltaReceipts        func(context.Context, map[string]ContractReceiptStamp) (map[string]contractDeltaReceipt, error)
 	// WindowGaps returns the quiet gaps a writer left between the core-write
 	// windows of the named paths that opened at or after since. Nil records
 	// none.
