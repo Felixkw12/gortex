@@ -1130,6 +1130,13 @@ func TestContractSchedulerContinuesPrimaryFillAfterOtherActor(t *testing.T) {
 		p.c.mu.Unlock()
 		return p.c.otherActorWaiting(actor)
 	}, 10*time.Second, time.Millisecond)
+	// Slot fairness starts when B actually asks for the slot. A queued actor
+	// alone does not prove its dispatcher has reached that boundary.
+	require.Eventually(t, func() bool {
+		p.c.slots.mu.Lock()
+		defer p.c.slots.mu.Unlock()
+		return len(p.c.slots.waiters) == 1
+	}, 10*time.Second, time.Millisecond, "B must be waiting for A's slot")
 	p.release("a/@k")
 	require.Equal(t, []string{"a/@k", "b/@k"}, p.waitStarts(2))
 	p.c.mu.Lock()
