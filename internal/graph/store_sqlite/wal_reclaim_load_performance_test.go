@@ -473,11 +473,8 @@ func TestPerformanceWALReclaimResetsUnderLongOverlappingReadersAndBurstyWrites(t
 	t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "16")
 	// A production-like cadence (the daemon polls every 5 s).
 	setWALReclaimCadence(t, time.Second, time.Second, 4*time.Second)
-	diagnostic := installQuietGapDiagnostic(t)
 	logs := captureReclaimLog(t)
-	t.Cleanup(func() { t.Logf("complete_captured_store_log:\n%s", logs.String()) })
 	s, path := openWALReclaimStore(t)
-	diagnostic.store.Store(s)
 	defer func() { _ = s.Close() }()
 	seedWALChurnTable(t, s)
 	prepareSteadyStateLongReaderStore(t, s)
@@ -485,7 +482,7 @@ func TestPerformanceWALReclaimResetsUnderLongOverlappingReadersAndBurstyWrites(t
 		readers: 4, readMin: 2500 * time.Millisecond, readMax: 4 * time.Second,
 		burstWrites: 12, shortGap: 1500 * time.Millisecond, longGap: 12 * time.Second, cycles: 3,
 	}
-	run := runLongReaderPattern(t, s, path, p, diagnostic)
+	run := runLongReaderPattern(t, s, path, p)
 	checkLongReaderContract(t, s, run, 16<<20, logs.String())
 }
 
