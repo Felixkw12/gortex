@@ -3,6 +3,7 @@ package store_sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -360,7 +361,8 @@ const symbolFTSSmallGeneration = 5000
 //     explain: one FTS5 count, the new baseline;
 //   - otherwise: the baseline plus the counts of the generations added since,
 //     taken from their rows (tokenized as unicode61 does for ASCII) when they
-//     are small and ASCII, else by an FTS5 count scoped to the generation.
+//     are small and ASCII, else by one FTS5 count scoped to all remaining
+//     added generations for that term.
 //
 // A new top generation therefore costs its own rows, never a walk of the
 // table. Every count is taken inside the snapshot the revisions were read in.
@@ -484,14 +486,11 @@ func (s *Store) symbolFTSScoringSnapshot(ctx context.Context, prefixes []string,
 			out[prefix] = n
 			continue
 		}
-		count := base.count
-		for _, g := range added {
-			n, err := s.generationPrefixCountTx(ctx, tx, g, folded, term, addedRows)
-			if err != nil {
-				return SymbolFTSStats{}, nil, err
-			}
-			count += n
+		addedHits, err := s.generationsPrefixCountTx(ctx, tx, added, folded, term, addedRows)
+		if err != nil {
+			return SymbolFTSStats{}, nil, err
 		}
+		count := base.count + addedHits
 		state.terms[folded] = &symbolFTSPrefixBaseline{count: count, rows: stats.Rows, revs: cloneRevs(revs)}
 		out[prefix] = count
 	}
@@ -501,75 +500,111 @@ func (s *Store) symbolFTSScoringSnapshot(ctx context.Context, prefixes []string,
 	return stats, out, nil
 }
 
-// generationPrefixCountTx counts one generation's documents with a token
-// starting with folded: from its rows in Go when it is small and ASCII
-// (unicode61 splits ASCII text into runs of letters and digits and folds
-// case), else by an FTS5 count scoped to the generation.
+// generationPrefixCountTx is the single-generation form used by count controls.
 func (s *Store) generationPrefixCountTx(ctx context.Context, tx *sql.Tx, generation int64, folded, term string, cache map[int64][]SymbolFTSRow) (int64, error) {
-	rows, ok := cache[generation]
-	if !ok {
-		cur, err := tx.QueryContext(ctx, `SELECT symbol_fts.tokens FROM symbol_fts_rowid m
-  JOIN symbol_fts ON symbol_fts.rowid = m.fts_rowid
- WHERE m.view_gen = ? LIMIT ?`, generation, symbolFTSSmallGeneration+1)
-		if err != nil {
+	return s.generationsPrefixCountTx(ctx, tx, []int64{generation}, folded, term, cache)
+}
+
+// generationsPrefixCountTx retains the small ASCII counter and counts all
+// remaining generations with one MATCH walk. Exact ownership and rowid bounds
+// are read in the caller's scoring transaction; interleaved foreign rows and
+// holes inside the combined bounds never contribute to the count.
+func (s *Store) generationsPrefixCountTx(ctx context.Context, tx *sql.Tx, generations []int64, folded, term string, cache map[int64][]SymbolFTSRow) (int64, error) {
+	var count, lo, hi int64
+	var fallback []int64
+	seen := make(map[int64]bool, len(generations))
+	for _, generation := range generations {
+		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
-		for cur.Next() {
-			var r SymbolFTSRow
-			if err := cur.Scan(&r.Tokens); err != nil {
+		if seen[generation] {
+			continue
+		}
+		seen[generation] = true
+		rows, ok := cache[generation]
+		if !ok {
+			cur, err := tx.QueryContext(ctx, `SELECT symbol_fts.tokens FROM symbol_fts_rowid m
+	  JOIN symbol_fts ON symbol_fts.rowid = m.fts_rowid
+	 WHERE m.view_gen = ? LIMIT ?`, generation, symbolFTSSmallGeneration+1)
+			if err != nil {
+				return 0, err
+			}
+			for cur.Next() {
+				var r SymbolFTSRow
+				if err := cur.Scan(&r.Tokens); err != nil {
+					_ = cur.Close()
+					return 0, err
+				}
+				rows = append(rows, r)
+			}
+			if err := cur.Err(); err != nil {
 				_ = cur.Close()
 				return 0, err
 			}
-			rows = append(rows, r)
+			if err := cur.Close(); err != nil {
+				return 0, err
+			}
+			cache[generation] = rows
 		}
-		if err := cur.Err(); err != nil {
-			_ = cur.Close()
+		if len(rows) <= symbolFTSSmallGeneration && asciiFoldable(folded) {
+			var n int64
+			inGo := true
+			for _, r := range rows {
+				has, ascii := asciiTokensHavePrefix(r.Tokens, folded)
+				if !ascii {
+					inGo = false
+					break
+				}
+				if has {
+					n++
+				}
+			}
+			if inGo {
+				count += n
+				continue
+			}
+		}
+		var first, last int64
+		err := tx.QueryRowContext(ctx, `SELECT fts_rowid FROM symbol_fts_rowid INDEXED BY symbol_fts_rowid_by_generation
+ WHERE view_gen = ? ORDER BY fts_rowid ASC LIMIT 1`, generation).Scan(&first)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
 			return 0, err
 		}
-		if err := cur.Close(); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT fts_rowid FROM symbol_fts_rowid INDEXED BY symbol_fts_rowid_by_generation
+ WHERE view_gen = ? ORDER BY fts_rowid DESC LIMIT 1`, generation).Scan(&last); err != nil {
 			return 0, err
 		}
-		cache[generation] = rows
-	}
-	if len(rows) <= symbolFTSSmallGeneration && asciiFoldable(folded) {
-		var n int64
-		inGo := true
-		for _, r := range rows {
-			has, ascii := asciiTokensHavePrefix(r.Tokens, folded)
-			if !ascii {
-				inGo = false
-				break
-			}
-			if has {
-				n++
-			}
+		if len(fallback) == 0 || first < lo {
+			lo = first
 		}
-		if inGo {
-			return n, nil
+		if len(fallback) == 0 || last > hi {
+			hi = last
 		}
+		fallback = append(fallback, generation)
 	}
-	// Bounds come from the exact ownership set in this read transaction, not
-	// a cached generation span. Sparse/interleaved generations still need the
-	// membership join; the bounds only keep MATCH out of unrelated rowid runs.
-	var lo, hi int64
-	err := tx.QueryRowContext(ctx, `SELECT fts_rowid FROM symbol_fts_rowid INDEXED BY symbol_fts_rowid_by_generation
- WHERE view_gen = ? ORDER BY fts_rowid ASC LIMIT 1`, generation).Scan(&lo)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+	if len(fallback) == 0 {
+		return count, ctx.Err()
 	}
+	// One JSON array keeps the bind count fixed even for a long generation
+	// history. Its integer members select the same ownership rows as separate
+	// generation counts; MATCH still uses FTS5's exact tokenizer semantics.
+	members, err := json.Marshal(fallback)
 	if err != nil {
-		return 0, err
-	}
-	if err := tx.QueryRowContext(ctx, `SELECT fts_rowid FROM symbol_fts_rowid INDEXED BY symbol_fts_rowid_by_generation
- WHERE view_gen = ? ORDER BY fts_rowid DESC LIMIT 1`, generation).Scan(&hi); err != nil {
 		return 0, err
 	}
 	var n int64
 	noteSymbolFTSPrefixWalk()
 	err = tx.QueryRowContext(ctx, `SELECT count(*) FROM symbol_fts
-  CROSS JOIN symbol_fts_rowid m ON m.fts_rowid = symbol_fts.rowid AND m.view_gen = ?
- WHERE symbol_fts MATCH ? AND symbol_fts.rowid BETWEEN ? AND ?`, generation, term, lo, hi).Scan(&n)
-	return n, err
+  CROSS JOIN symbol_fts_rowid m ON m.fts_rowid = symbol_fts.rowid
+    AND m.view_gen IN (SELECT value FROM json_each(?))
+ WHERE symbol_fts MATCH ? AND symbol_fts.rowid BETWEEN ? AND ?`, string(members), term, lo, hi).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return count + n, nil
 }
 
 func asciiFoldable(term string) bool {
