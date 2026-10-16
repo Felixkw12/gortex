@@ -674,30 +674,36 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 	}
 	snapshot.ReadAccepted = read
 	snapshot.ReadCoreFile = func(ctx context.Context, file ContractFollowupFile) (ContractFollowupCoreFile, error) {
-		projection, e := graph.CompleteContractFileProjection(ctx, readers[file.RepoPrefix], file.RepoPrefix, []string{file.Path})
-		if e != nil {
-			return ContractFollowupCoreFile{}, e
-		}
-		nodes := projection.FileNodes[file.Path]
-		ids := make([]string, 0, len(nodes))
-		for _, node := range nodes {
-			ids = append(ids, node.ID)
-		}
-		rows, truncated, e := graph.GetOutEdgesByNodeIDsWithMetadataContext(ctx, readers[file.RepoPrefix], ids, graph.ContractProjectionRowLimit)
-		if e != nil {
-			return ContractFollowupCoreFile{}, e
-		}
-		if truncated {
-			return ContractFollowupCoreFile{}, graph.ErrContractProjectionLimit
-		}
-		result := ContractFollowupCoreFile{Nodes: nodes}
-		for _, id := range ids {
-			result.Edges = append(result.Edges, rows[id]...)
-		}
-		return result, nil
+		return readContractFollowupCoreFile(ctx, readers[file.RepoPrefix], file)
 	}
 	complete = true
 	return snapshot, nil
+}
+
+// Core enrichment needs selected file nodes and their checked outgoing edges.
+// Derived contract ownership is neither a seed nor consumed by this read.
+func readContractFollowupCoreFile(ctx context.Context, reader graph.Reader, file ContractFollowupFile) (ContractFollowupCoreFile, error) {
+	projection, e := graph.ContractFileNodesContext(ctx, reader, file.RepoPrefix, []string{file.Path})
+	if e != nil {
+		return ContractFollowupCoreFile{}, e
+	}
+	nodes := projection[file.Path]
+	ids := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		ids = append(ids, node.ID)
+	}
+	rows, truncated, e := graph.GetOutEdgesByNodeIDsWithMetadataContext(ctx, reader, ids, graph.ContractProjectionRowLimit)
+	if e != nil {
+		return ContractFollowupCoreFile{}, e
+	}
+	if truncated {
+		return ContractFollowupCoreFile{}, graph.ErrContractProjectionLimit
+	}
+	result := ContractFollowupCoreFile{Nodes: nodes}
+	for _, id := range ids {
+		result.Edges = append(result.Edges, rows[id]...)
+	}
+	return result, nil
 }
 
 // contractCaptureAdmission is what a capture does with one census path's
