@@ -245,7 +245,10 @@ func extendedBurstYieldsTo(t *testing.T, priority ViewBuildPriority) {
 	wg.Wait()
 	require.Equal(t, 1, quantaSeen, "retirement must not begin another quantum before yielding")
 	require.Positive(t, committed.ChunksCommitted, "the real in-flight quantum must commit before yielding")
-	require.Positive(t, committed.RowsDeleted)
+	// Empty-table cursor proofs are committed progress too: a bounded
+	// quantum may yield before reaching its first table with payload rows.
+	require.Positive(t, committed.RowsDeleted+int64(committed.StepsAdvanced),
+		"the committed quantum must delete payload or advance its resume cursor")
 	requireCatalogGenerationPresentOrRetiring(t, l.store, ids[0])
 }
 

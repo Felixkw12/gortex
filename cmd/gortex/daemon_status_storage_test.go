@@ -28,6 +28,12 @@ func TestStatusStorageReportsTheStoreWAL(t *testing.T) {
 		{ID: "pkg/a.go::Alpha", Kind: graph.KindFunction, Name: "Alpha", FilePath: "pkg/a.go"},
 	}, nil)
 
+	// Open starts the checkpoint/reclaim loop asynchronously. Wait for its
+	// configured policy before comparing two otherwise independent snapshots.
+	require.Eventually(t, func() bool {
+		return store.WALReclaimStats().ThresholdBytes > 0
+	}, 5*time.Second, time.Millisecond)
+
 	st := storageStatusFor(store)
 	require.NotNil(t, st, "a SQLite store must produce a storage block")
 	assert.Positive(t, st.DBBytes)
