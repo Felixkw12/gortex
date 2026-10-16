@@ -14,7 +14,9 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 )
 
-const contractBoundaryReceiptVersion = "contract-boundary-v1"
+// v2 adds the Java parameter-candidate inputs used by Spring bean linkage.
+// Old accepted baselines must be reconstructed before they can be reused.
+const contractBoundaryReceiptVersion = "contract-boundary-v2"
 
 // Both receipt producers and consumers use the same accepted policy identity.
 // Omitting default projection and parser options preserves the ordinary identity.
@@ -111,6 +113,18 @@ func (idx *Indexer) collectContractBoundaryReceipt(ctx context.Context, path, la
 		}
 		local.values[id] = value.Value
 	}
+	// Bean linkage searches Java method parameter tokens, including absent
+	// candidates. Record that query on the provider file so consumer creation,
+	// removal or a changed parameter type invalidates only matching beans.
+	if language == "java" {
+		for _, edge := range result.Edges {
+			if edge != nil && edge.Kind == graph.EdgeProvides && edge.Meta[graph.MetaDIBinding] == graph.DIBindingBean {
+				if name, ok := edge.Meta[graph.MetaDIProvidesFor].(string); ok && name != "" {
+					local.lookups[contractBoundaryLookupKey(idx.repoPrefix, "spring_parameter_type", name)] = struct{}{}
+				}
+			}
+		}
+	}
 	records := idx.collectContractRecordsForFile(path, src, result.Nodes, result.Edges, byLanguage[language], result.Tree, local)
 	fingerprints, err := contracts.FingerprintRecords(records)
 	if err != nil {
@@ -201,6 +215,13 @@ func (idx *Indexer) collectContractBoundaryReceipt(ctx context.Context, path, la
 			digest, err := contractBoundaryHandlerInputs(language, bodyFacts[node.ID], node, lines)
 			if err != nil {
 				return contractBoundaryReceipt{}, err
+			}
+			if language == "java" && node.Kind == graph.KindMethod {
+				params, _ := node.Meta["params_src"].(string)
+				for token := range javaIdentifierSet(params) {
+					key := contractBoundaryLookupKey(idx.repoPrefix, "spring_parameter_type", token)
+					produced[key] = append(produced[key], node.ID+"\x00"+enclosingClassID(node))
+				}
 			}
 			produced[contractBoundaryLookupKey(idx.repoPrefix, "symbol_name", node.Name)] = append(produced[contractBoundaryLookupKey(idx.repoPrefix, "symbol_name", node.Name)], node.ID+":"+digest)
 			produced[contractBoundaryLookupKey(idx.repoPrefix, "symbol_id", node.ID)] = append(produced[contractBoundaryLookupKey(idx.repoPrefix, "symbol_id", node.ID)], digest)

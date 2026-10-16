@@ -231,3 +231,36 @@ function mymodule_help($route_name, $route_match) {
 	require.False(t, stored.Scope.Unknown)
 	require.Contains(t, stored.ProducedKeys, key)
 }
+
+func TestContractBoundaryReceiptSpringParameterCandidates(t *testing.T) {
+	idx := newTestIndexer(graph.New())
+	idx.graph = nil
+	idx.SetRepoPrefix("fixture")
+	t.Cleanup(idx.Close)
+	collect := func(path, source string) contractBoundaryReceipt {
+		parsed, err := languages.NewJavaExtractor().Extract(path, []byte(source))
+		require.NoError(t, err)
+		if parsed.Tree != nil {
+			defer parsed.Tree.Release()
+		}
+		receipt, err := idx.collectContractBoundaryReceipt(t.Context(), path, "java", []byte(source), parsed)
+		require.NoError(t, err)
+		return receipt
+	}
+	row := contractColdMatrixFixtures()[3]
+	bean := collect("fixture/Clocks.java", row.files["Clocks.java"])
+	legacy := bean
+	legacy.Version = "contract-boundary-v1"
+	require.True(t, diffContractBoundaryReceipts(&legacy, &bean).Scope.Unknown, "old baselines lack the new negative candidate lookup")
+	consumer := collect("fixture/OrderService.java", row.files["OrderService.java"])
+	key := contractBoundaryLookupKey("fixture", "spring_parameter_type", "Clock")
+	require.Contains(t, bean.LookupKeys, key)
+	require.Contains(t, consumer.ProducedInputs, key)
+	for _, delta := range []contractBoundaryDelta{diffContractBoundaryReceipts(nil, &consumer), diffContractBoundaryReceipts(&consumer, nil)} {
+		require.True(t, contractBoundaryAffectedByProducedKeys(bean, delta.ChangedProducedKeys), "consumer membership must invalidate its bean provider")
+	}
+	renamed := collect("fixture/OrderService.java", strings.ReplaceAll(row.files["OrderService.java"], "Clock clock", "Clock renamedClock"))
+	require.Equal(t, consumer.ProducedInputs[key], renamed.ProducedInputs[key], "an unchanged matching type retains the same candidate identity")
+	unrelated := collect("fixture/Unrelated.java", "class Unrelated { public void ordinary(String value) {} }")
+	require.False(t, contractBoundaryAffectedByProducedKeys(bean, diffContractBoundaryReceipts(nil, &unrelated).ChangedProducedKeys))
+}

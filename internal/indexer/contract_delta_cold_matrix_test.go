@@ -393,3 +393,13 @@ func contractColdMatrixSaveFailure(t *testing.T, f *contractJobFixture, name, te
 	require.True(t, receipt.Accepted)
 	require.Equal(t, failing, contractReceiptIsFailureEnvelope(receipt))
 }
+
+// Spring consumer membership changes the derived call payload even though the
+// consumer file owns no provider contract of its own.
+func TestContractDeltaSpringConsumerMembershipEqualsCold(t *testing.T) {
+	for _, operation := range []string{"remove", "add"} {
+		t.Run(operation, func(t *testing.T) {
+			runContractColdMatrixCell(t, contractColdMatrixFixtures()[3], "OrderService.java", operation)
+		})
+	}
+}
