@@ -88,6 +88,7 @@ func TestContractAnalysisCoordinatorCoalescesOwnedCohortAndPublishesBothTargets(
 	var coreReads atomic.Int64
 	var readMu sync.Mutex
 	uniqueReads := make(map[string]bool)
+	seedReads := make(map[string]int)
 	started := make(chan struct{})
 	resume := make(chan struct{})
 	var entered atomic.Bool
@@ -98,6 +99,20 @@ func TestContractAnalysisCoordinatorCoalescesOwnedCohortAndPublishesBothTargets(
 		snapshot.ReadCoreFile = func(ctx context.Context, file ContractFollowupFile) (ContractFollowupCoreFile, error) {
 			coreReads.Add(1)
 			return a.Snapshot.ReadCoreFile(ctx, file)
+		}
+		// Match a real primary capture's checked seed queries. A nil Seeds
+		// callback deliberately asks delta enrichment to reload every live
+		// file, which would count fallback full projections as cohort replay.
+		snapshot.Seeds = func(ctx context.Context, repo string) ([]*graph.Node, []*graph.Edge, bool, error) {
+			readMu.Lock()
+			seedReads[repo]++
+			readMu.Unlock()
+			edges, err := f.store.ContractSeedEdgesContext(ctx, repo)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			nodes, err := f.store.ContractSeedNodesContext(ctx, repo)
+			return nodes, edges, err == nil, err
 		}
 		snapshot.ReadAccepted = func(ctx context.Context, file ContractFollowupFile) (ContractAcceptedSource, error) {
 			reads.Add(1)
@@ -185,11 +200,15 @@ func TestContractAnalysisCoordinatorCoalescesOwnedCohortAndPublishesBothTargets(
 	}
 	readMu.Lock()
 	uniqueCount := len(uniqueReads)
+	seedsA, seedsB := seedReads["repo-a"], seedReads["repo-b"]
 	readMu.Unlock()
+	require.Equal(t, 1, seedsA, "enrichment reads the actual primary seed projection once for the cohort")
+	require.Equal(t, 1, seedsB, "both repositories participate in the shared enrichment once")
 	// Lazy body/signature enrichment may legitimately reread an accepted file;
-	// complete core census admission must occur exactly once for the cohort.
+	// full extraction projections must occur exactly once per cohort file;
+	// node-only enrichment reads do not call ReadCoreFile.
 	if captures.Load() != 1 || uniqueCount != len(f.files) || coreReads.Load() != int64(len(f.files)) || reads.Load() < int64(uniqueCount) || released.Load() != 1 || f.leases.Held() != 0 {
-		t.Fatalf("captures=%d shared sources raw=%d unique=%d core census=%d releases=%d leases=%d", captures.Load(), reads.Load(), uniqueCount, coreReads.Load(), released.Load(), f.leases.Held())
+		t.Fatalf("captures=%d shared sources raw=%d unique=%d full core projections=%d releases=%d leases=%d", captures.Load(), reads.Load(), uniqueCount, coreReads.Load(), released.Load(), f.leases.Held())
 	}
 	// Sustained foreground demand stayed true for every scheduling checkpoint,
 	// yet the real shared worker published both targets under this same deadline.
