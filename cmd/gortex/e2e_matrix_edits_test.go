@@ -978,6 +978,9 @@ func e2eMatrixEditCases() []e2eMatrixEditCase {
 				// change: the excluded package must leave both indexes.
 				h.write(".gortex.yaml", "exclude:\n  - \"p003/**\"\n")
 				h.commit("configuration change")
+				// Repository configuration is cached until the supported reload;
+				// compare both indexes under the newly selected policy.
+				h.f.command(e2eMatrixCommandTimeout, h.f.primary, "daemon", "reload")
 				excluded := h.relFor(3)
 				h.settle()
 				// Same reading as untracked_path: whether a newly committed
