@@ -112,6 +112,12 @@ func (s *Store) resetWALForReclaimWithBusyTimeout(ctx context.Context, busyMilli
 // timeout is 5 s, which a reset under the write gate must never take.
 var walResetBusyMillis = sqliteCheckpointBusyTimeoutMillis
 
+// walResetCheckpointConnObserver is a scoped test seam at the actual reset
+// connection, after its Busy policy is installed and before the checkpoint.
+// Nil in production; install before owned work starts and restore after join.
+// The callback must not retain the connection or start asynchronous work.
+var walResetCheckpointConnObserver func(context.Context, *sql.Conn)
+
 // withWriterResetConn runs fn on the writer connection with its busy timeout
 // lowered to walResetBusyMillis (or what is left of ctx's deadline), restored
 // afterwards. The caller holds
@@ -140,6 +146,9 @@ func (s *Store) withWriterResetConnWithBusyTimeout(ctx context.Context, busyMill
 		defer func() {
 			_, _ = conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, sqliteBusyTimeoutMillis))
 		}()
+	}
+	if observe := walResetCheckpointConnObserver; observe != nil {
+		observe(ctx, conn)
 	}
 	return fn(conn)
 }

@@ -2,6 +2,7 @@ package store_sqlite
 
 import (
 	"context"
+	"database/sql"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,8 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Existing controls use real pools with a shorter SQLite Busy wait. The
-// production-policy regression below retains both default Busy and hold values.
+// Existing controls use real pools with a shorter SQLite Busy wait. A true
+// policy argument constructs the production defaults; a functional caller may
+// then explicitly override only its private writer credit, as documented below.
 func pressureReaderDrainFixture(t *testing.T) (*Store, chan struct{}, func() error) {
 	t.Helper()
 	return pressureReaderDrainFixturePolicy(t, false)
@@ -109,9 +111,11 @@ func TestPressureAdaptiveBusyResetDrainsWithoutRenewingCredit(t *testing.T) {
 	testPressureReaderDrain(t, true)
 }
 
-// The default policy must obtain a real SQLite Busy witness before its short
-// writer credit expires. The old equal-budget Busy wait returned only a
-// deadline, so it never reached the bounded outside-writer drain below.
+// The default nonblocking Busy policy is observed on the actual reset
+// connection. The real Busy/drain mechanism has explicit fixture-only writer
+// credit, so this correctness oracle does not require setup and SQLite work
+// to complete within the production 50 ms credit on a CI host. Default credit
+// exhaustion is exercised independently below.
 func TestPressureDefaultBusyResetWitnessDrainsOutsideWriter(t *testing.T) {
 	for _, inPlace := range []bool{false, true} {
 		name := "truncate"
@@ -120,8 +124,8 @@ func TestPressureDefaultBusyResetWitnessDrainsOutsideWriter(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			if inPlace {
-				// Scale only the file-size branch, retaining the actual default
-				// Busy timeout, writer credit and reader-drain allowance.
+				// Scale only the file-size branch. The helper explicitly controls
+				// fixture credit while checking the actual default Busy policy.
 				prior := walShrinkInPlaceBytes
 				walShrinkInPlaceBytes = 1
 				t.Cleanup(func() { walShrinkInPlaceBytes = prior })
@@ -138,9 +142,41 @@ func testPressureReaderDrain(t *testing.T, adaptive bool) {
 func testPressureReaderDrainPolicy(t *testing.T, adaptive, productionPolicy, inPlace bool) {
 	s, release, joinReader := pressureReaderDrainFixturePolicy(t, productionPolicy)
 	busyWitness := make(chan walCheckpointResult, 1)
+	checkBusyPolicy := func() {}
 	if productionPolicy {
 		require.Zero(t, s.walPressureHoldOverride)
 		require.EqualValues(t, sqliteCheckpointBusyTimeoutMillis, walResetBusyMillis)
+		require.Equal(t, 50*time.Millisecond, s.walPressureHold())
+		// Functional fixture credit only, not a change to the production
+		// policy. Keep the existing aggregate writer bound assertion below.
+		s.walPressureHoldOverride = time.Second
+		type busyPolicy struct {
+			millis int
+			err    error
+		}
+		var policyMu sync.Mutex
+		var policies []busyPolicy
+		priorPolicyObserver := walResetCheckpointConnObserver
+		walResetCheckpointConnObserver = func(ctx context.Context, conn *sql.Conn) {
+			var millis int
+			err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&millis)
+			policyMu.Lock()
+			policies = append(policies, busyPolicy{millis, err})
+			policyMu.Unlock()
+		}
+		t.Cleanup(func() { walResetCheckpointConnObserver = priorPolicyObserver })
+		checkBusyPolicy = func() {
+			// Called only after the reset goroutine joined; no assertion or
+			// retained connection escapes the background observer callback.
+			policyMu.Lock()
+			observed := append([]busyPolicy(nil), policies...)
+			policyMu.Unlock()
+			require.NotEmpty(t, observed, "actual reset connection policy was not observed")
+			for _, policy := range observed {
+				require.NoError(t, policy.err)
+				require.Zero(t, policy.millis, "the actual pressure checkpoint must use nonblocking Busy policy")
+			}
+		}
 		priorObserver := walCheckpointResultObserver
 		expectedMode := "TRUNCATE"
 		if inPlace {
@@ -200,6 +236,7 @@ func testPressureReaderDrainPolicy(t *testing.T, adaptive, productionPolicy, inP
 		select {
 		case e := <-done:
 			joined = true
+			checkBusyPolicy()
 			t.Fatalf("reset returned before bounded reader drain: %v", e)
 		case <-time.After(time.Millisecond):
 		}
@@ -228,6 +265,7 @@ func testPressureReaderDrainPolicy(t *testing.T, adaptive, productionPolicy, inP
 	select {
 	case e := <-done:
 		joined = true
+		checkBusyPolicy()
 		require.NoError(t, e)
 	case <-time.After(5 * time.Second):
 		t.Fatal("reset did not finish")
@@ -255,6 +293,46 @@ func testPressureReaderDrainPolicy(t *testing.T, adaptive, productionPolicy, inP
 		require.NoError(t, s.writerDB.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&restoredBusy))
 		require.Equal(t, sqliteBusyTimeoutMillis, restoredBusy, "pressure probe must restore the writer's ordinary timeout")
 	}
+}
+
+// Exhaustion is a valid outcome of the unchanged production credit. It must
+// not be promoted to a Busy/readers witness or close read admission.
+func TestPressureDefaultCreditExhaustionRefusesWithoutBusyEvidence(t *testing.T) {
+	s, _, _ := pressureReaderDrainFixturePolicy(t, true)
+	require.Zero(t, s.walPressureHoldOverride)
+	require.Equal(t, 50*time.Millisecond, s.walPressureHold())
+	priorHook := walPressureResetHook
+	exhausted := false
+	walPressureResetHook = func(ctx context.Context) { <-ctx.Done(); exhausted = true }
+	t.Cleanup(func() { walPressureResetHook = priorHook })
+	priorObserver := walCheckpointResultObserver
+	resetCalls, busyResults := 0, 0
+	walCheckpointResultObserver = func(mode string, _ time.Time, _ time.Duration, result walCheckpointResult, err error) {
+		if mode == "TRUNCATE" || mode == "RESTART" {
+			resetCalls++
+		}
+		if err == nil && result.Busy > 0 {
+			busyResults++
+		}
+	}
+	t.Cleanup(func() { walCheckpointResultObserver = priorObserver })
+	ckpt, err := openWALReclaimCheckpointDB(s.dbPath)
+	require.NoError(t, err)
+	defer ckpt.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	var res walReclaimResult
+	err = s.reclaimWALPressureReset(ctx, ckpt, &res)
+	require.True(t, exhausted, "the hook must consume the actual default credit before any reset")
+	require.ErrorIs(t, err, errWALPressureHold)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Zero(t, resetCalls, "expired credit cannot dispatch a reset")
+	require.Zero(t, busyResults, "deadline refusal is not a genuine SQLite Busy tuple")
+	require.False(t, res.pressureResetBusy)
+	require.False(t, res.pauseClosed)
+	require.False(t, s.readGate.closed.Load())
+	require.NoError(t, s.writeMu.LockContext(ctx), "a refused reset releases the writer")
+	s.writeMu.Unlock()
 }
 
 func TestPressureReaderDrainReopensForCancellationAndForegroundWrite(t *testing.T) {
