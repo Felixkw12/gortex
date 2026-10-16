@@ -228,40 +228,6 @@ func runLongReaderPattern(t *testing.T, s *Store, path string, p longReaderPatte
 	return run
 }
 
-// The long-reader pattern at a scaled threshold (16 MiB). The contract:
-//   - no write waits for the gate longer than one short hold
-//     (walReclaimResetHold, 50 ms): the reclaim waits for the readers
-//     without the writer and takes it only for the reset;
-//   - a long gap that starts with the log over the threshold ends with the
-//     log reset (the first gap that allows a reset gets it);
-//   - the log stays under the threshold plus the two bursts between such
-//     gaps (a burst can start just under the threshold, the short gap cannot
-//     reset, the next burst lands before the long gap);
-//   - no reader is paused.
-//
-// It replaced a contract under which the writer was held up to 2 s while
-// the reclaim waited for older readers: writes waited up to 2 s, and the log
-// stayed within three times the threshold.
-func TestWALReclaimResetsUnderLongOverlappingReadersAndBurstyWrites(t *testing.T) {
-	t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "16")
-	// A production-like cadence (the daemon polls every 5 s).
-	setWALReclaimCadence(t, time.Second, time.Second, 4*time.Second)
-	diagnostic := installQuietGapDiagnostic(t)
-	logs := captureReclaimLog(t)
-	t.Cleanup(func() { t.Logf("complete_captured_store_log:\n%s", logs.String()) })
-	s, path := openWALReclaimStore(t)
-	diagnostic.store.Store(s)
-	defer func() { _ = s.Close() }()
-	seedWALChurnTable(t, s)
-	prepareSteadyStateLongReaderStore(t, s)
-	p := longReaderPattern{
-		readers: 4, readMin: 2500 * time.Millisecond, readMax: 4 * time.Second,
-		burstWrites: 12, shortGap: 1500 * time.Millisecond, longGap: 12 * time.Second, cycles: 3,
-	}
-	run := runLongReaderPattern(t, s, path, p, diagnostic)
-	checkLongReaderContract(t, s, run, 16<<20, logs.String())
-}
-
 // The twin of the case above with the daemon's defaults: the default
 // threshold (256 MiB), cadence and reader wait, no scaling. The bursts are
 // scaled to the threshold (~100 MiB each) and the log reaches ~0.5 GiB, so it

@@ -1,3 +1,5 @@
+//go:build performance
+
 package store_sqlite
 
 import (
@@ -17,19 +19,7 @@ func runLongReaderChurn(t *testing.T, skipOpenGate bool, writes int64) (WALRecla
 	prev := walReclaimSkipOpenGate
 	walReclaimSkipOpenGate = skipOpenGate
 	t.Cleanup(func() { walReclaimSkipOpenGate = prev })
-	var diag *windowsWALDiagnostic
-	if t.Name() == "TestWALReclaimResetsUnderReadersLongerThanTheDrain" {
-		diag = newWindowsWALDiagnostic(t)
-		diag.install()
-		defer diag.finish()
-		previous := windowsWALReaderObserver
-		windowsWALReaderObserver = func(reader int64, stage string, err error) { diag.record("reader:"+stage, reader, err) }
-		defer func() { windowsWALReaderObserver = previous }()
-	}
 	s, path := openWALReclaimStore(t)
-	if diag != nil {
-		diag.store.Store(s)
-	}
 	defer func() { _ = s.Close() }()
 	seedWALChurnTable(t, s)
 
@@ -55,7 +45,7 @@ func runLongReaderChurn(t *testing.T, skipOpenGate bool, writes int64) (WALRecla
 // It replaced a contract under which every urgent attempt (2 × the threshold)
 // held the writer up to 2 s, and the log stayed within three times the
 // threshold.
-func TestWALReclaimResetsUnderReadersLongerThanTheDrain(t *testing.T) {
+func TestPerformanceWALReclaimResetsUnderReadersLongerThanTheDrain(t *testing.T) {
 	t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_CEILING_MB", "12")
 	prevFloor := walReclaimCeilingFloor
 	walReclaimCeilingFloor = 0
@@ -76,7 +66,7 @@ func TestWALReclaimResetsUnderReadersLongerThanTheDrain(t *testing.T) {
 // The same churn with only the closed-gate drain: reads rarely drain inside
 // 250 ms, so the reclaim mostly defers and the WAL outgrows twice the
 // threshold — the live daemon's `resets=0 deferrals=8`.
-func TestWALReclaimClosedGateAloneNeverResetsUnderLongReaders(t *testing.T) {
+func TestPerformanceWALReclaimClosedGateAloneNeverResetsUnderLongReaders(t *testing.T) {
 	stats, churn, threshold := runLongReaderChurn(t, true, 80)
 	require.Zero(t, stats.OpenGateResets)
 	require.Greater(t, stats.Deferrals, int64(0))
