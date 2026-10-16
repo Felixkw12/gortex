@@ -208,6 +208,7 @@ func contractCoreCapabilityTable() []contractCoreCapRow {
 		{"AnalysisQueryStore", capOf[graph.AnalysisQueryStore], capDropped, capReasonBackend},
 		{"BundleFingerprintSink", capOf[graph.BundleFingerprintSink], capDropped, capReasonBackend},
 		{"ContractRepoProjectionReader", capOf[graph.ContractRepoProjectionReader], capDropped, capReasonBackend},
+		{"OverlayLayerContractFileNodesReader", capOf[graph.OverlayLayerContractFileNodesReader], capDropped, "checked physical-layer file nodes; graph.ContractFileNodesContext unwraps and composes the selected reader with its ownership masks instead of forwarding physical rows on the request wrapper"},
 		{"ContractStateStore", capOf[graph.ContractStateStore], capDropped, capReasonBackend},
 		{"FileMetaReader", capOf[graph.FileMetaReader], capDropped, capReasonBackend},
 		{"RepoIndexStateReader", capOf[graph.RepoIndexStateReader], capDropped, capReasonBackend},
