@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -49,12 +50,14 @@ func awaitFixture(t *testing.T, gate chan struct{}) (*coordinatorFixture, *Check
 // layer, instead of building direct.
 func TestEditAtTheCapWaitsForTheRunningFold(t *testing.T) {
 	gate := make(chan struct{})
-	f, _, l, reports := awaitFixture(t, gate)
-	// Release the fold shortly after the edit starts waiting.
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		close(gate)
-	}()
+	f, c, l, reports := awaitFixture(t, gate)
+	// Release after the edit captures the actual in-flight publication; a
+	// wall-clock delay can let its physical copy finish before parent selection.
+	var release sync.Once
+	defer release.Do(func() { close(gate) })
+	c.compaction.mu.Lock()
+	c.compaction.awaitHook = func() { release.Do(func() { close(gate) }) }
+	c.compaction.mu.Unlock()
 	started := time.Now()
 	at := mcpEdit(t, l, f, func() { chainBurstEdit(t, f, maxChainWalkDepth) })
 	waited := time.Since(started)

@@ -84,9 +84,13 @@ func (c *CheckoutCoordinator) awaitRunningFold(ctx context.Context, commitGenera
 	}
 	c.compaction.mu.Lock()
 	pub := c.compaction.publication
+	await := c.compaction.awaitHook
 	c.compaction.mu.Unlock()
 	if pub == nil {
 		return 0
+	}
+	if await != nil {
+		await()
 	}
 	budget := c.inlineFoldBudget()
 	started := time.Now()

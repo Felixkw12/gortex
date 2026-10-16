@@ -177,6 +177,9 @@ type dirtyChainCompactor struct {
 	// stepHook is a test seam: it runs before the first step (0) and after
 	// every step of a stepped fold.
 	stepHook func(ctx context.Context, step int)
+	// awaitHook is a test seam after an edit captures the in-flight publication.
+	// Production leaves it nil.
+	awaitHook func()
 	// copyHook is a test seam: it runs on every copied fold (inline or
 	// stepped) before the fold is checked, and may alter what was copied.
 	copyHook func(ctx context.Context, to int64) error
