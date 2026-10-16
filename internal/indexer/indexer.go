@@ -1555,6 +1555,15 @@ func (idx *Indexer) MaybeSeedPendingEnrich() bool {
 // compact string index as the in-memory-store fallback.
 func (idx *Indexer) runDeferredContracts() {
 	if idx.contractCoreInputs != nil || idx.contractCoreRuntime.Load() != nil {
+		if b := idx.coldManifestsForRegistry(idx.pendingContractReg); b != nil {
+			// Module graph artifacts and source-version receipts are core work,
+			// even when the contract attachment is built asynchronously. The
+			// dependency seed already ran before resolve; no legacy contract
+			// commit is needed to finish this captured manifest's census.
+			idx.extractExternalModulesForCensus(idx.pendingContractReg)
+			b.contractsReady = true
+			idx.finishColdManifests(b)
+		}
 		idx.pendingContractReg = nil
 		idx.deferredGoModDone = false
 		return
@@ -4602,8 +4611,8 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 		// nodes were available during ResolveAll's import-bridge pass;
 		// commitContracts is idempotent for those.
 		reporter.Report("extracting contracts", 0, 0)
+		idx.extractExternalModulesForCensus(contractReg)
 		if idx.contractCoreInputs == nil {
-			idx.extractExternalModulesForCensus(contractReg)
 			idx.extractDIContracts(contractReg)
 			idx.commitContracts(contractReg)
 		}
