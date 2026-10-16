@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"os"
 	"sort"
 	"strings"
 
@@ -62,6 +63,7 @@ func (r *Resolver) guardCrossPackageCallEdges(jobs []reindexJob, closure map[str
 	var provBatch []graph.EdgeProvenanceUpdate
 	var reindexBatch []graph.EdgeReindex
 	var spoolReverts []lspSpoolRevert
+	var sourceReverts []graph.PlaceholderRepoint
 	for i := range jobs {
 		j := &jobs[i]
 		// A concurrent edit during a chunked ResolveAll yield may have evicted
@@ -153,6 +155,18 @@ func (r *Resolver) guardCrossPackageCallEdges(jobs []reindexJob, closure map[str
 		// batches so the whole pass commits in two chunks instead of
 		// 2×N per-edge transactions.
 		oldResolved := j.edge.To
+		// Source reconciliation may already have lifted an arg_of/value_flow
+		// placeholder at this exact call site. Reverting only the call would
+		// leave that guessed producer bound. Restore the caller's source
+		// namespace, as applyRepoPrefix does, without touching other sites that
+		// legitimately use the same definition.
+		placeholder := j.oldTo
+		if callerNode != nil && callerNode.RepoPrefix != "" {
+			placeholder = callerNode.RepoPrefix + "/" + placeholder
+		}
+		sourceReverts = append(sourceReverts, graph.PlaceholderRepoint{
+			OldFrom: oldResolved, FilePath: j.edge.FilePath, Line: j.edge.Line, NewFrom: placeholder,
+		})
 		provBatch = append(provBatch, graph.EdgeProvenanceUpdate{Edge: j.edge, NewOrigin: ""})
 		j.edge.To = j.oldTo
 		j.edge.Confidence = 0
@@ -198,6 +212,9 @@ func (r *Resolver) guardCrossPackageCallEdges(jobs []reindexJob, closure map[str
 	}
 	if len(reindexBatch) > 0 {
 		r.graph.ReindexEdges(reindexBatch)
+	}
+	if len(sourceReverts) > 0 && os.Getenv("GORTEX_RESOLVE_FROM_RECONCILE") != "0" {
+		graph.ReconcilePlaceholderSources(r.graph, sourceReverts)
 	}
 	// A reverted edge may still hold a deferred LSP verify-record spooled
 	// while it was heuristically bound. Re-snapshot those records to the
