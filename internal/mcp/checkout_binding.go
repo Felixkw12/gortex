@@ -442,6 +442,7 @@ func (s *Server) awaitCheckoutFreshness(
 		}
 		waitCtx, cancel := context.WithDeadline(ctx, deadline)
 		ticket, err := requestFreshnessTicket(waitCtx, waiter, checkout, trace)
+		waitErr := waitCtx.Err()
 		cancel()
 		if err != nil {
 			if freshnessWaitRetryable(err) {
@@ -465,7 +466,7 @@ func (s *Server) awaitCheckoutFreshness(
 				// caller's wait_deadline ends the wait ~12x early. The
 				// retryable check runs first so a busy/superseded refusal that
 				// merely wraps a context error keeps its own meaning.
-				if reason, expired := freshnessBoundExpiry(ctx, deadline); expired {
+				if reason, expired := freshnessAdmissionBoundExpiry(ctx, deadline, waitErr); expired {
 					return false, reason
 				}
 				// Not one of ours: the coordinator gave up on its own bound
@@ -617,6 +618,19 @@ func freshnessBoundExpiry(ctx context.Context, deadline time.Time) (string, bool
 		return freshReasonInterrupted, true
 	}
 	if !time.Now().Before(deadline) {
+		return freshReasonDeadlineExceeded, true
+	}
+	return "", false
+}
+
+// Preserve the owned admission context's deadline before canceling it. Its
+// timer can report expiry before the wall-clock comparison observes it, while
+// a coordinator's private context expiry leaves this owned context live.
+func freshnessAdmissionBoundExpiry(ctx context.Context, deadline time.Time, waitErr error) (string, bool) {
+	if reason, expired := freshnessBoundExpiry(ctx, deadline); expired {
+		return reason, true
+	}
+	if errors.Is(waitErr, context.DeadlineExceeded) {
 		return freshReasonDeadlineExceeded, true
 	}
 	return "", false
