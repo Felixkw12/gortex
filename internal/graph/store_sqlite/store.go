@@ -550,6 +550,10 @@ type Store struct {
 	// Generation 0 is the base corpus every store starts with.
 	viewGen int64
 
+	// contractPublicationSource is checked per-capture immutable ancestry, not
+	// a cached catalog verdict. Ordinary generation derivations discard it.
+	contractPublicationSource *contractPublicationSource
+
 	// managedPayloadGeneration requires fresh lifecycle admission for writes.
 	// It is immutable per handle, not shared write authority or a seal verdict.
 	managedPayloadGeneration bool

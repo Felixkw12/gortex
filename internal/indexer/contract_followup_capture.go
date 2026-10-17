@@ -129,6 +129,27 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 			names = append(names, name)
 		}
 		sort.Strings(names)
+		// Mint selected publication ancestry while these sources are leased,
+		// before census/extraction can overlap a content-equal background fold.
+		// A later real input mutation still fails the physical publication CAS.
+		receiver := options.Store.AtGeneration(0)
+		if prepared != nil {
+			if len(prepared.sources) == 0 {
+				return snapshot, nil, graph.ErrContractInputVector
+			}
+			receiver = prepared.sources[len(prepared.sources)-1].Handle
+		}
+		publicationSources := make(map[string]*store_sqlite.Store, len(names))
+		for _, name := range names {
+			state, sourceErr := graph.ComposeContractInputState(name, checkout, inputs.Witnesses)
+			if sourceErr != nil {
+				return snapshot, nil, sourceErr
+			}
+			publicationSources[name], sourceErr = receiver.CaptureContractPublicationSource(ctx, state, inputs.Witnesses)
+			if sourceErr != nil {
+				return snapshot, nil, sourceErr
+			}
+		}
 		captureOptions := options
 		captureOptions.selectedInputs = inputs
 		sourceOwned = false
@@ -151,13 +172,6 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 		}()
 		snapshot.Inputs = append([]graph.ContractInputWitness(nil), inputs.Witnesses...)
 		snapshot.Key = graph.ContractAttachmentKey{RepoPrefix: repo, CheckoutID: checkout, InputVersion: inputs.State.InputVersion, InputFingerprint: inputs.State.InputFingerprint}
-		receiver := options.Store.AtGeneration(0)
-		if prepared != nil {
-			if len(prepared.sources) == 0 {
-				return ContractFollowupSnapshot{}, nil, graph.ErrContractInputVector
-			}
-			receiver = prepared.sources[len(prepared.sources)-1].Handle
-		}
 		for _, name := range names {
 			state, e := graph.ComposeContractInputState(name, checkout, snapshot.Inputs)
 			if e != nil || !state.Accepted {
@@ -191,7 +205,7 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 					}
 				}
 			}
-			targets = append(targets, ContractFollowupTarget{Key: key, Work: work, Catalog: receiver})
+			targets = append(targets, ContractFollowupTarget{Key: key, Work: work, Catalog: publicationSources[name]})
 		}
 		if err = inputs.Validate(ctx); err != nil {
 			return ContractFollowupSnapshot{}, nil, err

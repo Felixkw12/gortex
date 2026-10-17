@@ -216,7 +216,14 @@ func (s *Store) validateContractAttachmentPublicationTx(ctx context.Context, tx 
 			err = ErrCatalogStaleGuard
 		}
 		if err == nil {
-			chain, err = contractGenerationAncestryTx(ctx, tx, s.viewGen)
+			if source := s.contractPublicationSource; source != nil {
+				if source.expected != expected || !slices.Equal(source.witnesses, witnesses) {
+					return ErrCatalogStaleGuard
+				}
+				chain = source.chain
+			} else {
+				chain, err = contractGenerationAncestryTx(ctx, tx, s.viewGen)
+			}
 		}
 		if err == nil {
 			err = validateContractInputWitnessesTx(ctx, tx, witnesses)
