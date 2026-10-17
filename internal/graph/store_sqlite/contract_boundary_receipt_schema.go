@@ -23,6 +23,16 @@ const contractBoundaryBaselineTableBody = ` (
 
 const contractBoundaryKeysFileIndexDDL = `CREATE INDEX IF NOT EXISTS contract_boundary_keys_file ON generation_contract_boundary_keys(view_gen,repo_prefix,checkout_id,file_path,key_kind,lookup_key);`
 
+// Receipt rows can contain multi-megabyte evidence. In a WITHOUT ROWID table,
+// even a failed primary-key seek can visit overflow payload while comparing
+// records. Keep the stamp scan's complete projection in a narrow index.
+const contractBoundaryStampIndexDDL = `CREATE INDEX IF NOT EXISTS contract_boundary_receipt_stamps ON generation_contract_boundary_receipt(view_gen,repo_prefix,checkout_id,file_path,fingerprint,source_fingerprint,accepted);`
+
+func createContractBoundaryStampIndex(tx *sql.Tx) error {
+	_, err := tx.Exec(contractBoundaryStampIndexDDL)
+	return err
+}
+
 func createContractBoundaryReceiptTables(tx *sql.Tx) error {
 	for _, t := range []generationMaskTable{{table: "generation_contract_boundary_receipt", body: contractBoundaryReceiptTableBody}, {table: "generation_contract_boundary_keys", body: contractBoundaryKeysTableBody}, {table: "generation_contract_boundary_baseline", body: contractBoundaryBaselineTableBody}} {
 		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS ` + t.table + t.body); err != nil {

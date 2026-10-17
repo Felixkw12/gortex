@@ -584,7 +584,7 @@ func (s *Store) ContractBoundaryReceiptStampsContext(ctx context.Context, repo, 
 		return nil, err
 	}
 	out := make(map[string]ContractBoundaryReceiptStamp)
-	const columns = `SELECT file_path,fingerprint,source_fingerprint,accepted FROM generation_contract_boundary_receipt WHERE view_gen=? AND repo_prefix=? AND checkout_id=?`
+	const columns = `SELECT file_path,fingerprint,source_fingerprint,accepted FROM generation_contract_boundary_receipt INDEXED BY contract_boundary_receipt_stamps WHERE view_gen=? AND repo_prefix=? AND checkout_id=?`
 	queries := [][]any{{columns, s.viewGen, repo, actor}}
 	if paths != nil {
 		queries = nil

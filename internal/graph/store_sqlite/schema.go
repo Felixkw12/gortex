@@ -1652,6 +1652,7 @@ func buildGenerationMaskSchemaSQL() string {
 	b.WriteString(contractAttachmentSchemaSQL)
 	b.WriteString(contractAttachmentInputsSchemaSQL)
 	b.WriteString(contractBoundaryKeysFileIndexDDL)
+	b.WriteString(contractBoundaryStampIndexDDL)
 	return b.String()
 }
 
