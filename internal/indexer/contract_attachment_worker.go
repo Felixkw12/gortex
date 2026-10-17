@@ -1408,9 +1408,6 @@ func (e *contractFollowupEvidence) GetNodesByIDs(ids []string) map[string]*graph
 	for _, node := range out {
 		e.ledger.nodes(node)
 	}
-	if e.err == nil {
-		e.ledger.read(contractReadIDs, ids, out)
-	}
 	return out
 }
 
@@ -1434,6 +1431,11 @@ func (e *contractFollowupEvidence) getNodesByIDs(ids []string) map[string]*graph
 		e.fail(err)
 		return nil
 	}
+	// Only a selected-core fetch is an input. Scratch hits may already
+	// include shapes derived from earlier recorded inputs in this round.
+	// Comparing those derived values with pristine core rows would invalidate
+	// an otherwise unchanged round during its next recheck.
+	imported := make(map[string]*graph.Node, len(found))
 	for _, node := range found {
 		if node == nil {
 			e.fail(fmt.Errorf("contract followup: nil selected source"))
@@ -1449,6 +1451,10 @@ func (e *contractFollowupEvidence) getNodesByIDs(ids []string) map[string]*graph
 		}
 		e.AddNode(copyNode)
 		out[copyNode.ID] = copyNode
+		imported[copyNode.ID] = copyNode
+	}
+	if e.err == nil {
+		e.ledger.read(contractReadIDs, missing, imported)
 	}
 	return out
 }
