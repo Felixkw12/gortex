@@ -9004,10 +9004,7 @@ func (idx *Indexer) HasChangesSinceMtimes(root string) bool {
 		if d.IsDir() {
 			return nil
 		}
-		if _, ok := idx.effectiveLanguage(path, nil); !ok {
-			return nil
-		}
-		if idx.shouldExclude(path, absRoot, false) {
+		if !idx.admitWalkEntry(absRoot, path, -1, false).admit {
 			return nil
 		}
 		rel := idx.relKey(path)
@@ -9149,11 +9146,11 @@ func (idx *Indexer) changedSinceMtimesCensus(root string) (
 		if d.IsDir() {
 			return nil
 		}
-		lang, supported := idx.effectiveLanguage(path, nil)
-		if !supported && !idx.isIncrementalContractManifest(path) {
+		if idx.shouldExclude(path, absRoot, false) {
 			return nil
 		}
-		if idx.shouldExclude(path, absRoot, false) {
+		lang, supported := idx.effectiveLanguage(path, nil)
+		if !supported && !idx.isIncrementalContractManifest(path) {
 			return nil
 		}
 		rel := idx.relKey(path)
