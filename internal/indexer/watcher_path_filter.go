@@ -3,6 +3,8 @@ package indexer
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/zzet/gortex/internal/excludes"
 )
 
 // watcherExcludeFilter adapts the indexer's exclude matcher to the file
@@ -36,7 +38,16 @@ func (f *watcherExcludeFilter) ShouldInclude(path string) bool {
 	if root == "" {
 		return !f.w.excludes.MatchRel(path)
 	}
-	return !f.w.excludes.MatchAbs(path, root)
+	rel, err := filepath.Rel(root, path)
+	// Defer agent-config files and potentially re-included subtrees to the
+	// full check, without statting paths in this backend hot path.
+	if err == nil && excludes.InAgentConfigDir(rel) {
+		return true
+	}
+	if !f.w.excludes.MatchAbs(path, root) {
+		return true
+	}
+	return err == nil && f.w.excludes.HasNegatedDescendant(filepath.ToSlash(rel))
 }
 
 // isProbeMarkerPath reports whether path names a watcher handshake probe.
