@@ -577,8 +577,8 @@ type ContractBoundaryReceiptStamp struct {
 
 // ContractBoundaryReceiptStampsContext reads the non-payload columns of this
 // generation's receipt rows for one repository and actor: every row when
-// paths is nil, otherwise the named paths. The payload column is stored last,
-// so the read never touches its overflow pages.
+// paths is nil, otherwise the named paths. The covering stamp index keeps
+// seeks and returned columns off the primary table's receipt overflow pages.
 func (s *Store) ContractBoundaryReceiptStampsContext(ctx context.Context, repo, actor string, paths []string) (map[string]ContractBoundaryReceiptStamp, error) {
 	if err := s.requireContractBoundaryContext(ctx); err != nil {
 		return nil, err
