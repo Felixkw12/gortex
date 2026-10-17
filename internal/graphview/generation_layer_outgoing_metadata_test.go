@@ -37,3 +37,26 @@ func TestGenerationLayerCheckedOutgoingMetadataPreservesProvenanceAndContextOwne
 	require.ErrorIs(t, err, graph.ErrContractProjectionStale)
 	require.Nil(t, rows)
 }
+
+func TestGenerationLayerExtractionEdgesKeepContextAndRevisionFences(t *testing.T) {
+	store := openTestStore(t)
+	_, handle := beginTestGeneration(t, store, "checked-extraction-metadata")
+	handle.AddBatch([]*graph.Node{{ID: ctxChangedID, Kind: graph.KindFunction, FilePath: ctxChangedFile}, {ID: ctxContextID, Kind: graph.KindFunction, FilePath: ctxContextFile}}, []*graph.Edge{
+		{From: ctxChangedID, To: ctxContextID, Kind: graph.EdgeCalls, FilePath: ctxChangedFile, Meta: map[string]any{"via": "spring.Bean"}},
+		{From: ctxContextID, To: ctxChangedID, Kind: graph.EdgeConsumes, FilePath: ctxContextFile, Meta: map[string]any{graph.MetaDIToken: "CONTEXT"}},
+		{From: ctxChangedID, To: ctxContextID, Kind: graph.EdgeReferences, FilePath: ctxChangedFile},
+	})
+	require.NoError(t, handle.SetFileMasks([]store_sqlite.FileMask{{FilePath: ctxChangedFile, Mode: store_sqlite.OwnershipReplace}, {FilePath: ctxContextFile, Mode: store_sqlite.OwnershipContext}}))
+	layer, err := NewGenerationLayer(handle)
+	require.NoError(t, err)
+	rows, truncated, err := layer.LayerContractExtractionEdgesContext(t.Context(), []string{ctxChangedID, ctxContextID}, 10)
+	require.NoError(t, err)
+	require.False(t, truncated)
+	require.Len(t, rows[ctxChangedID], 1)
+	require.Equal(t, "spring.Bean", rows[ctxChangedID][0].Meta["via"])
+	require.Empty(t, rows[ctxContextID])
+	handle.AddNode(&graph.Node{ID: ctxChangedID, Name: "Corrected", Kind: graph.KindFunction, FilePath: ctxChangedFile})
+	rows, _, err = layer.LayerContractExtractionEdgesContext(t.Context(), nil, 10)
+	require.ErrorIs(t, err, graph.ErrContractProjectionStale)
+	require.Nil(t, rows, "even empty requests check the captured layer revision")
+}

@@ -766,7 +766,13 @@ func readContractFollowupCoreFile(ctx context.Context, reader graph.Reader, file
 	for _, node := range nodes {
 		ids = append(ids, node.ID)
 	}
-	rows, truncated, e := graph.GetOutEdgesByNodeIDsWithMetadataContext(ctx, reader, ids, graph.ContractProjectionRowLimit)
+	var rows map[string][]*graph.Edge
+	var truncated bool
+	if extraction, _ := ctx.Value(contractExtractionCoreContextKey{}).(bool); extraction {
+		rows, truncated, e = graph.ContractExtractionEdgesContext(ctx, reader, ids, graph.ContractProjectionRowLimit)
+	} else {
+		rows, truncated, e = graph.GetOutEdgesByNodeIDsWithMetadataContext(ctx, reader, ids, graph.ContractProjectionRowLimit)
+	}
 	if e != nil {
 		return ContractFollowupCoreFile{}, e
 	}

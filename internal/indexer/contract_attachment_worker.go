@@ -996,11 +996,12 @@ type contractFollowupEvidence struct {
 	// guard brackets every read the facade answers from the core.
 	guard *contractReadGuard
 	// semantic answers binding-type lookups from the selected core.
-	semantic        graph.SemanticBindingTypeReader
-	readCore        func(context.Context, ContractFollowupFile) (ContractFollowupCoreFile, error)
-	allowedRepos    map[string]bool
-	loaded          map[string]bool
-	loadedFileNodes map[string]bool
+	semantic         graph.SemanticBindingTypeReader
+	readCore         func(context.Context, ContractFollowupFile) (ContractFollowupCoreFile, error)
+	allowedRepos     map[string]bool
+	loaded           map[string]bool
+	loadedExtraction map[string]bool
+	loadedFileNodes  map[string]bool
 	// Completed names belong to this private, single-worker captured evidence.
 	// Keep raw row counts so cached names still consume the request's budget;
 	// scratch results and final accepted-source fences remain live.
@@ -1208,10 +1209,14 @@ func (e *contractFollowupEvidence) loadFile(path string) ([]*graph.Node, []*grap
 }
 
 func (e *contractFollowupEvidence) loadFileRows(path string) ([]*graph.Node, []*graph.Edge, error) {
+	return e.loadFileRowsContext(path, e.ctx, false)
+}
+
+func (e *contractFollowupEvidence) loadFileRowsContext(path string, ctx context.Context, extraction bool) ([]*graph.Node, []*graph.Edge, error) {
 	if e.loaded == nil {
 		e.loaded = make(map[string]bool)
 	}
-	if e.loaded[path] {
+	if e.loaded[path] || extraction && e.loadedExtraction[path] {
 		file := e.files[path]
 		p, readErr := e.scratch.LayerContractFileProjectionContext(e.ctx, file.RepoPrefix, []string{path})
 		if readErr != nil {
@@ -1245,7 +1250,7 @@ func (e *contractFollowupEvidence) loadFileRows(path string) ([]*graph.Node, []*
 		}
 		return nil, nil, fmt.Errorf("contract followup: selected file outside accepted census %q", path)
 	}
-	rows, err := e.readCore(e.ctx, file)
+	rows, err := e.readCore(ctx, file)
 	if err != nil {
 		e.fail(err)
 		return nil, nil, err
@@ -1293,7 +1298,18 @@ func (e *contractFollowupEvidence) loadFileRows(path string) ([]*graph.Node, []*
 	} else {
 		e.AddBatch(nodes, edges)
 	}
-	e.loaded[path] = true
+	if extraction {
+		if e.loadedExtraction == nil {
+			e.loadedExtraction = make(map[string]bool)
+		}
+		if e.loadedFileNodes == nil {
+			e.loadedFileNodes = make(map[string]bool)
+		}
+		e.loadedExtraction[path] = true
+		e.loadedFileNodes[path] = true
+	} else {
+		e.loaded[path] = true
+	}
 	return nodes, edges, e.err
 }
 

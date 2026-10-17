@@ -11,6 +11,16 @@ import (
 // light projection cannot certify DI or contract-local syntax enrichment.
 // Errors return no usable rows; callers must reject Truncated=true.
 func (s *Store) GetOutEdgesByNodeIDsWithMetadataContext(ctx context.Context, ids []string, limit int) (map[string][]*graph.Edge, bool, error) {
+	return s.outgoingMetadataContext(ctx, ids, limit, false)
+}
+
+// ContractExtractionEdgesContext retains the ordinary full edge decoder and
+// exact-generation/bounded query, selecting only extraction candidate kinds.
+func (s *Store) ContractExtractionEdgesContext(ctx context.Context, ids []string, limit int) (map[string][]*graph.Edge, bool, error) {
+	return s.outgoingMetadataContext(ctx, ids, limit, true)
+}
+
+func (s *Store) outgoingMetadataContext(ctx context.Context, ids []string, limit int, extraction bool) (map[string][]*graph.Edge, bool, error) {
 	if ctx == nil {
 		return nil, false, fmt.Errorf("bounded metadata outgoing edges: nil context")
 	}
@@ -35,7 +45,11 @@ func (s *Store) GetOutEdgesByNodeIDsWithMetadataContext(ctx context.Context, ids
 		chunk := uniq[i:end]
 		remaining := limit - total
 		queryLimit := remaining + 1
-		q := `SELECT ` + lookupEdgeCols + ` FROM edges WHERE from_id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ? LIMIT ?`
+		kindFilter := ""
+		if extraction {
+			kindFilter = " AND kind IN ('calls','provides','consumes')"
+		}
+		q := `SELECT ` + lookupEdgeCols + ` FROM edges WHERE from_id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ?` + kindFilter + ` LIMIT ?`
 		args := toAnyArgs(chunk)
 		args = append(args, s.viewGen, queryLimit)
 		rows, err := s.db.QueryContext(ctx, q, args...)

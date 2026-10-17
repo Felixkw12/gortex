@@ -14,10 +14,46 @@ type OverlayLayerOutgoingMetadataReader interface {
 	LayerOutEdgesWithMetadataContext(context.Context, []string, int) (map[string][]*Edge, bool, error)
 }
 
+// ContractExtractionEdgeReader supplies full metadata for calls/provides/consumes
+// only. Ordinary per-file contract extraction consumes no other edge kinds.
+// A reader without this optional projection keeps the checked full-read fallback.
+type ContractExtractionEdgeReader interface {
+	ContractExtractionEdgesContext(context.Context, []string, int) (map[string][]*Edge, bool, error)
+}
+type OverlayLayerContractExtractionEdgeReader interface {
+	LayerContractExtractionEdgesContext(context.Context, []string, int) (map[string][]*Edge, bool, error)
+}
+
+func contractExtractionEdgeKind(kind EdgeKind) bool {
+	return kind == EdgeCalls || kind == EdgeProvides || kind == EdgeConsumes
+}
+func contractExtractionEdgeRows(rows map[string][]*Edge) map[string][]*Edge {
+	out := make(map[string][]*Edge, len(rows))
+	for id, edges := range rows {
+		for _, edge := range edges {
+			if contractExtractionEdgeKind(edge.Kind) {
+				out[id] = append(out[id], edge)
+			}
+		}
+	}
+	return out
+}
+
+// ContractExtractionEdgesContext retains complete metadata for the edge kinds
+// consumed by per-file extraction. It uses the same selected recording/endpoint
+// ownership and checked revision fences as full outgoing evidence.
+func ContractExtractionEdgesContext(ctx context.Context, reader Reader, ids []string, limit int) (map[string][]*Edge, bool, error) {
+	return outgoingMetadataContext(ctx, reader, ids, limit, true)
+}
+
 // GetOutEdgesByNodeIDsWithMetadataContext preserves recording-file ownership
 // and endpoint masks while retaining all metadata. Unsupported and partial
 // physical readers never become an apparently complete empty adjacency.
 func GetOutEdgesByNodeIDsWithMetadataContext(ctx context.Context, reader Reader, ids []string, limit int) (map[string][]*Edge, bool, error) {
+	return outgoingMetadataContext(ctx, reader, ids, limit, false)
+}
+
+func outgoingMetadataContext(ctx context.Context, reader Reader, ids []string, limit int, extraction bool) (map[string][]*Edge, bool, error) {
 	if ctx == nil {
 		return nil, false, errors.New("outgoing metadata: nil context")
 	}
@@ -27,25 +63,34 @@ func GetOutEdgesByNodeIDsWithMetadataContext(ctx context.Context, reader Reader,
 	ids = uniqueNonEmpty(ids)
 	switch r := reader.(type) {
 	case *DeltaWriter:
-		return GetOutEdgesByNodeIDsWithMetadataContext(ctx, r.view, ids, limit)
+		return outgoingMetadataContext(ctx, r.view, ids, limit, extraction)
 	case *OverlaidView:
-		return r.outgoingMetadataContext(ctx, ids, limit)
+		return r.outgoingMetadataSelectionContext(ctx, ids, limit, extraction)
 	case Unwrapper:
 		if next := r.Unwrap(); next != nil {
-			return GetOutEdgesByNodeIDsWithMetadataContext(ctx, next, ids, limit)
+			return outgoingMetadataContext(ctx, next, ids, limit, extraction)
+		}
+	}
+	if extraction {
+		if selected, ok := reader.(ContractExtractionEdgeReader); ok {
+			return selected.ContractExtractionEdgesContext(ctx, ids, limit)
 		}
 	}
 	checked, ok := reader.(OutgoingMetadataReader)
 	if !ok {
 		return nil, false, ErrOutgoingMetadataUnsupported
 	}
-	return checked.GetOutEdgesByNodeIDsWithMetadataContext(ctx, ids, limit)
+	rows, truncated, err := checked.GetOutEdgesByNodeIDsWithMetadataContext(ctx, ids, limit)
+	if extraction && err == nil && !truncated {
+		rows = contractExtractionEdgeRows(rows)
+	}
+	return rows, truncated, err
 }
 
-func (v *OverlaidView) outgoingMetadataContext(ctx context.Context, ids []string, limit int) (map[string][]*Edge, bool, error) {
+func (v *OverlaidView) outgoingMetadataSelectionContext(ctx context.Context, ids []string, limit int, extraction bool) (map[string][]*Edge, bool, error) {
 	base := make(map[string][]*Edge)
 	if v.base != nil {
-		rows, truncated, err := GetOutEdgesByNodeIDsWithMetadataContext(ctx, v.base, ids, ContractProjectionRowLimit)
+		rows, truncated, err := outgoingMetadataContext(ctx, v.base, ids, ContractProjectionRowLimit, extraction)
 		if err != nil {
 			return nil, false, err
 		}
@@ -61,7 +106,17 @@ func (v *OverlaidView) outgoingMetadataContext(ctx context.Context, ids []string
 	if !ok {
 		return nil, false, ErrOutgoingMetadataUnsupported
 	}
-	own, truncated, err := checked.LayerOutEdgesWithMetadataContext(ctx, ids, ContractProjectionRowLimit)
+	var own map[string][]*Edge
+	var truncated bool
+	var err error
+	if selected, ok := v.layer.(OverlayLayerContractExtractionEdgeReader); extraction && ok {
+		own, truncated, err = selected.LayerContractExtractionEdgesContext(ctx, ids, ContractProjectionRowLimit)
+	} else {
+		own, truncated, err = checked.LayerOutEdgesWithMetadataContext(ctx, ids, ContractProjectionRowLimit)
+		if extraction && err == nil && !truncated {
+			own = contractExtractionEdgeRows(own)
+		}
+	}
 	if err != nil {
 		return nil, false, err
 	}

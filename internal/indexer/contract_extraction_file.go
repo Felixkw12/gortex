@@ -1,6 +1,14 @@
 package indexer
 
-import "github.com/zzet/gortex/internal/graph"
+import (
+	"context"
+	"github.com/zzet/gortex/internal/graph"
+)
+
+// The private context marker narrows only the captured core's physical edge
+// projection. ReadCoreFile wrappers still observe every read; custom readers
+// may retain the complete checked fallback. Full enrichment never sets it.
+type contractExtractionCoreContextKey struct{}
 
 // The fixed per-file extractor list in buildPerFileContractExtractors consumes
 // source and nodes, not edges. Extraction retains only these DI/Spring edges
@@ -23,7 +31,7 @@ func (e *contractFollowupEvidence) loadExtractionFile(path string) ([]*graph.Nod
 	e.ledger.owner(path)
 	e.ledger.key("path:", path)
 	defer e.guard.enter()()
-	nodes, edges, err := e.loadFileRows(path)
+	nodes, edges, err := e.loadFileRowsContext(path, context.WithValue(e.ctx, contractExtractionCoreContextKey{}, true), true)
 	if err != nil {
 		return nil, nil, err
 	}
