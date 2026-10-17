@@ -72,6 +72,18 @@ func (v *OverlaidView) outgoingMetadataContext(ctx context.Context, ids []string
 	if !ok {
 		return nil, false, ErrContractProjectionUnsupported
 	}
+	// Coarse source/recording claims already decide these rows. Discard them
+	// before hydrating endpoint identities that cannot affect the answer.
+	// Keep the checked projection below even when no base rows survive.
+	remaining := make(map[string][]*Edge, len(base))
+	for id, rows := range base {
+		for _, edge := range rows {
+			if !v.overlayOwnsBaseEdge(edge.From, edge.FilePath) && !v.overlayClaimsBaseEdge(edge) {
+				remaining[id] = append(remaining[id], edge)
+			}
+		}
+	}
+	base = remaining
 	var endpoints []string
 	for _, rows := range base {
 		for _, e := range rows {
