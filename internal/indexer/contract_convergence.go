@@ -2014,6 +2014,23 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 		}
 		p.bracket = appendUniqueSorted(nil, p.bracket...)
 	}
+	// Only extraction questions inside this R0/R1 bracket may share a checked
+	// backend projection. Every logical question still enters ReadCoreFile.
+	batch := &contractReplayCoreBatch{}
+	for _, p := range plans {
+		for _, read := range p.ledger.reads {
+			if read.kind != contractReadExtractionFile || len(read.args) != 1 {
+				continue
+			}
+			path := read.args[0]
+			if file, ok := c.files[path]; ok && slices.Contains(union, path) {
+				if stamp, stamped := r0.Stamps[path]; stamped && stamp.quiescent() {
+					batch.add(file)
+				}
+			}
+		}
+	}
+	defer batch.close()
 	var evidence *contractFollowupEvidence
 	var scratch *store_sqlite.Store
 	var dir string
@@ -2026,6 +2043,8 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 		evidence, scratch, dir, err = c.openEvidence()
 		if err != nil {
 			evidence, scratch, dir = nil, nil, ""
+		} else {
+			evidence.ctx = context.WithValue(evidence.ctx, contractReplayCoreBatchKey{}, batch)
 		}
 		return err
 	}

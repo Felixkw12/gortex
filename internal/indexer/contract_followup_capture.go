@@ -785,6 +785,13 @@ func readContractFollowupSeeds(ctx context.Context, reader graph.Reader, handles
 // Core enrichment needs selected file nodes and their checked outgoing edges.
 // Derived contract ownership is neither a seed nor consumed by this read.
 func readContractFollowupCoreFile(ctx context.Context, reader graph.Reader, file ContractFollowupFile) (ContractFollowupCoreFile, error) {
+	if extraction, _ := ctx.Value(contractExtractionCoreContextKey{}).(bool); extraction {
+		if batch, _ := ctx.Value(contractReplayCoreBatchKey{}).(*contractReplayCoreBatch); batch != nil {
+			if rows, ok := batch.read(ctx, reader, file); ok {
+				return rows, nil
+			}
+		}
+	}
 	projection, e := graph.ContractFileNodesContext(ctx, reader, file.RepoPrefix, []string{file.Path})
 	if e != nil {
 		return ContractFollowupCoreFile{}, e
