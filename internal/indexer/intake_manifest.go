@@ -109,14 +109,11 @@ func (idx *Indexer) dryRunIntake(ctx context.Context, root string) (*IntakeManif
 	admittedDirs := map[string]*DirBucket{}
 	largest := make([]FileBucket, 0, 16)
 
-	err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
+	err = idx.walkDisk(absRoot, absRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
 		if d.IsDir() {
-			if idx.shouldPruneDir(path, absRoot) {
-				return filepath.SkipDir
-			}
 			return nil
 		}
 

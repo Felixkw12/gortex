@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -109,6 +110,16 @@ func (idx *Indexer) admitScopedWalkFile(root, absPath string) bool {
 	// the ignore list let the path through, so the manifest check is the whole
 	// remaining question.
 	return idx.isIncrementalContractManifest(absPath)
+}
+
+// walkDisk prunes excluded directories and leaves file admission to fn.
+func (idx *Indexer) walkDisk(root, scope string, fn fs.WalkDirFunc) error {
+	return filepath.WalkDir(scope, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() && idx.shouldPruneDir(path, root) {
+			return filepath.SkipDir
+		}
+		return fn(path, d, err)
+	})
 }
 
 // walkSource enumerates src through the same admission gate the
