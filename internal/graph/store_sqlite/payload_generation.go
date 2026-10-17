@@ -1047,6 +1047,16 @@ func (s *Store) retirePayloadGeneration(
 	}
 	s.retirementPreambles.Add(1)
 	seal.sweep.noteFenced(row)
+	// Failed preparation often leaves only a catalog reservation. Prove its
+	// emptiness after sealing instead of waiting behind payload reclamation
+	// before every empty step. Nonempty and quantum retirement keep their policy.
+	if budget.quantum == nil {
+		present, err := s.payloadGenerationHasRows(ctx, generationID)
+		if err != nil {
+			return s.noteRetirementFailure(generationID, err)
+		}
+		budget.emptyPayload = !present
+	}
 	return s.sweepFencedPayloadGeneration(ctx, catalog, row, seal, budget)
 }
 
@@ -1304,7 +1314,9 @@ func (s *Store) deletePayloadChunks(
 		// Over the WAL ceiling, give the reclaim a writer-idle window
 		// first (bounded; the chunk runs afterwards regardless).
 		if pass == nil || pass.budget.quantum == nil {
-			s.awaitWALUnderCeiling(ctx, generationID, &walEpisode)
+			if pass == nil || !pass.budget.emptyPayload {
+				s.awaitWALUnderCeiling(ctx, generationID, &walEpisode)
+			}
 			// An edit's writes go first: the chunk waits (bounded) while an
 			// edit-path mutation is announced or a writer is parked on the gate.
 			s.yieldToEditWriters(ctx)

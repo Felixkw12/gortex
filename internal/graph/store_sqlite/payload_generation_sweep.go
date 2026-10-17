@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,11 +96,14 @@ var ErrPayloadSweepBudgetExhausted = errors.New("store_sqlite: payload generatio
 // a fence, so a test that wants to prove the elapsed axis works must be able
 // to move time itself rather than sleep through it.
 type payloadSweepBudget struct {
-	maxRows    int64
-	maxChunks  int64
-	maxElapsed time.Duration
-	now        func() time.Time
-	quantum    *PayloadRetirementProgress
+	// emptyPayload is proved only after the retirement fence, seal and writer drain.
+	// Empty table steps add no payload WAL and need no reclamation wait.
+	emptyPayload bool
+	maxRows      int64
+	maxChunks    int64
+	maxElapsed   time.Duration
+	now          func() time.Time
+	quantum      *PayloadRetirementProgress
 }
 
 // defaultPayloadSweepBudget is what production retirement runs under.
@@ -431,6 +435,33 @@ func (s *Store) payloadSweepSteps(generationID int64) []payloadSweepStep {
 		})
 	}
 	return steps
+}
+
+// payloadGenerationHasRows covers exactly the populations retired by the sweep.
+// Call only after the generation is fenced, sealed and its writers drained:
+// a false result then remains true through the empty steps. The final catalog
+// delete still rechecks every reference. An error never grants this shortcut.
+func (s *Store) payloadGenerationHasRows(ctx context.Context, generationID int64) (bool, error) {
+	tables := []string{"analysis_generations"}
+	for _, docidMap := range generationFTSDocidMaps {
+		tables = append(tables, docidMap.ids)
+	}
+	tables = append(tables, payloadSweepTables()...)
+	tables = append(tables, "edges", "nodes")
+	var selects []string
+	var args []any
+	seen := make(map[string]bool)
+	for _, table := range tables {
+		if seen[table] {
+			continue
+		}
+		seen[table] = true
+		selects = append(selects, `SELECT 1 FROM "`+strings.ReplaceAll(table, `"`, `""`)+`" WHERE view_gen=?`)
+		args = append(args, generationID)
+	}
+	var present bool
+	err := s.db.QueryRowContext(ctx, "SELECT EXISTS("+strings.Join(selects, " UNION ALL ")+")", args...).Scan(&present)
+	return present, err
 }
 
 // sweepPayloadGeneration deletes every payload row a generation owns, in
