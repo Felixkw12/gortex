@@ -2,6 +2,7 @@ package store_sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -665,36 +666,60 @@ func (s *Store) ContractSeedEdgesContext(ctx context.Context, repo string) ([]*g
 // one repository: Java methods (Spring bean injection candidates) and nodes
 // that carry Spring configuration keys.
 func (s *Store) ContractSeedNodesContext(ctx context.Context, repo string) ([]*graph.Node, error) {
+	return s.contractSeedNodesContext(ctx, repo, nil)
+}
+
+// afterCandidates is a deterministic snapshot/cancellation test seam. Public
+// callers always pass nil; there is no new runtime option or retained cache.
+func (s *Store) contractSeedNodesContext(ctx context.Context, repo string, afterCandidates func()) ([]*graph.Node, error) {
 	if err := s.requireContractBoundaryContext(ctx); err != nil {
 		return nil, err
 	}
-	kindsJSON, err := json.Marshal([]string{string(graph.KindField), string(graph.KindType), string(graph.KindInterface), string(graph.KindMethod)})
+	// A mutable corpus can change between these two reads. Candidate eligibility
+	// and the full returned rows must come from the SAME SQLite snapshot.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, repoNodesByKindsWithMetaKeyQuery(false), string(kindsJSON), repo, s.viewGen, s.viewGen)
+	defer func() { _ = tx.Rollback() }()
+	ids, err := s.contractSeedNodeIDsContext(ctx, tx, repo)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	seen := make(map[string]bool)
+	if afterCandidates != nil {
+		afterCandidates()
+	}
 	var out []*graph.Node
-	for rows.Next() {
-		node, err := scanNodeCursor(rows)
+	for start := 0; start < len(ids); start += 128 {
+		keys := ids[start:min(start+128, len(ids))]
+		// Bound raw string parameters instead of JSON encoding identities: even a
+		// legacy empty or non-UTF8 SQLite identity keeps its exact spelling.
+		args := []any{s.viewGen}
+		for _, id := range keys {
+			args = append(args, id)
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT `+lookupNodeCols+` FROM nodes WHERE view_gen=? AND id IN (`+inPlaceholders(len(keys))+`)`, args...)
 		if err != nil {
 			return nil, err
 		}
-		if node == nil || seen[node.ID] {
-			continue
+		for rows.Next() {
+			n, err := scanNodeCursor(rows)
+			if err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			out = append(out, n)
 		}
-		_, spring := node.Meta["spring_config_keys"]
-		if spring || (node.Kind == graph.KindMethod && node.Language == "java") {
-			seen[node.ID] = true
-			out = append(out, node)
+		re, ce := rows.Err(), rows.Close()
+		if re != nil {
+			return nil, re
+		}
+		if ce != nil {
+			return nil, ce
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	if len(out) != len(ids) {
+		return nil, fmt.Errorf("%w: incomplete contract seed rows", graph.ErrContractProjectionIncomplete)
 	}
 	slices.SortFunc(out, func(a, b *graph.Node) int {
 		if a.ID < b.ID {
@@ -705,10 +730,51 @@ func (s *Store) ContractSeedNodesContext(ctx context.Context, repo string) ([]*g
 		}
 		return 0
 	})
-	if len(out) > graph.ContractProjectionRowLimit {
-		return nil, fmt.Errorf("%w: contract seed nodes", graph.ErrContractProjectionLimit)
-	}
 	return out, ctx.Err()
+}
+
+// Eligibility consumes only identity, kind, language and metadata. Decode ALL
+// candidate metadata, including non-seeds, so malformed metadata still refuses
+// the checked read. Hydrate other rich fields only for actual Java/Spring seeds.
+func (s *Store) contractSeedNodeIDsContext(ctx context.Context, tx *sql.Tx, repo string) ([]string, error) {
+	kindsJSON, err := json.Marshal([]string{string(graph.KindField), string(graph.KindType), string(graph.KindInterface), string(graph.KindMethod)})
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, repoNodesByKindsProjectionQuery(false, "n.id,n.kind,n.language,n.meta"), string(kindsJSON), repo, s.viewGen, s.viewGen)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := make(map[string]bool)
+	var ids []string
+	for rows.Next() {
+		var id, language string
+		var kind graph.NodeKind
+		var blob sql.RawBytes
+		if err := rows.Scan(&id, &kind, &language, &blob); err != nil {
+			return nil, err
+		}
+		meta, err := decodeMeta(blob)
+		if err != nil {
+			return nil, err
+		}
+		_, spring := meta["spring_config_keys"]
+		if !seen[id] && (spring || kind == graph.KindMethod && language == "java") {
+			seen[id] = true
+			ids = append(ids, id)
+			if len(ids) > graph.ContractProjectionRowLimit {
+				return nil, fmt.Errorf("%w: contract seed nodes", graph.ErrContractProjectionLimit)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return ids, ctx.Err()
 }
 
 // ContractCoreWindowClosedAt returns the recorded close of the exact window

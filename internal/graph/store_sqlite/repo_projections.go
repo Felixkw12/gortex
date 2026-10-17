@@ -291,8 +291,13 @@ func normalizeProjectionExtensions(extensions []string) []string {
 }
 
 // RepoNodesByKindsWithMetaKey performs one repository/workspace/kind query and
-// decodes only nodes carrying the requested metadata key.
+// returns only nodes carrying the requested metadata key.
 func repoNodesByKindsWithMetaKeyQuery(withWorkspace bool) string {
+	return repoNodesByKindsProjectionQuery(withWorkspace, qualifiedNodeColumns("n", lookupNodeCols))
+}
+
+// columns is a trusted internal projection; all candidate predicates stay shared.
+func repoNodesByKindsProjectionQuery(withWorkspace bool, columns string) string {
 	query := `
 WITH requested_kinds(kind) AS (
     SELECT CAST(value AS TEXT) FROM json_each(?)
@@ -302,7 +307,7 @@ WITH requested_kinds(kind) AS (
     CROSS JOIN nodes AS candidate
         ON candidate.repo_prefix = ? AND candidate.kind = k.kind AND candidate.view_gen = ?
 )
-SELECT ` + qualifiedNodeColumns("n", lookupNodeCols) + `
+SELECT ` + columns + `
 FROM selected_ids AS selected
 CROSS JOIN nodes AS n ON n.id = selected.id AND n.view_gen = ?`
 	if withWorkspace {
