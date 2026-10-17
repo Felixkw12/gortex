@@ -612,7 +612,10 @@ func (w *generationBulkWindow) close() error {
 //     re-parse route cannot have the problem: it extracts with the running
 //     process's extractors. Neither ResolverVersion, ConfigHash nor
 //     DependencyRevision is recorded in repo_index_state, so only this one
-//     component of the identity can be proved from generation zero's row;
+//     component of the identity can be proved from generation zero's row.
+//     The installed async producer marker is separate: an accepted complete
+//     primary receipt baseline can prove it, and is carried and rechecked by
+//     the copy rather than invented from an extractor-version string;
 //
 //  3. the working tree still sits on exactly that commit and is PROVABLY
 //     unmodified — git status --porcelain lists untracked files too, so an
@@ -673,7 +676,7 @@ func (b *SparseGenerationBuilder) claimedBaseCopyPlan(
 		return false, none, "generation zero indexed a dirty working tree"
 	case state.ExtractorVersions == "" || extractorVersions == "":
 		return false, none, "generation zero recorded no extractor versions"
-	case state.ExtractorVersions != extractorVersions:
+	case state.ExtractorVersions != extractorVersions && !b.claimedContractCopyPolicy(ctx, state, extractorVersions):
 		return false, none, "generation zero was indexed by different extractor versions"
 	}
 	head, clean, proved := claimedBaseWorkingTreeState(ctx, rootPath)
@@ -825,6 +828,14 @@ func (b *SparseGenerationBuilder) prepareCopiedDedicatedBase(
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, buildPlan{}, BuildReport{}, err
+		}
+		// The copied transaction, not the earlier source-plan observation,
+		// must carry the accepted census used to bridge the producer marker.
+		// A mutation racing the copy must fail, never publish a legacy positive.
+		if b.contractCoreRuntime != nil {
+			if err := claimedContractCopyBaseline(ctx, handle, repoPrefix); err != nil {
+				return nil, buildPlan{}, BuildReport{}, err
+			}
 		}
 		if err := writeCopiedGenerationIndexState(handle, repoPrefix, zeroState, counts); err != nil {
 			return nil, buildPlan{}, BuildReport{}, err
