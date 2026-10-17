@@ -3974,7 +3974,10 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 					// too, so the same extractor runs on the same content; what
 					// is given up is the O(one unit) memory bound, and that is
 					// worth less than reading the state the pass is describing.
-					streamable := idx.contentSource() == nil
+					// The byte route also produces source-versioned metadata and contract
+					// receipts. A streaming handle has no such journal bracket: an
+					// installed producer must use the existing admitted byte route.
+					streamable := idx.contentSource() == nil && idx.contractCoreInputs == nil
 					if walkExt, found := idx.registry.GetByLanguage(wf.lang); found && parsePool == nil && streamable {
 						if se, ok := walkExt.(parser.StreamingExtractor); ok {
 							result, serr := idx.extractStreaming(se, path, relPath)
