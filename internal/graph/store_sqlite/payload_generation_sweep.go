@@ -96,6 +96,9 @@ var ErrPayloadSweepBudgetExhausted = errors.New("store_sqlite: payload generatio
 // a fence, so a test that wants to prove the elapsed axis works must be able
 // to move time itself rather than sleep through it.
 type payloadSweepBudget struct {
+	// fenceOnly hands durable retiring state to the existing deferred worker;
+	// it never enters physical deletion or changes its WAL admission policy.
+	fenceOnly bool
 	// emptyPayload is proved only after the retirement fence, seal and writer drain.
 	// Empty table steps add no payload WAL and need no reclamation wait.
 	emptyPayload bool

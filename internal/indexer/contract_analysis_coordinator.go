@@ -46,6 +46,11 @@ type ContractAnalysisCoordinatorOptions struct {
 	Yield              func(context.Context) error
 	ScratchParent      string
 	RequireRepoConfigs bool
+	// RetireReservation, when set, transfers a failed reservation to the
+	// existing durable deferred retirement owner after fencing it. A refusal
+	// keeps the ordinary synchronous cleanup fallback. Standalone coordinators
+	// without that owner retain full retirement.
+	RetireReservation func(context.Context, *store_sqlite.Store, int64, func(int64) bool) error
 	// QueueCapacity bounds the actors with pending or running work, 1..32;
 	// zero means 8.
 	QueueCapacity int
@@ -238,9 +243,18 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 			if published[target.Payload.ViewGeneration()] {
 				continue
 			}
-			err := target.Catalog.RetirePayloadGeneration(cleanup, target.Payload.ViewGeneration(), c.options.Leases.InUse)
+			generation := target.Payload.ViewGeneration()
+			var err error
+			if c.options.RetireReservation != nil {
+				err = c.options.RetireReservation(cleanup, target.Catalog, generation, c.options.Leases.InUse)
+				if err == nil || errors.Is(err, store_sqlite.ErrCatalogGenerationReferenced) {
+					continue
+				}
+				c.options.Logger.Warn("contract reservation retirement handoff refused", zap.Int64("generation", generation), zap.Error(err))
+			}
+			err = target.Catalog.RetirePayloadGeneration(cleanup, generation, c.options.Leases.InUse)
 			if err != nil && !errors.Is(err, store_sqlite.ErrCatalogGenerationReferenced) {
-				c.options.Logger.Warn("contract analysis reservation retirement deferred", zap.Error(err))
+				c.options.Logger.Warn("contract analysis reservation retirement deferred", zap.Int64("generation", generation), zap.Error(err))
 			}
 		}
 	}()
@@ -352,7 +366,8 @@ func contractJobOutcome(err error) string {
 }
 
 // Close cancels running work, releases every queued source handoff, then
-// waits until every dispatcher and job, with its payload retirement and
+// waits until every dispatcher and job, including its durable reservation
+// retirement handoff (or standalone physical retirement), and
 // leases, has ended.
 func (c *ContractAnalysisCoordinator) Close() error { return c.CloseContext(context.Background()) }
 

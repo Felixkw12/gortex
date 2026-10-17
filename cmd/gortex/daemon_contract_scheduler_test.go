@@ -82,6 +82,7 @@ func daemonContractPublicationAndRepair(t *testing.T, observeRepair func(time.Du
 	core, logs := observer.New(zapcore.InfoLevel)
 	var panicked atomic.Bool
 	runtime, err := installDaemonContractAnalysisWith(state, zap.New(core), func(options *indexer.ContractAnalysisCoordinatorOptions) {
+		require.NotNil(t, options.RetireReservation, "the daemon uses its existing lifecycle retirement owner")
 		capture := options.Capture
 		options.Capture = func(ctx context.Context, source *indexer.ContractCaptureSource, inputs *graphview.SelectedContractInputs, repo, checkout string) (indexer.ContractFollowupSnapshot, []indexer.ContractFollowupTarget, error) {
 			if panicked.CompareAndSwap(false, true) {

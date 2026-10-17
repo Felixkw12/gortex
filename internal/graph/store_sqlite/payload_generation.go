@@ -945,10 +945,9 @@ func (s *Store) RetirePayloadGeneration(ctx context.Context, generationID int64,
 	return s.retirePayloadGeneration(ctx, generationID, inUse, defaultPayloadSweepBudget())
 }
 
-// retirePayloadGeneration is RetirePayloadGeneration with the sweep budget
-// named. Production has exactly one budget — the default above — and the
-// parameter exists so the yield-and-resume behaviour can be driven at a scale
-// a test can assert on, rather than by writing millions of rows.
+// retirePayloadGeneration shares the reference fence, retired seal and writer
+// drain between full/sliced/quantum collection and a fencing-only handoff.
+// The named budget controls physical work only after that common preamble.
 func (s *Store) retirePayloadGeneration(
 	ctx context.Context, generationID int64, inUse func(int64) bool, budget payloadSweepBudget,
 ) error {
@@ -1047,6 +1046,9 @@ func (s *Store) retirePayloadGeneration(
 	}
 	s.retirementPreambles.Add(1)
 	seal.sweep.noteFenced(row)
+	if budget.fenceOnly {
+		return nil
+	}
 	// Failed preparation often leaves only a catalog reservation. Prove its
 	// emptiness after sealing instead of waiting behind payload reclamation
 	// before every empty step. Nonempty and quantum retirement keep their policy.
