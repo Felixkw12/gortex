@@ -111,13 +111,13 @@ func (l contractScanLayer) claims(ctx context.Context, repo string, wanted []str
 		return mode == store_sqlite.OwnershipReplace || mode == store_sqlite.OwnershipDelete
 	}
 	if !full {
-		for _, path := range wanted {
-			mode, ok, err := l.handle.FileMaskFor(repo, path)
-			if err != nil {
-				return err
-			}
-			if ok && claimed(mode) {
-				hidden[path] = true
+		masks, err := l.handle.FileMasksForContext(ctx, repo, wanted)
+		if err != nil {
+			return err
+		}
+		for _, mask := range masks {
+			if claimed(mask.Mode) {
+				hidden[mask.FilePath] = true
 			}
 		}
 		return ctx.Err()

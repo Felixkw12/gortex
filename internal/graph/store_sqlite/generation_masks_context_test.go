@@ -20,6 +20,13 @@ func TestGenerationMaskContextReadsCancelWhileWaitingForConnection(t *testing.T)
 			},
 		},
 		{
+			name: "requested file masks",
+			read: func(ctx context.Context, store *Store, _ []NodeIdentityMask) error {
+				_, err := store.FileMasksForContext(ctx, maskTestRepo, []string{"repo/a.go"})
+				return err
+			},
+		},
+		{
 			name: "node identity masks",
 			read: func(ctx context.Context, store *Store, _ []NodeIdentityMask) error {
 				_, err := store.NodeIdentityMasksContext(ctx)
