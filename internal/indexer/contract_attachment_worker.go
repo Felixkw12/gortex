@@ -903,16 +903,8 @@ func (e *contractFollowupEvidence) AddBatch(nodes []*graph.Node, edges []*graph.
 		e.fail(err)
 		return
 	}
-	encodedRows, encodeErr := json.Marshal(struct {
-		Nodes []*graph.Node
-		Edges []*graph.Edge
-	}{nodes, edges})
-	if encodeErr != nil {
-		e.fail(encodeErr)
-		return
-	}
-	if len(encodedRows) > contractFollowupCompactLimit {
-		e.fail(graph.ErrContractProjectionLimit)
+	if err := contractEvidenceRowsWithinLimit(nodes, edges); err != nil {
+		e.fail(err)
 		return
 	}
 	if err := e.scratch.AddBatchChecked(nodes, edges); err != nil {
@@ -1243,6 +1235,46 @@ func (e *contractFollowupEvidence) loadFileRowsContext(path string, ctx context.
 		}
 		return nodes, edges, e.err
 	}
+	if _, present := e.files[path]; !present && e.excluded[path] {
+		return nil, nil, nil
+	}
+	nodes, edges, err := e.readSelectedFileRowsContext(path, ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if e.loadedFileNodes[path] {
+		// Node-only consumers may already have enriched these private rows.
+		// Extend their edge evidence without replacing scratch mutations or
+		// derived nodes with the original selected-core declarations.
+		current, readErr := graph.ContractFileNodesContext(e.ctx, e.scratch, e.files[path].RepoPrefix, []string{path})
+		if readErr != nil {
+			e.fail(readErr)
+			return nil, nil, readErr
+		}
+		nodes = current[path]
+		e.AddBatch(nil, edges)
+	} else {
+		e.AddBatch(nodes, edges)
+	}
+	if extraction {
+		if e.loadedExtraction == nil {
+			e.loadedExtraction = make(map[string]bool)
+		}
+		if e.loadedFileNodes == nil {
+			e.loadedFileNodes = make(map[string]bool)
+		}
+		e.loadedExtraction[path] = true
+		e.loadedFileNodes[path] = true
+	} else {
+		e.loaded[path] = true
+	}
+	return nodes, edges, e.err
+}
+
+// readSelectedFileRowsContext normalizes one checked core answer without
+// importing it into scratch. Extraction and its replay share these exact
+// ownership, row-bound, node and retained-edge rules.
+func (e *contractFollowupEvidence) readSelectedFileRowsContext(path string, ctx context.Context) ([]*graph.Node, []*graph.Edge, error) {
 	file, ok := e.files[path]
 	if !ok {
 		if e.excluded[path] {
@@ -1283,32 +1315,6 @@ func (e *contractFollowupEvidence) loadFileRowsContext(path string, ctx context.
 			copyEdge.Meta = contractFollowupCloneValue(reflect.ValueOf(edge.Meta)).Interface().(map[string]any)
 		}
 		edges = append(edges, &copyEdge)
-	}
-	if e.loadedFileNodes[path] {
-		// Node-only consumers may already have enriched these private rows.
-		// Extend their edge evidence without replacing scratch mutations or
-		// derived nodes with the original selected-core declarations.
-		current, readErr := graph.ContractFileNodesContext(e.ctx, e.scratch, file.RepoPrefix, []string{path})
-		if readErr != nil {
-			e.fail(readErr)
-			return nil, nil, readErr
-		}
-		nodes = current[path]
-		e.AddBatch(nil, edges)
-	} else {
-		e.AddBatch(nodes, edges)
-	}
-	if extraction {
-		if e.loadedExtraction == nil {
-			e.loadedExtraction = make(map[string]bool)
-		}
-		if e.loadedFileNodes == nil {
-			e.loadedFileNodes = make(map[string]bool)
-		}
-		e.loadedExtraction[path] = true
-		e.loadedFileNodes[path] = true
-	} else {
-		e.loaded[path] = true
 	}
 	return nodes, edges, e.err
 }

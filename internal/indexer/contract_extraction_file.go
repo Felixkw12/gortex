@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -43,4 +44,56 @@ func (e *contractFollowupEvidence) loadExtractionFile(path string) ([]*graph.Nod
 	}
 	e.ledger.read(contractReadExtractionFile, []string{path}, contractFileAnswer{Nodes: nodes, Edges: seeds}, path)
 	return nodes, seeds, nil
+}
+
+// A replay question needs the selected input, not a second scratch import.
+// All rows and metadata still participate in the same answer digest and caps.
+func (e *contractFollowupEvidence) readExtractionFileAnswer(path string) ([]*graph.Node, []*graph.Edge, error) {
+	e.ledger.owner(path)
+	e.ledger.key("path:", path)
+	defer e.guard.enter()()
+	if e.err != nil {
+		return nil, nil, e.err
+	}
+	if err := e.ctx.Err(); err != nil {
+		e.fail(err)
+		return nil, nil, err
+	}
+	ctx := context.WithValue(e.ctx, contractExtractionCoreContextKey{}, true)
+	nodes, edges, err := e.readSelectedFileRowsContext(path, ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Preserve the exact bound formerly checked by the scratch import, including
+	// ordinary call rows that are not part of the returned extraction seeds.
+	if err = contractEvidenceRowsWithinLimit(nodes, edges); err != nil {
+		e.fail(err)
+		return nil, nil, err
+	}
+	var seeds []*graph.Edge
+	for _, edge := range edges {
+		if contractUnitSeedEdge(edge) {
+			seeds = append(seeds, edge)
+		}
+	}
+	if err = e.ctx.Err(); err != nil {
+		e.fail(err)
+		return nil, nil, err
+	}
+	e.ledger.read(contractReadExtractionFile, []string{path}, contractFileAnswer{Nodes: nodes, Edges: seeds}, path)
+	return nodes, seeds, nil
+}
+
+func contractEvidenceRowsWithinLimit(nodes []*graph.Node, edges []*graph.Edge) error {
+	encodedRows, err := json.Marshal(struct {
+		Nodes []*graph.Node
+		Edges []*graph.Edge
+	}{nodes, edges})
+	if err != nil {
+		return err
+	}
+	if len(encodedRows) > contractFollowupCompactLimit {
+		return graph.ErrContractProjectionLimit
+	}
+	return nil
 }

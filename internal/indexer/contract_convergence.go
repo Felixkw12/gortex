@@ -2383,7 +2383,7 @@ func (c *contractConvergence) ask(evidence *contractFollowupEvidence, read contr
 		if len(read.args) != 1 {
 			break
 		}
-		nodes, edges, err := evidence.loadExtractionFile(read.args[0])
+		nodes, edges, err := evidence.readExtractionFileAnswer(read.args[0])
 		return contractFileAnswer{Nodes: nodes, Edges: edges}, err
 	case contractReadIDs:
 		return c.askIDs(evidence, read.args)
