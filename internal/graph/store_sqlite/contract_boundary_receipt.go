@@ -148,7 +148,15 @@ func (s *Store) contractBoundaryReceiptsForKeys(ctx context.Context, kind string
 	keys = slices.Clone(keys)
 	slices.Sort(keys)
 	keys = slices.Compact(keys)
-	if len(keys) > contractBoundaryKeyLimit {
+	// The journal appends one fixed lookup sentinel to a complete ordinary
+	// producer frontier. Like the pending membership union, that metadata
+	// does not consume an ordinary-key slot. Produced-key queries have no
+	// such exception, and deduplication permits at most one extra fixed key.
+	ordinaryKeys := len(keys)
+	if kind == "lookup" && slices.Contains(keys, graph.ContractBoundaryUnknownMembershipKey) {
+		ordinaryKeys--
+	}
+	if ordinaryKeys > contractBoundaryKeyLimit || len(keys) > contractBoundaryKeyLimit+1 {
 		return nil, ErrContractBoundaryReceiptLimit
 	}
 	if len(keys) == 0 {
