@@ -655,21 +655,7 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 			return contractPinnedSourceAtFingerprint(bytes, sourceFingerprint)
 		}
 		snapshot.Seeds = func(ctx context.Context, repo string) ([]*graph.Node, []*graph.Edge, bool, error) {
-			handles := handlesByRepo[repo]
-			if len(handles) != 1 || handles[0].ViewGeneration() != 0 {
-				// A composed chain has no single physical seed query; the
-				// enrichment round loads every live file of the repository.
-				return nil, nil, false, nil
-			}
-			edges, err := handles[0].ContractSeedEdgesContext(ctx, repo)
-			if err != nil {
-				return nil, nil, false, err
-			}
-			nodes, err := handles[0].ContractSeedNodesContext(ctx, repo)
-			if err != nil {
-				return nil, nil, false, err
-			}
-			return nodes, edges, true, nil
+			return readContractFollowupSeeds(ctx, readers[repo], handlesByRepo[repo], repo)
 		}
 	}
 	snapshot.ReadAccepted = read
@@ -678,6 +664,94 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 	}
 	complete = true
 	return snapshot, nil
+}
+
+// readContractFollowupSeeds keeps composed enrichment sparse without treating
+// physical seed candidates as selected evidence. The existing checked repository
+// projection completes DI ownership across edge-only layers and aliases. Spring
+// and Java candidates are reselected through the same captured source reader;
+// replacements and file/identity masks can remove or change a physical candidate.
+func readContractFollowupSeeds(ctx context.Context, reader graph.Reader, handles []*store_sqlite.Store, repo string) ([]*graph.Node, []*graph.Edge, bool, error) {
+	if len(handles) == 0 {
+		return nil, nil, false, nil
+	}
+	if len(handles) == 1 && handles[0].ViewGeneration() == 0 {
+		edges, err := handles[0].ContractSeedEdgesContext(ctx, repo)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		nodes, err := handles[0].ContractSeedNodesContext(ctx, repo)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		return nodes, edges, true, nil
+	}
+	projection, err := graph.CompleteContractRepoProjection(ctx, reader, repo)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	var edges []*graph.Edge
+	for _, row := range projection.OwnerRows {
+		if row.Edge == nil {
+			return nil, nil, false, graph.ErrContractProjectionIncomplete
+		}
+		if row.Edge.Kind != graph.EdgeProvides && row.Edge.Kind != graph.EdgeConsumes {
+			continue
+		}
+		owner := projection.SourceNodes[row.Edge.From]
+		if owner == nil {
+			return nil, nil, false, graph.ErrContractProjectionIncomplete
+		}
+		if owner.RepoPrefix == repo {
+			edges = append(edges, row.Edge)
+		}
+	}
+	ids := make(map[string]bool)
+	for _, handle := range handles {
+		nodes, e := handle.ContractSeedNodesContext(ctx, repo)
+		if e != nil {
+			return nil, nil, false, e
+		}
+		for _, node := range nodes {
+			if node == nil {
+				return nil, nil, false, graph.ErrContractProjectionIncomplete
+			}
+			ids[node.ID] = true
+			if len(ids) > graph.ContractProjectionRowLimit {
+				return nil, nil, false, graph.ErrContractProjectionLimit
+			}
+		}
+	}
+	keys := make([]string, 0, len(ids))
+	for id := range ids {
+		keys = append(keys, id)
+	}
+	sort.Strings(keys)
+	selected, err := graph.ContractSourceNodesContext(ctx, reader, keys)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	var nodes []*graph.Node
+	for _, id := range keys {
+		node := selected[id]
+		if node == nil || node.RepoPrefix != repo {
+			continue
+		}
+		if node.Kind != graph.KindField && node.Kind != graph.KindType && node.Kind != graph.KindInterface && node.Kind != graph.KindMethod {
+			continue
+		}
+		_, spring := node.Meta["spring_config_keys"]
+		if spring || node.Kind == graph.KindMethod && node.Language == "java" {
+			if len(nodes)+len(edges) >= graph.ContractProjectionRowLimit {
+				return nil, nil, false, graph.ErrContractProjectionLimit
+			}
+			nodes = append(nodes, node)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, false, err
+	}
+	return nodes, edges, true, nil
 }
 
 // Core enrichment needs selected file nodes and their checked outgoing edges.
