@@ -1442,6 +1442,10 @@ func (e *contractFollowupEvidence) getNodesByIDs(ids []string) map[string]*graph
 	// Comparing those derived values with pristine core rows would invalidate
 	// an otherwise unchanged round during its next recheck.
 	imported := make(map[string]*graph.Node, len(found))
+	// Reuse the existing row/encoded-byte bounded importer. Selected values
+	// still enter private scratch before the ID proof is recorded, while one
+	// checked read no longer starts a transaction for each returned node.
+	page := contractNameImportPage{evidence: e, byteLimit: contractFollowupCompactLimit}
 	for _, node := range found {
 		if node == nil {
 			e.fail(fmt.Errorf("contract followup: nil selected source"))
@@ -1455,9 +1459,14 @@ func (e *contractFollowupEvidence) getNodesByIDs(ids []string) map[string]*graph
 		if copyNode == nil {
 			return nil
 		}
-		e.AddNode(copyNode)
+		if !page.add(copyNode) {
+			return nil
+		}
 		out[copyNode.ID] = copyNode
 		imported[copyNode.ID] = copyNode
+	}
+	if !page.flush() {
+		return nil
 	}
 	if e.err == nil {
 		e.ledger.read(contractReadIDs, missing, imported)
