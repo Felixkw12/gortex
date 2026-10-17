@@ -37,10 +37,7 @@ func (s *Store) LayerContractRepoProjectionContext(ctx context.Context, repo str
 	}
 	// Sparse kind-first ownership projection also retains edge-only physical
 	// generations whose source node is supplied by a lower selected layer.
-	query = `SELECT COALESCE(n.repo_prefix,''), ` + contractProjectionEdgeColumns() + `
- FROM edges AS e LEFT JOIN nodes AS n ON n.id=e.from_id AND n.view_gen=e.view_gen
- WHERE e.kind IN ` + contractOwnerKindsSQL + ` AND e.view_gen=?
- AND (n.repo_prefix=? OR n.id IS NULL) LIMIT ?`
+	query = contractRepoOwnerRowsQuery()
 	p.OwnerRows, err = s.contractProjectionEdges(ctx, tx, query, []any{s.viewGen, repo, budget + 1}, &budget)
 	if err != nil {
 		return graph.ContractFileProjection{}, err
@@ -66,4 +63,14 @@ func (s *Store) LayerContractRepoProjectionContext(ctx context.Context, repo str
 		return graph.ContractFileProjection{}, err
 	}
 	return p, nil
+}
+
+// Keep the owner-kind range as the edge driving access path. The generation
+// value and all selected rows/joins remain identical; unary + prevents a
+// generation-prefix scan over unrelated edge kinds in a shared corpus.
+func contractRepoOwnerRowsQuery() string {
+	return `SELECT COALESCE(n.repo_prefix,''), ` + contractProjectionEdgeColumns() + `
+ FROM edges AS e LEFT JOIN nodes AS n ON n.id=e.from_id AND n.view_gen=e.view_gen
+ WHERE e.kind IN ` + contractOwnerKindsSQL + ` AND +e.view_gen=?
+ AND (n.repo_prefix=? OR n.id IS NULL) LIMIT ?`
 }
