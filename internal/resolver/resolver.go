@@ -309,13 +309,14 @@ func recordFrontierIncomingAdmission(logger *zap.Logger, stats *ResolveStats, fr
 // Indexer.IndexFile) crash the daemon with "concurrent map writes"
 // in buildDirIndexes.
 type Resolver struct {
-	goPackageOwnership         GoPackageOwnershipLookup
-	goPackageOwnershipFactory  GoPackageOwnershipFactory
-	goPackageOwnershipPrepared map[string]GoPackageOwnershipLookup
-	graph                      graph.Store
-	logger                     *zap.Logger
-	dirIndex                   map[string][]graph.FileNodeIdentity
-	lastDirIndex               map[string][]graph.FileNodeIdentity
+	goPackageOwnership          GoPackageOwnershipLookup
+	goPackageOwnershipFactory   GoPackageOwnershipFactory
+	goPackageOwnershipInventory bool
+	goPackageOwnershipPrepared  map[string]GoPackageOwnershipLookup
+	graph                       graph.Store
+	logger                      *zap.Logger
+	dirIndex                    map[string][]graph.FileNodeIdentity
+	lastDirIndex                map[string][]graph.FileNodeIdentity
 	// OnComputeDone, when set, fires once per ResolveAll immediately after
 	// the parallel compute loop has committed — BEFORE the deferred LSP
 	// batch and the serial refinement tail (guard, attribution, dispatch

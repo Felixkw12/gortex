@@ -21,7 +21,9 @@ func (l *GenerationLayer) LayerNodesInScope(repoPrefixes, filePaths []string, li
 		return nil
 	}
 	var seq iter.Seq[*graph.Node]
-	if light {
+	if light && len(kinds) > 0 {
+		seq = l.handle.NodesLightByKindsInScopeSeq(repoPrefixes, filePaths, kinds...)
+	} else if light {
 		seq = l.handle.NodesLightInScopeSeq(repoPrefixes, filePaths)
 	} else {
 		seq = l.handle.NodesInScopeSeq(repoPrefixes, filePaths, kinds...)

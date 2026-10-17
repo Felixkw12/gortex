@@ -264,6 +264,24 @@ func (dw *DeltaWriter) NodesLightInScopeSeq(repoPrefixes, filePaths []string) it
 	return dw.scopedNodes(repoPrefixes, filePaths, true)
 }
 
+// NodesLightByKindsInScopeSeq uses compact physical inventories while retaining
+// the same file/identity masks and complete live-layer rows as scoped reads.
+func (dw *DeltaWriter) NodesLightByKindsInScopeSeq(repoPrefixes, filePaths []string, kinds ...NodeKind) iter.Seq[*Node] {
+	if len(kinds) > 0 {
+		var clean []NodeKind
+		for _, kind := range kinds {
+			if kind != "" {
+				clean = append(clean, kind)
+			}
+		}
+		if len(clean) == 0 {
+			return emptyNodeSeq
+		}
+		kinds = clean
+	}
+	return dw.scopedNodes(repoPrefixes, filePaths, true, kinds...)
+}
+
 func (dw *DeltaWriter) scopedNodes(repoPrefixes, filePaths []string, light bool, kinds ...NodeKind) iter.Seq[*Node] {
 	return func(yield func(*Node) bool) {
 		if (len(repoPrefixes) == 0 && len(filePaths) == 0) || (!light && len(kinds) == 0) {
@@ -275,7 +293,7 @@ func (dw *DeltaWriter) scopedNodes(repoPrefixes, filePaths []string, light bool,
 			wantKind[k] = struct{}{}
 		}
 		kindOK := func(n *Node) bool {
-			if light {
+			if light && len(kinds) == 0 {
 				return true
 			}
 			_, ok := wantKind[n.Kind]
@@ -285,7 +303,13 @@ func (dw *DeltaWriter) scopedNodes(repoPrefixes, filePaths []string, light bool,
 		var out []*Node
 		if seq, ok := s.base.(ScopedProjectionSequencer); ok {
 			var base iter.Seq[*Node]
-			if light {
+			if light && len(kinds) > 0 {
+				if compact, ok := s.base.(ScopedKindSummarySequencer); ok {
+					base = compact.NodesLightByKindsInScopeSeq(repoPrefixes, filePaths, kinds...)
+				} else {
+					base = seq.NodesInScopeSeq(repoPrefixes, filePaths, kinds...)
+				}
+			} else if light {
 				base = seq.NodesLightInScopeSeq(repoPrefixes, filePaths)
 			} else {
 				base = seq.NodesInScopeSeq(repoPrefixes, filePaths, kinds...)

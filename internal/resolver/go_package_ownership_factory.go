@@ -10,8 +10,10 @@ import (
 )
 
 // GoPackageOwnershipFactory prepares target-bound lookups before resolver
-// workers start. files is the actual resolver graph's rich, repository-scoped
-// file inventory for exactly repoPrefixes, not a parser-admission inventory.
+// workers start. The ordinary setter supplies the actual resolver graph's
+// rich file inventory. The inventory setter explicitly permits compact
+// identity/location rows. Both are scoped to exactly repoPrefixes, not a
+// parser-admission inventory.
 // The factory must exhaust that iterator before doing source I/O; neither the
 // iterator, source handles nor mutable Nodes may escape in the returned maps.
 // Missing/nil lookups mean Unknown, not Different. A factory is called at most
@@ -24,7 +26,17 @@ type GoPackageOwnershipFactory func(context.Context, []string, iter.Seq[*graph.N
 // invokes it only for a nonempty Go import/extern frontier, before workers.
 func (r *Resolver) SetGoPackageOwnershipFactory(factory GoPackageOwnershipFactory) {
 	r.goPackageOwnershipFactory = factory
+	r.goPackageOwnershipInventory = false
 	r.clearGoPackageOwnership()
+}
+
+// SetGoPackageOwnershipInventoryFactory opts into identity/location file rows:
+// kind, language, repository and path remain exact; retrieval payload/metadata
+// are not promised. The ordinary factory setter retains its rich-row contract.
+// Like that setter, this is setup-only under the resolver's owning lifecycle.
+func (r *Resolver) SetGoPackageOwnershipInventoryFactory(factory GoPackageOwnershipFactory) {
+	r.SetGoPackageOwnershipFactory(factory)
+	r.goPackageOwnershipInventory = true
 }
 
 func (r *Resolver) clearGoPackageOwnership() {
@@ -87,10 +99,16 @@ func (r *Resolver) prepareGoPackageOwnership(ctx context.Context, pending []*gra
 		prefixes = append(prefixes, prefix)
 	}
 	sort.Strings(prefixes)
-	// The existing scoped rich-node capability preserves Language without
-	// re-scanning every repository once per same-repo frontier.
-	lookups, err := r.goPackageOwnershipFactory(ctx, prefixes,
-		graph.NodesInScopeSeq(r.graph, prefixes, nil, graph.KindFile))
+	// Factories opt into compact inventory explicitly. Both paths preserve
+	// actual Language and selected placement, never a filename-based inference.
+	var files iter.Seq[*graph.Node]
+	if r.goPackageOwnershipInventory {
+		files = graph.NodesLightByKindsInScopeSeq(r.graph, prefixes, nil, graph.KindFile)
+	} else {
+		files = graph.NodesInScopeSeq(r.graph, prefixes, nil, graph.KindFile)
+	}
+
+	lookups, err := r.goPackageOwnershipFactory(ctx, prefixes, files)
 	if err != nil {
 		return err
 	}

@@ -93,6 +93,15 @@ func NodesInScopeSeq(s Store, repoPrefixes, filePaths []string, kinds ...NodeKin
 	}
 }
 
+// NodesLightByKindsInScopeSeq is an explicit identity/location inventory.
+// Readers without that capability keep the full-row fallback and exact scope.
+func NodesLightByKindsInScopeSeq(s Store, repoPrefixes, filePaths []string, kinds ...NodeKind) iter.Seq[*Node] {
+	if seq, ok := s.(ScopedKindSummarySequencer); ok {
+		return seq.NodesLightByKindsInScopeSeq(repoPrefixes, filePaths, kinds...)
+	}
+	return NodesInScopeSeq(s, repoPrefixes, filePaths, kinds...)
+}
+
 // EdgesInScopeSeq is the edge counterpart of NodesInScopeSeq. Adapter stores
 // perform one batched adjacency read for a file frontier or one set-oriented
 // repo/kind projection; sources are resolved in one ID batch.
