@@ -82,6 +82,7 @@ func TestSchemaV17StoreGainsGenerationMaskTables(t *testing.T) {
 		"contract_input_identity",
 		"contract_work_pending_scope",
 		"contract_boundary_keys_file",
+		"contract_boundary_receipt_stamps",
 	}
 	if len(fresh) != len(generationMaskTables)+len(indexes) {
 		t.Fatalf("fresh store has %d mask schema objects, want %d", len(fresh), len(generationMaskTables)+len(indexes))

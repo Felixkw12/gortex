@@ -86,7 +86,9 @@ func TestStatsHistogramCoveringMigratesVersion35(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	var version, present int
 	require.NoError(t, s.db.QueryRow("PRAGMA user_version").Scan(&version))
-	require.Equal(t, 36, version)
+	// Open applies every later additive migration too; the v36 histogram
+	// itself remains proven by the exact index and membership assertions below.
+	require.Equal(t, currentSchemaVersion, version)
 	require.NoError(t, s.db.QueryRow("SELECT COUNT(*) FROM sqlite_schema WHERE name='nodes_stats_histogram'").Scan(&present))
 	require.Equal(t, 1, present)
 	got, err := s.StatsContext(t.Context())
