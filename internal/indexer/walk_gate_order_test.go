@@ -56,6 +56,35 @@ func TestWalkGateOrderExclusionPrecedesSniff(t *testing.T) {
 	}
 }
 
+func TestWalkGateOrderEscapingSymlinkNotSniffed(t *testing.T) {
+	for _, walk := range []string{"mtime_probe", "census", "intake"} {
+		t.Run(walk, func(t *testing.T) {
+			root, idx, recorder := newWalkGateOrderFixture(t)
+			outside := filepath.Join(t.TempDir(), "script")
+			writeFile(t, outside, "#!/usr/bin/env python3\npass\n")
+			if err := os.Symlink(outside, filepath.Join(root, "src", "link.walklink")); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			info, err := os.Stat(filepath.Join(root, "src", "admitted.go"))
+			require.NoError(t, err)
+			idx.SetFileMtimes(map[string]int64{"src/admitted.go": info.ModTime().UnixNano()})
+
+			switch walk {
+			case "mtime_probe":
+				assert.False(t, idx.HasChangesSinceMtimes(root))
+			case "census":
+				_, _, _, err := idx.changedSinceMtimesCensus(root)
+				require.NoError(t, err)
+			case "intake":
+				manifest, err := idx.dryRunIntake(t.Context(), root)
+				require.NoError(t, err)
+				assert.Equal(t, 1, manifest.FilesAdmitted)
+			}
+			assert.Zero(t, recorder.opens, "an escaping symlink must not be opened for a shebang sniff")
+		})
+	}
+}
+
 func TestWalkGateOrderAdmittedSets(t *testing.T) {
 	// Each path gets its own root so the boolean mtime probe observes its
 	// admission without short-circuiting on another newly admitted file.
