@@ -1987,8 +1987,10 @@ func (s *Store) prepare() error {
 	prep(&s.stmtNodeCount,
 		`SELECT COUNT(*) FROM nodes WHERE view_gen = ?`)
 	prep(&s.stmtGenerationNodeCount, generationNodeCountSQL)
+	// This always-live index covers the complete prefix/generation projection.
+	// A generation-index lookup loads wide node payloads merely to read prefixes.
 	prep(&s.stmtRepoPrefixes,
-		`SELECT DISTINCT repo_prefix FROM nodes WHERE repo_prefix <> '' AND view_gen = ?`)
+		`SELECT DISTINCT repo_prefix FROM nodes INDEXED BY nodes_by_repo_kind WHERE repo_prefix <> '' AND view_gen = ?`)
 
 	prep(&s.stmtRepoStatsNodes,
 		`SELECT repo_prefix, kind, language, COUNT(*) FROM nodes WHERE repo_prefix <> '' AND view_gen = ? GROUP BY repo_prefix, kind, language`)
