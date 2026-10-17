@@ -428,111 +428,139 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
-	for _, path := range paths {
-		repo := pathRepos[path]
-		file, ok, e := classify(path, repo)
+	// Keep receipt payloads streaming and admission facts bounded to one
+	// existing frontier chunk. Sparse upper layers are resolved by indexed keys,
+	// rather than thousands of independently prepared point misses per layer.
+	for start := 0; start < len(paths); start += contractFrontierReadBatchSize {
+		chunk := paths[start:min(start+contractFrontierReadBatchSize, len(paths))]
+		files := make(map[string]ContractFollowupFile, len(chunk))
+		for _, path := range chunk {
+			file, ok, e := classify(path, pathRepos[path])
+			if e != nil {
+				return ContractFollowupSnapshot{}, e
+			}
+			if ok {
+				files[path] = file
+			}
+		}
+		facts, e := contractCaptureReceiptFacts(ctx, options, handlesByRepo, files)
 		if e != nil {
 			return ContractFollowupSnapshot{}, e
 		}
-		if !ok {
-			continue
-		}
-		language := file.Language
-		idx := &Indexer{config: configs[repo], repoPrefix: repo, registry: options.Registry, logger: options.Logger}
-		opts := extractionOptions[repo]
-		idx.extractionOptions.Store(&opts)
-		// Admission reads durable receipt identities, never every source file.
-		// Missing legacy proof is usable only by background baseline rebuilding.
-		repoHandles := handlesByRepo[repo]
-		excluded := false
-		if options.selectedInputs == nil {
-			// Baseline repair derives its source proof from accepted core metadata,
-			// even when old optional analysis receipts are incomplete or obsolete.
-			repoHandles = nil
-		}
-		for i := len(repoHandles) - 1; i >= 0; i-- {
-			actors := []string{""}
-			if options.selectedInputs != nil {
-				actors = nil
-				for _, w := range options.selectedInputs.Witnesses {
-					if w.GenerationID == repoHandles[i].ViewGeneration() && w.State.RepoPrefix == repo {
-						actors = append(actors, w.State.CheckoutID)
-					}
-				}
+		for _, path := range chunk {
+			file, ok := files[path]
+			if !ok {
+				continue
 			}
-			for _, actor := range actors {
-				row, _, e := repoHandles[i].ContractBoundaryReceiptForVersionContext(ctx, repo, actor, path, contractBoundaryReceiptVersion)
-				if e != nil {
-					return ContractFollowupSnapshot{}, e
+			repo := file.RepoPrefix
+			if fact, found := facts[path]; found {
+				if fact.excluded {
+					snapshot.Excluded = append(snapshot.Excluded, path)
+					continue
 				}
-				if row != nil {
-					if row.Accepted && contractReceiptIsFailureEnvelope(row) {
-						// A failure envelope is not live: the file is excluded
-						// from the census rather than certified or refused.
-						excluded = true
-						break
-					}
-					// An unaccepted row is admitted on the rule a job proves its
-					// reads by (ContractReceiptStamp.quiescent): its mutation
-					// settled it, or staged it in this process and has ended its
-					// core writes (a watcher patch overtaken after its writes is
-					// never accepted or settled), so the file's core rows are
-					// complete. A row whose core-write window is open is
-					// admitted in flight: the job's stamp scans see the window,
-					// and its first read of the file waits for it to close.
-					var state store_sqlite.ContractReceiptWriteState
-					if !row.Deleted && !row.Accepted {
-						state = repoHandles[i].ContractReceiptWriteStates(repo, actor, []string{path})[path]
-					}
-					switch contractCaptureRowAdmission(row, state, options.selectedInputs != nil) {
-					case contractCaptureInFlight:
-						snapshot.InFlight = append(snapshot.InFlight, path)
-					case contractCaptureStale:
-						return ContractFollowupSnapshot{}, graph.ErrContractProjectionStale
-					case contractCaptureStuck:
-						if options.SuspectStuck != nil {
-							options.SuspectStuck(repo, []string{path})
+				file.SourceFingerprint = fact.source
+				snapshot.opaqueContractInputs = snapshot.opaqueContractInputs || fact.opaque
+				snapshot.Files = append(snapshot.Files, file)
+				continue
+			}
+			language := file.Language
+			idx := &Indexer{config: configs[repo], repoPrefix: repo, registry: options.Registry, logger: options.Logger}
+			opts := extractionOptions[repo]
+			idx.extractionOptions.Store(&opts)
+			// Admission reads durable receipt identities, never every source file.
+			// Missing legacy proof is usable only by background baseline rebuilding.
+			repoHandles := handlesByRepo[repo]
+			excluded := false
+			if options.selectedInputs == nil {
+				// Baseline repair derives its source proof from accepted core metadata,
+				// even when old optional analysis receipts are incomplete or obsolete.
+				repoHandles = nil
+			}
+			for i := len(repoHandles) - 1; i >= 0; i-- {
+				actors := []string{""}
+				if options.selectedInputs != nil {
+					actors = nil
+					for _, w := range options.selectedInputs.Witnesses {
+						if w.GenerationID == repoHandles[i].ViewGeneration() && w.State.RepoPrefix == repo {
+							actors = append(actors, w.State.CheckoutID)
 						}
-						return ContractFollowupSnapshot{}, graph.ErrContractProjectionStale
 					}
-					prior, known, e := contractCorePriorReceipt(row, true)
+				}
+				for _, actor := range actors {
+					row, _, e := repoHandles[i].ContractBoundaryReceiptForVersionContext(ctx, repo, actor, path, contractBoundaryReceiptVersion)
 					if e != nil {
 						return ContractFollowupSnapshot{}, e
 					}
-					policy := ""
-					opaque := false
-					if known && prior != nil {
-						policy = prior.Policy
-					} else if markerPolicy, overflow := contractReceiptOverflowPolicy(row); overflow && row.Accepted && row.RepoPrefix == repo && row.CheckoutID == actor && row.FilePath == path {
-						policy, opaque = markerPolicy, true
-					} else {
-						return ContractFollowupSnapshot{}, graph.ErrContractProjectionIncomplete
-					}
-					if policy != file.Policy {
-						projected, policyErr := idx.contractFollowupPolicyMode(language, policy)
-						if policyErr != nil || !projected || !contractGeneratedFileHint(readers[repo].GetNode(path), path) {
+					if row != nil {
+						if row.Accepted && contractReceiptIsFailureEnvelope(row) {
+							// A failure envelope is not live: the file is excluded
+							// from the census rather than certified or refused.
+							excluded = true
+							break
+						}
+						// An unaccepted row is admitted on the rule a job proves its
+						// reads by (ContractReceiptStamp.quiescent): its mutation
+						// settled it, or staged it in this process and has ended its
+						// core writes (a watcher patch overtaken after its writes is
+						// never accepted or settled), so the file's core rows are
+						// complete. A row whose core-write window is open is
+						// admitted in flight: the job's stamp scans see the window,
+						// and its first read of the file waits for it to close.
+						var state store_sqlite.ContractReceiptWriteState
+						if !row.Deleted && !row.Accepted {
+							state = repoHandles[i].ContractReceiptWriteStates(repo, actor, []string{path})[path]
+						}
+						switch contractCaptureRowAdmission(row, state, options.selectedInputs != nil) {
+						case contractCaptureInFlight:
+							snapshot.InFlight = append(snapshot.InFlight, path)
+						case contractCaptureStale:
+							return ContractFollowupSnapshot{}, graph.ErrContractProjectionStale
+						case contractCaptureStuck:
+							if options.SuspectStuck != nil {
+								options.SuspectStuck(repo, []string{path})
+							}
 							return ContractFollowupSnapshot{}, graph.ErrContractProjectionStale
 						}
-						// This is an admission hint from the exact accepted receipt
-						// and selected file. The worker revalidates accepted bytes
-						// and every public projection fact before omitting C parsing.
-						file.Policy = policy
+						prior, known, e := contractCorePriorReceipt(row, true)
+						if e != nil {
+							return ContractFollowupSnapshot{}, e
+						}
+						policy := ""
+						opaque := false
+						if known && prior != nil {
+							policy = prior.Policy
+						} else if markerPolicy, overflow := contractReceiptOverflowPolicy(row); overflow && row.Accepted && row.RepoPrefix == repo && row.CheckoutID == actor && row.FilePath == path {
+							policy, opaque = markerPolicy, true
+						} else {
+							return ContractFollowupSnapshot{}, graph.ErrContractProjectionIncomplete
+						}
+						if policy != file.Policy {
+							projected, policyErr := idx.contractFollowupPolicyMode(language, policy)
+							if policyErr != nil || !projected || !contractGeneratedFileHint(readers[repo].GetNode(path), path) {
+								return ContractFollowupSnapshot{}, graph.ErrContractProjectionStale
+							}
+							// This is an admission hint from the exact accepted receipt
+							// and selected file. The worker revalidates accepted bytes
+							// and every public projection fact before omitting C parsing.
+							file.Policy = policy
+						}
+						snapshot.opaqueContractInputs = snapshot.opaqueContractInputs || opaque
+						file.SourceFingerprint = row.SourceFingerprint
+						break
 					}
-					snapshot.opaqueContractInputs = snapshot.opaqueContractInputs || opaque
-					file.SourceFingerprint = row.SourceFingerprint
+				}
+				if file.SourceFingerprint != "" || excluded {
 					break
 				}
 			}
-			if file.SourceFingerprint != "" || excluded {
-				break
+			if excluded {
+				snapshot.Excluded = append(snapshot.Excluded, path)
+				continue
 			}
+			snapshot.Files = append(snapshot.Files, file)
 		}
-		if excluded {
-			snapshot.Excluded = append(snapshot.Excluded, path)
-			continue
-		}
-		snapshot.Files = append(snapshot.Files, file)
 	}
+
 	if options.selectedInputs != nil {
 		// The job proves its reads by receipt stamps of the selected chain
 		// and re-reads the census at every full scan, instead of fencing the
