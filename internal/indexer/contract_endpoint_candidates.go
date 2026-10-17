@@ -35,7 +35,7 @@ func (e *contractFollowupEvidence) endpointConstantCandidates(name, repoPrefix s
 	var out []contracts.EndpointConstantCandidate
 	count := 0
 	limited := false
-	err := graph.VisitNodesByNamesContext(e.ctx, e.core, []string{name}, func(node *graph.Node) bool {
+	visit := func(node *graph.Node) bool {
 		count++
 		if count > graph.ContractProjectionRowLimit {
 			limited = true
@@ -55,7 +55,18 @@ func (e *contractFollowupEvidence) endpointConstantCandidates(name, repoPrefix s
 		}
 		out = append(out, contracts.EndpointConstantCandidate{ID: node.ID, FilePath: node.FilePath})
 		return true
-	})
+	}
+	var err error
+	if rows, ok := e.endpointReplay.lookup(e, name); ok {
+		count = rows.count - len(rows.constants)
+		for i := range rows.constants {
+			if !visit(&rows.constants[i]) {
+				break
+			}
+		}
+	} else {
+		err = graph.VisitNodesByNamesContext(e.ctx, e.core, []string{name}, visit)
+	}
 	if limited {
 		return nil, graph.ErrContractProjectionLimit
 	}

@@ -999,6 +999,7 @@ type contractFollowupEvidence struct {
 	// scratch results and final accepted-source fences remain live.
 	completedCoreNames     map[string]int
 	completedCoreNameBytes int
+	endpointReplay         *contractEndpointReplayBatch
 	err                    error
 }
 

@@ -2031,6 +2031,15 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 		}
 	}
 	defer batch.close()
+	endpointBatch := &contractEndpointReplayBatch{}
+	for _, p := range plans {
+		for _, read := range p.ledger.reads {
+			if read.kind == contractReadConstCandidates && len(read.args) == 2 {
+				endpointBatch.add(read.args[0])
+			}
+		}
+	}
+	defer endpointBatch.close()
 	var evidence *contractFollowupEvidence
 	var scratch *store_sqlite.Store
 	var dir string
@@ -2045,6 +2054,7 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 			evidence, scratch, dir = nil, nil, ""
 		} else {
 			evidence.ctx = context.WithValue(evidence.ctx, contractReplayCoreBatchKey{}, batch)
+			evidence.endpointReplay = endpointBatch
 		}
 		return err
 	}
