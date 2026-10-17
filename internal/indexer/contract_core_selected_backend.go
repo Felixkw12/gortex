@@ -175,6 +175,7 @@ func (b *SparseGenerationBuilder) installSelectedContractCoreInputs(ctx context.
 		return e
 	}
 	idx.contractCoreInputs.logger = idx.logger
+	idx.contractCoreInputs.sources = b.contractSources
 	idx.contractCoreRuntime.Store(hooks)
 	idx.contractProjectionNeedsWitness = false
 	idx.contractInputWitness = nil

@@ -75,6 +75,10 @@ func (l *CheckoutLifecycle) SetContractCoreRuntime(hooks ContractCoreRuntimeHook
 
 func (l *CheckoutLifecycle) installContractCoreBuilder(builder *SparseGenerationBuilder) *SparseGenerationBuilder {
 	builder.contractCoreRuntime = l.contractCoreRuntime.Load()
+	builder.contractSources = nil
+	if builder.contractCoreRuntime != nil {
+		builder.contractSources = l.mi.contractAcceptedSources()
+	}
 	return builder
 }
 

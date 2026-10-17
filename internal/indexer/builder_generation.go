@@ -552,6 +552,8 @@ type SparseGenerationBuilder struct {
 	// Installed before this builder is handed to a build or an owner. The
 	// hooks are immutable; copies retain their own installed configuration.
 	contractCoreRuntime *ContractCoreRuntimeHooks
+	// The installing MI owns the existing bounded, fingerprint-keyed source cache.
+	contractSources *contractAcceptedSourceCache
 	// Store is any handle on the database. Generations are begun and published
 	// through it and the pass writes through the handle it hands back, so which
 	// generation this handle is pinned to does not matter.

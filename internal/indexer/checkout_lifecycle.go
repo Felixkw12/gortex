@@ -2424,7 +2424,7 @@ func (l *CheckoutLifecycle) buildCoordinator(
 		EditCycleActive: l.editCycleHoldsBuildLane,
 		PrewarmDeferred: l.prewarmDeferral.defers,
 	}
-	builder.contractCoreRuntime = l.contractCoreRuntime.Load()
+	builder = l.installContractCoreBuilder(builder)
 	coordinator, err := NewCheckoutCoordinator(CheckoutCoordinatorConfig{
 		GitWork:        &l.gitWork,
 		PrewarmRoute:   l.routePrewarm.call,
