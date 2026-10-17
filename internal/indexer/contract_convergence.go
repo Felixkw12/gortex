@@ -538,6 +538,9 @@ func contractAnswerDigest(answer any) (string, bool) {
 
 func contractCanonicalAnswer(answer any) (any, error) {
 	switch v := answer.(type) {
+	case []contracts.Contract:
+		// Registry.All enumerates map buckets; record order is not an input.
+		return contractSortedJSON(v)
 	case []*graph.Node:
 		return contractSortedJSON(v)
 	case []*graph.Edge:
