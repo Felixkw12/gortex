@@ -76,7 +76,19 @@ func (s *Store) ContractBoundaryReceiptContext(ctx context.Context, repo, actor,
 	if err := s.requireContractBoundaryContext(ctx); err != nil {
 		return nil, false, err
 	}
-	row, err := scanContractBoundaryReceipt(s.db.QueryRowContext(ctx, `SELECT `+contractBoundaryReceiptColumns+` FROM generation_contract_boundary_receipt WHERE view_gen=? AND repo_prefix=? AND checkout_id=? AND file_path=?`, s.viewGen, repo, actor, file))
+	// Resolve the key in the payload-free index first. A WITHOUT ROWID
+	// primary-key miss can otherwise load an unrelated large receipt while
+	// comparing records. Materialization plus CROSS JOIN keeps the full-row
+	// lookup behind a proven match, within this one SQLite read statement.
+	const query = `WITH receipt_key AS MATERIALIZED (
+ SELECT view_gen,repo_prefix,checkout_id,file_path
+ FROM generation_contract_boundary_receipt INDEXED BY contract_boundary_receipt_stamps
+ WHERE view_gen=? AND repo_prefix=? AND checkout_id=? AND file_path=?
+)
+SELECT r.repo_prefix,r.checkout_id,r.file_path,r.version,r.fingerprint,r.source_fingerprint,r.accepted,r.receipt
+FROM receipt_key k CROSS JOIN generation_contract_boundary_receipt r
+WHERE r.view_gen=k.view_gen AND r.repo_prefix=k.repo_prefix AND r.checkout_id=k.checkout_id AND r.file_path=k.file_path`
+	row, err := scanContractBoundaryReceipt(s.db.QueryRowContext(ctx, query, s.viewGen, repo, actor, file))
 	if errors.Is(err, sql.ErrNoRows) {
 		baseline, err := s.ContractBoundaryReceiptBaselineContext(ctx, repo, actor)
 		return nil, baseline != nil, err
