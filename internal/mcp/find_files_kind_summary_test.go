@@ -149,6 +149,32 @@ func TestContractCoreKindSummaryCapabilityStaysConditional(t *testing.T) {
 	hidden := newContractCoreEdges(findFilesFullProjectionStore{Store: store, selected: store}, context.Background(), nil)
 	_, summary := hidden.(graph.ScopedKindSummarySequencer)
 	require.False(t, summary)
-	_, delta := any((*graph.DeltaWriter)(nil)).(graph.ScopedKindSummarySequencer)
-	require.False(t, delta, "a composed delta deliberately retains full-row fallback")
+	// DeltaWriter now composes compact summaries. The optional capability must
+	// retain its selected full-row fallback and both live-layer deletion masks
+	// and additions, without exposing physical edge traversal through the wrapper.
+	require.NoError(t, store.AddBatchChecked([]*graph.Node{
+		{ID: "a/kept.go", Kind: graph.KindFile, FilePath: "a/kept.go", RepoPrefix: "a", Language: "go"},
+		{ID: "a/removed.go", Kind: graph.KindFile, FilePath: "a/removed.go", RepoPrefix: "a", Language: "go"},
+		{ID: "b/foreign.go", Kind: graph.KindFile, FilePath: "b/foreign.go", RepoPrefix: "b", Language: "go"},
+		{ID: "a/kept.go::fn", Kind: graph.KindFunction, FilePath: "a/kept.go", RepoPrefix: "a"},
+	}, nil))
+	fullOnly := struct {
+		graph.Reader
+		graph.ScopedProjectionSequencer
+	}{store, store}
+	for _, selected := range []graph.Reader{store, fullOnly} {
+		delta := graph.NewDeltaWriter(selected, nil)
+		delta.EvictFiles([]string{"a/removed.go"})
+		delta.AddNode(&graph.Node{ID: "a/added.go", Kind: graph.KindFile, FilePath: "a/added.go", RepoPrefix: "a", Language: "python"})
+		wrapped := newContractCoreEdges(delta, context.Background(), nil)
+		summary, ok := wrapped.(graph.ScopedKindSummarySequencer)
+		require.True(t, ok)
+		var got []string
+		for node := range summary.NodesLightByKindsInScopeSeq([]string{"a"}, nil, graph.KindFile) {
+			got = append(got, node.ID+"|"+node.Language)
+		}
+		require.Equal(t, []string{"a/added.go|python", "a/kept.go|go"}, got)
+		_, edges := wrapped.(graph.ScopedProjectionSequencer)
+		require.False(t, edges, "composed summaries must not expose physical edge traversal")
+	}
 }
