@@ -6,6 +6,11 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// Sparse ownership reads must seek both the selected generation and owner kind.
+// The kind-only index also contains every historical generation's owner rows.
+const contractOwnerGenerationIndexName = "edges_contract_owner_generation"
+const contractOwnerGenerationIndexDDL = `CREATE INDEX IF NOT EXISTS edges_contract_owner_generation ON edges(view_gen, kind) WHERE kind IN ` + contractOwnerKindsSQL
+
 var _ graph.ContractRepoProjectionReader = (*Store)(nil)
 var _ graph.OverlayLayerContractRepoProjectionReader = (*Store)(nil)
 
@@ -65,12 +70,12 @@ func (s *Store) LayerContractRepoProjectionContext(ctx context.Context, repo str
 	return p, nil
 }
 
-// Keep the owner-kind range as the edge driving access path. The generation
-// value and all selected rows/joins remain identical; unary + prevents a
-// generation-prefix scan over unrelated edge kinds in a shared corpus.
+// Keep both the physical generation and the three ownership kinds in the
+// driving seek. Neither unrelated edge kinds nor historical owner rows belong
+// to this projection. All selected rows, joins and metadata checks are unchanged.
 func contractRepoOwnerRowsQuery() string {
 	return `SELECT COALESCE(n.repo_prefix,''), ` + contractProjectionEdgeColumns() + `
- FROM edges AS e LEFT JOIN nodes AS n ON n.id=e.from_id AND n.view_gen=e.view_gen
- WHERE e.kind IN ` + contractOwnerKindsSQL + ` AND +e.view_gen=?
+ FROM edges AS e INDEXED BY ` + contractOwnerGenerationIndexName + ` LEFT JOIN nodes AS n ON n.id=e.from_id AND n.view_gen=e.view_gen
+ WHERE e.kind IN ` + contractOwnerKindsSQL + ` AND e.view_gen=?
  AND (n.repo_prefix=? OR n.id IS NULL) LIMIT ?`
 }

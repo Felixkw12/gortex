@@ -179,6 +179,7 @@ var bulkAlwaysLiveIndexes = []bulkDroppableIndex{
 	{nodesByGenerationIndexName, nodesByGenerationIndexDDL},
 	{"nodes_name_candidates", nodesNameCandidatesIndexDDL},
 	{edgesByGenerationIndexName, edgesByGenerationIndexDDL},
+	{contractOwnerGenerationIndexName, contractOwnerGenerationIndexDDL},
 	{"nodes_repo_files", `CREATE INDEX IF NOT EXISTS nodes_repo_files ON nodes(repo_prefix, workspace_id, language, file_path, id) WHERE kind = 'file'`},
 	{"edges_by_unresolved", `CREATE INDEX IF NOT EXISTS edges_by_unresolved ON edges(is_unresolved) WHERE is_unresolved = 1`},
 	{"edges_fnvalue_prefixed", `CREATE INDEX IF NOT EXISTS edges_fnvalue_prefixed ON edges(view_gen, to_id) WHERE to_id LIKE '%::unresolved::fnvalue::%'`},

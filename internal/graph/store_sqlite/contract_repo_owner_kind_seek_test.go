@@ -57,7 +57,7 @@ func TestContractRepoOwnerQueryUsesKindSeekAndPreservesScope(t *testing.T) {
 	require.NoError(t, rows.Err())
 	require.NoError(t, rows.Close())
 	plan := strings.Join(plans, "\n")
-	require.Contains(t, plan, "SEARCH e USING INDEX edges_by_kind", "unrelated edge kinds must not be scanned through a generation-only prefix")
+	require.Contains(t, plan, "SEARCH e USING INDEX "+contractOwnerGenerationIndexName+" (view_gen=? AND kind=?)", "historical ownership rows and unrelated edge kinds must stay outside the seek")
 }
 
 func TestContractRepoOwnerQueryRetainsLimitsDecodeAndCancellation(t *testing.T) {
@@ -78,4 +78,50 @@ func TestContractRepoOwnerQueryRetainsLimitsDecodeAndCancellation(t *testing.T) 
 	p, err = s.LayerContractRepoProjectionContext(t.Context(), "repo")
 	require.Error(t, err)
 	require.Equal(t, graph.ContractFileProjection{}, p, "no partial result after selected edge metadata corruption")
+}
+
+// Same owner identities in several physical generations must not leak into a
+// selected generation. The plan assertion is independent of machine timing.
+func TestContractRepoOwnerQuerySeeksGenerationAndPreservesFullRows(t *testing.T) {
+	s, expected := contractRepoOwnerSeekFixture(t)
+	for _, generation := range []int64{41, 42, 43} {
+		h := s.AtGeneration(generation)
+		source := &graph.Node{ID: "repo/wire.go::Wire", Kind: graph.KindFunction, FilePath: "repo/wire.go", RepoPrefix: "repo"}
+		edges := make([]*graph.Edge, len(expected))
+		for i, row := range expected {
+			e := *row
+			e.Line += int(generation)
+			edges[i] = &e
+		}
+		require.NoError(t, h.AddBatchChecked([]*graph.Node{source}, edges))
+		p, err := h.LayerContractRepoProjectionContext(t.Context(), "repo")
+		require.NoError(t, err)
+		require.Len(t, p.OwnerRows, len(edges))
+		got := map[string]*graph.Edge{}
+		for _, row := range p.OwnerRows {
+			got[string(row.Edge.Kind)] = row.Edge
+		}
+		for _, e := range edges {
+			require.Equal(t, e, got[string(e.Kind)])
+		}
+	}
+	empty, err := s.AtGeneration(44).LayerContractRepoProjectionContext(t.Context(), "repo")
+	require.NoError(t, err)
+	require.Empty(t, empty.OwnerRows)
+	p, err := s.LayerContractRepoProjectionContext(t.Context(), "repo")
+	require.NoError(t, err)
+	require.Len(t, p.OwnerRows, len(expected))
+	for _, row := range p.OwnerRows {
+		require.Less(t, row.Edge.Line, 41)
+	}
+	// Reopening an existing database installs the new sparse index too.
+	_, err = s.writerDB.Exec(`DROP INDEX ` + contractOwnerGenerationIndexName)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	reopened, err := Open(s.dbPath)
+	require.NoError(t, err)
+	defer reopened.Close()
+	p, err = reopened.AtGeneration(41).LayerContractRepoProjectionContext(t.Context(), "repo")
+	require.NoError(t, err)
+	require.Len(t, p.OwnerRows, len(expected))
 }
