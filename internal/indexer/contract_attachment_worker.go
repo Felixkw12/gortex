@@ -1350,17 +1350,21 @@ func (e *contractFollowupEvidence) detachFileNodes(path string, file ContractFol
 // loadFileNodes answers node-only consumers without importing outgoing edges.
 // A later full file load still reads every edge through loadFileRows.
 func (e *contractFollowupEvidence) loadFileNodes(path string) ([]*graph.Node, error) {
+	return e.loadFileNodesPrefetched(path, nil, false)
+}
+
+func (e *contractFollowupEvidence) loadFileNodesPrefetched(path string, prefetched []*graph.Node, hasPrefetch bool) ([]*graph.Node, error) {
 	e.ledger.owner(path)
 	e.ledger.key("path:", path)
 	defer e.guard.enter()()
-	nodes, err := e.loadFileNodeRows(path)
+	nodes, err := e.loadFileNodeRows(path, prefetched, hasPrefetch)
 	if err == nil {
 		e.ledger.read(contractReadFileNodes, []string{path}, nodes, path)
 	}
 	return nodes, err
 }
 
-func (e *contractFollowupEvidence) loadFileNodeRows(path string) ([]*graph.Node, error) {
+func (e *contractFollowupEvidence) loadFileNodeRows(path string, prefetched []*graph.Node, hasPrefetch bool) ([]*graph.Node, error) {
 	file, ok := e.files[path]
 	if !ok {
 		if e.excluded[path] {
@@ -1373,15 +1377,21 @@ func (e *contractFollowupEvidence) loadFileNodeRows(path string) ([]*graph.Node,
 	if loaded {
 		reader = e.scratch
 	}
-	rows, err := graph.ContractFileNodesContext(e.ctx, reader, file.RepoPrefix, []string{path})
-	if err != nil {
-		e.fail(err)
-		return nil, err
+	var selected []*graph.Node
+	if hasPrefetch && !loaded {
+		selected = prefetched
+	} else {
+		rows, err := graph.ContractFileNodesContext(e.ctx, reader, file.RepoPrefix, []string{path})
+		if err != nil {
+			e.fail(err)
+			return nil, err
+		}
+		selected = rows[path]
 	}
 	if loaded {
-		return rows[path], nil
+		return selected, nil
 	}
-	nodes, err := e.detachFileNodes(path, file, rows[path])
+	nodes, err := e.detachFileNodes(path, file, selected)
 	if err != nil {
 		return nil, err
 	}
@@ -1396,18 +1406,78 @@ func (e *contractFollowupEvidence) loadFileNodeRows(path string) ([]*graph.Node,
 	return nodes, nil
 }
 
+// GetFileNodesByPaths batches only previously unread files from the same repo.
+// Every file still has its own full answer, ledger read, detach validation and
+// scratch import. Already loaded files are read from scratch, including locally
+// enriched metadata. A combined row-limit refusal falls back to the original
+// per-file reads, retaining their limits rather than imposing a new aggregate
+// cap. All other checked errors remain authoritative; partial rows are ignored.
 func (e *contractFollowupEvidence) GetFileNodesByPaths(paths []string) map[string][]*graph.Node {
 	out := make(map[string][]*graph.Node, len(paths))
-	for _, path := range paths {
-		nodes, err := e.loadFileNodes(path)
-		if err != nil {
-			e.fail(err)
+	for start := 0; start < len(paths); {
+		if e.err != nil {
 			return nil
 		}
-		out[path] = nodes
+		file, ok := e.files[paths[start]]
+		if !ok {
+			nodes, err := e.loadFileNodes(paths[start])
+			if err != nil {
+				e.fail(err)
+				return nil
+			}
+			out[paths[start]] = nodes
+			start++
+			continue
+		}
+		end := start + 1
+		for end < len(paths) && end-start < contractFrontierReadBatchSize {
+			next, ok := e.files[paths[end]]
+			if !ok || next.RepoPrefix != file.RepoPrefix {
+				break
+			}
+			end++
+		}
+		pending := make(map[string]bool)
+		var unread []string
+		for _, path := range paths[start:end] {
+			if !e.loaded[path] && !e.loadedFileNodes[path] && !pending[path] {
+				pending[path] = true
+				unread = append(unread, path)
+			}
+		}
+		var prefetched map[string][]*graph.Node
+		hasPrefetch := false
+		if len(unread) > 1 {
+			// The whole checked batch is an attempted input, including on failure.
+			// Torn-read classification must retain every file the query could read.
+			for _, path := range unread {
+				e.ledger.owner(path)
+				e.ledger.key("path:", path)
+			}
+			done := e.guard.enter()
+			rows, err := graph.ContractFileNodesContext(e.ctx, e.core, file.RepoPrefix, unread)
+			done()
+			if err != nil && !errors.Is(err, graph.ErrContractProjectionLimit) {
+				e.fail(err)
+				return nil
+			}
+			if err == nil {
+				prefetched, hasPrefetch = rows, true
+			}
+		}
+		for _, path := range paths[start:end] {
+			nodes, err := e.loadFileNodesPrefetched(path, prefetched[path], hasPrefetch && pending[path])
+			if err != nil {
+				e.fail(err)
+				return nil
+			}
+			out[path] = nodes
+		}
+		start = end
 	}
 	return out
 }
+
 func (e *contractFollowupEvidence) GetNodesByIDs(ids []string) map[string]*graph.Node {
 	e.ledger.key("id:", ids...)
 	defer e.guard.enter()()
