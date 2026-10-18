@@ -59,7 +59,21 @@ func ContractFileNodesContext(ctx context.Context, reader Reader, repo string, p
 func (v *OverlaidView) contractFileNodes(ctx context.Context, repo string, paths []string) (map[string][]*Node, error) {
 	out := make(map[string][]*Node)
 	if v.base != nil {
-		base, err := ContractFileNodesContext(ctx, v.base, repo, paths)
+		// A whole-file claim hides every base row of that path. Push that
+		// existing mask into the request before hydrating historical rows.
+		// Identity-only masks still need the base read and its row filtering.
+		basePaths := paths
+		if v.layer != nil {
+			basePaths = make([]string, 0, len(paths))
+			for _, path := range paths {
+				if !v.layer.HasFile(path) {
+					basePaths = append(basePaths, path)
+				}
+			}
+		}
+		// Even an empty request must visit the checked base capability: its
+		// connection lifetime, revision fence and errors remain authoritative.
+		base, err := ContractFileNodesContext(ctx, v.base, repo, basePaths)
 		if err != nil {
 			return nil, err
 		}
