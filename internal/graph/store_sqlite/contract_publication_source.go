@@ -3,6 +3,7 @@ package store_sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -49,10 +50,10 @@ func (s *Store) CaptureContractPublicationSource(ctx context.Context, expected g
 		return nil, err
 	}
 	if err = validateSelectedContractWitnessAncestry(chain, expected.RepoPrefix, witnesses); err != nil {
-		return nil, err
+		return nil, contractPublicationCaptureRefusal(err)
 	}
 	if err = validateContractInputWitnessesTx(ctx, tx, witnesses); err != nil {
-		return nil, err
+		return nil, contractPublicationCaptureRefusal(err)
 	}
 	if err = tx.Rollback(); err != nil {
 		return nil, err
@@ -60,4 +61,14 @@ func (s *Store) CaptureContractPublicationSource(ctx context.Context, expected g
 	result := s.AtGeneration(s.viewGen)
 	result.contractPublicationSource = &contractPublicationSource{expected: expected, witnesses: slices.Clone(witnesses), chain: slices.Clone(chain)}
 	return result, nil
+}
+
+// A source that no longer matches its checked physical selection must be
+// recaptured. Preserve the catalog refusal too: no ancestry or publication
+// guard is bypassed, and malformed inputs and SQL errors remain failures.
+func contractPublicationCaptureRefusal(err error) error {
+	if errors.Is(err, ErrCatalogStaleGuard) {
+		return fmt.Errorf("%w: publication capture: %w", graph.ErrContractProjectionStale, err)
+	}
+	return err
 }

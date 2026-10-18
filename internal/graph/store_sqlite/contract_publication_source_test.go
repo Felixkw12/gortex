@@ -58,6 +58,15 @@ func TestContractPublicationSourceKeepsCheckedAncestryAcrossRebase(t *testing.T)
 	after, err := graph.ComposeContractInputState("repo", "wt", newVector)
 	require.NoError(t, err)
 	require.Equal(t, logical, after)
+	// A capture begun after the rebase cannot mint the old selection's
+	// ancestry. It must be recaptured, rather than fail the actor permanently.
+	refused, moved := physical.CaptureContractPublicationSource(ctx, logical, witnesses)
+	require.Nil(t, refused)
+	require.ErrorIs(t, moved, ErrCatalogStaleGuard)
+	require.ErrorIs(t, moved, graph.ErrContractProjectionStale)
+	recaptured, err := physical.CaptureContractPublicationSource(ctx, after, newVector)
+	require.NoError(t, err)
+	require.NotNil(t, recaptured)
 	// Original captured physical inputs are unchanged; current code instead
 	// rejects their old, still-valid ancestry after the background metadata move.
 	_, err = s.PublishContractAttachmentsWithInputsContext(ctx, []ContractAttachmentPublishTarget{target}, 1)
