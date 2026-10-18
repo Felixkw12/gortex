@@ -293,7 +293,8 @@ func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 		if !strings.Contains(np, "/") {
 			// A leading slash anchors the negation at the root, so it can
 			// only re-include a root entry and what lies under it.
-			if lit, ok := unescapeLiteral(np); rooted && ok {
+			lit, kind := literalSegment(np)
+			if rooted && kind == segLiteral {
 				if relDir == "" || relDir == lit || strings.HasPrefix(relDir, lit+"/") {
 					return true
 				}
@@ -301,10 +302,17 @@ func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 			}
 			// A negation with no internal slash is unanchored: gitignore
 			// matches it at any depth, so it can re-include something under
-			// any directory. Keep descending for the index walk only.
-			if anchoredOnly {
+			// any directory. Keep descending for the index walk only. A
+			// rooted segment with an unsure escape stays open in both modes.
+			if anchoredOnly && (!rooted || kind != segUnsure) {
 				continue
 			}
+			return true
+		}
+		first, _, _ := strings.Cut(np, "/")
+		if _, kind := literalSegment(first); kind == segUnsure {
+			// The compiled matcher may read this escape differently, so
+			// the anchor is unknown. Stay conservative in both modes.
 			return true
 		}
 		anchor := literalAnchor(np)
@@ -333,8 +341,8 @@ func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 }
 
 // isAnchoredNegation reports whether the "!" pattern p is one that
-// hasNegatedDescendant counts in anchored mode: a rooted single literal
-// segment, or an internal slash with a literal first segment.
+// hasNegatedDescendant counts in anchored mode: a rooted single segment,
+// or an internal slash, whose first segment is not a wildcard.
 func isAnchoredNegation(p string) bool {
 	np := strings.TrimSpace(p[1:])
 	rooted := strings.HasPrefix(np, "/")
@@ -342,25 +350,22 @@ func isAnchoredNegation(p string) bool {
 	if np == "" {
 		return false
 	}
-	if !strings.Contains(np, "/") {
-		_, ok := unescapeLiteral(np)
-		return rooted && ok
-	}
-	return literalAnchor(np) != ""
+	first, _, slash := strings.Cut(np, "/")
+	_, kind := literalSegment(first)
+	return (rooted || slash) && kind != segWildcard
 }
 
 // literalAnchor returns the leading path segments of a slash-bearing
-// gitignore pattern up to (but excluding) the first segment that holds a
-// wildcard meta-character. It returns "" when the first segment is
-// itself a wildcard ("*", "**", "?foo", ...). A backslash escape makes
-// the next character literal and is dropped, so `foo\*/keep.go` anchors
-// at `foo*`.
+// gitignore pattern up to (but excluding) the first segment that is not
+// a plain literal (see literalSegment). It returns "" when the first
+// segment is a wildcard ("*", "**", "?foo", ...). Escapes are decoded,
+// so `foo\*/keep.go` anchors at `foo*`.
 func literalAnchor(pattern string) string {
 	segs := strings.Split(pattern, "/")
 	lit := make([]string, 0, len(segs))
 	for _, s := range segs {
-		u, ok := unescapeLiteral(s)
-		if !ok {
+		u, kind := literalSegment(s)
+		if kind != segLiteral {
 			break
 		}
 		lit = append(lit, u)
@@ -368,26 +373,47 @@ func literalAnchor(pattern string) string {
 	return strings.Join(lit, "/")
 }
 
-// unescapeLiteral returns segment s with its backslash escapes removed,
-// and false when s holds an unescaped wildcard meta-character or ends in
-// a backslash.
-func unescapeLiteral(s string) (string, bool) {
+// segKind classifies one "/"-separated segment of a negation.
+type segKind int
+
+const (
+	segLiteral  segKind = iota // plain text once escapes are decoded
+	segWildcard                // holds an unescaped "*", "?" or "["
+	segUnsure                  // holds an escape the matcher may read differently
+)
+
+// literalEscapes are the characters that a backslash makes literal both
+// in gitignore and in the compiled matcher: go-gitignore maps `\*` back
+// to a star, and the rest reach the regexp as plain escapes. go-gitignore
+// rewrites other escapes such as `\?`, `\.` or a letter, so the compiled
+// matcher does not read them as gitignore does.
+const literalEscapes = `*[\ ` + regexOnlyMeta
+
+// literalSegment returns segment s with its escapes decoded and its kind.
+// A trailing backslash escapes the slash the split removed, so it makes
+// the segment unsure too.
+func literalSegment(s string) (string, segKind) {
 	if !strings.ContainsAny(s, `*?[\`) {
-		return s, true
+		return s, segLiteral
 	}
 	var b strings.Builder
+	wild := false
 	for i := 0; i < len(s); i++ {
-		switch c := s[i]; {
-		case c == '\\' && i+1 < len(s):
+		switch c := s[i]; c {
+		case '\\':
+			if i+1 == len(s) || strings.IndexByte(literalEscapes, s[i+1]) < 0 {
+				return "", segUnsure
+			}
 			i++
 			b.WriteByte(s[i])
-		case c == '\\', c == '*', c == '?', c == '[':
-			// A trailing backslash escapes the slash the split removed, so
-			// the segment is not a plain literal either.
-			return "", false
+		case '*', '?', '[':
+			wild = true
 		default:
 			b.WriteByte(c)
 		}
 	}
-	return b.String(), true
+	if wild {
+		return "", segWildcard
+	}
+	return b.String(), segLiteral
 }

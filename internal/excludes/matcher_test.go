@@ -1,6 +1,7 @@
 package excludes
 
 import (
+	"path"
 	"testing"
 )
 
@@ -193,6 +194,44 @@ func TestMatcher_CommentsAndEmpty(t *testing.T) {
 	pats := m.Patterns()
 	if len(pats) != 1 || pats[0] != "foo/" {
 		t.Errorf("expected [foo/], got %v", pats)
+	}
+}
+
+// TestMatcher_EscapedNegationsAgreeWithMatchRel checks both descendant
+// checks against the compiled matcher: when a negation with an escape
+// re-includes a file, neither check may prune the file's folder.
+func TestMatcher_EscapedNegationsAgreeWithMatchRel(t *testing.T) {
+	negations := []string{
+		`!foo\*/keep.go`, `!foo\?/keep.go`, `!foo\[/keep.go`, `!foo\+/keep.go`,
+		`!foo\./keep.go`, `!foo\\/keep.go`, `!foo\/keep.go`, `!foo\a/keep.go`,
+		`!foo\ /keep.go`, `!foo\$/keep.go`, `!foo\(/keep.go`, `!foo\]/keep.go`,
+		`!/foo\?`, `!/foo\*`, `!/foo\.`,
+	}
+	files := []string{
+		"foo/keep.go", "foo*/keep.go", "foo?/keep.go", "foo[/keep.go",
+		"foo+/keep.go", "foo./keep.go", `foo\/keep.go`, `foo\x/keep.go`,
+		"fooa/keep.go", "foo\a/keep.go", "foo /keep.go", "foo$/keep.go",
+		"foo(/keep.go", "foo]/keep.go", "foox/keep.go",
+	}
+	checked := 0
+	for _, neg := range negations {
+		m := New([]string{"*", neg})
+		for _, f := range files {
+			if m.MatchRel(f) {
+				continue
+			}
+			checked++
+			dir := path.Dir(f)
+			if !m.HasNegatedDescendant(dir) {
+				t.Errorf("%s re-includes %q, but HasNegatedDescendant(%q) = false", neg, f, dir)
+			}
+			if !m.HasAnchoredNegatedDescendant(dir) {
+				t.Errorf("%s re-includes %q, but HasAnchoredNegatedDescendant(%q) = false", neg, f, dir)
+			}
+		}
+	}
+	if checked < len(negations)-2 {
+		t.Fatalf("only %d re-included files checked; the fixture no longer exercises the matcher", checked)
 	}
 }
 
