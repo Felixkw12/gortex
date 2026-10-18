@@ -301,8 +301,10 @@ func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 			}
 			// A negation with no internal slash is unanchored: gitignore
 			// matches it at any depth, so it can re-include something under
-			// any directory. Keep descending for the index walk only.
-			if anchoredOnly {
+			// any directory. Keep descending for the index walk only. A
+			// rooted segment with an escape may name a literal folder, so it
+			// stays conservative in both modes.
+			if anchoredOnly && (!rooted || !strings.Contains(np, `\`)) {
 				continue
 			}
 			return true
@@ -311,7 +313,8 @@ func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 		if anchor == "" {
 			// First segment is itself a wildcard ("*/...", "**/..."): it
 			// can match at varying depths, so stay conservative for walks.
-			if anchoredOnly {
+			// An escaped wildcard is a literal name, so it stays too.
+			if anchoredOnly && !strings.Contains(np, `\`) {
 				continue
 			}
 			return true
@@ -338,7 +341,8 @@ func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 // itself a wildcard ("*", "**", "?foo", ...).
 // isAnchoredNegation reports whether the "!" pattern p is one that
 // hasNegatedDescendant counts in anchored mode: a rooted single literal
-// segment, or an internal slash with a literal first segment.
+// segment, or an internal slash with a literal first segment. A pattern
+// with an escape counts, because an escaped wildcard is literal.
 func isAnchoredNegation(p string) bool {
 	np := strings.TrimSpace(p[1:])
 	rooted := strings.HasPrefix(np, "/")
@@ -346,10 +350,11 @@ func isAnchoredNegation(p string) bool {
 	if np == "" {
 		return false
 	}
+	escaped := strings.Contains(np, `\`)
 	if !strings.Contains(np, "/") {
-		return rooted && !strings.ContainsAny(np, "*?[")
+		return rooted && (escaped || !strings.ContainsAny(np, "*?["))
 	}
-	return literalAnchor(np) != ""
+	return escaped || literalAnchor(np) != ""
 }
 
 func literalAnchor(pattern string) string {

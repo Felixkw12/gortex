@@ -192,6 +192,10 @@ func TestMatcher_HasAnchoredNegatedDescendant(t *testing.T) {
 		{"root_anchored_folder", "!/gen/", "gen/sub", true},
 		{"anchored_parent", "!gen/sub/keep.go", "./gen/", true},
 		{"anchored_unrelated", "!gen/keep.go", "other", false},
+		// An escaped wildcard names a literal folder; such patterns stay conservative.
+		{"escaped_first_segment", `!foo\*/keep.go`, "foo*", true},
+		{"root_escaped_segment", `!/foo\*`, "foo*", true},
+		{"unanchored_escaped", `!foo\*`, "node_modules/pkg", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := New([]string{tc.pattern})
