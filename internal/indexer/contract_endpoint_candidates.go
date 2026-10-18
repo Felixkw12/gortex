@@ -65,7 +65,7 @@ func (e *contractFollowupEvidence) endpointConstantCandidates(name, repoPrefix s
 			}
 		}
 	} else {
-		err = graph.VisitNodesByNamesContext(e.ctx, e.core, []string{name}, visit)
+		err = graph.VisitNodeDeclarationsByNamesContext(e.ctx, e.core, []string{name}, visit)
 	}
 	if limited {
 		return nil, graph.ErrContractProjectionLimit
