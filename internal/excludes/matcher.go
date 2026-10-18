@@ -309,12 +309,16 @@ func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 			}
 			return true
 		}
+		// literalAnchor does not decode escapes, so an escaped pattern's
+		// anchor cannot be compared with a folder path. Stay conservative.
+		if strings.Contains(np, `\`) {
+			return true
+		}
 		anchor := literalAnchor(np)
 		if anchor == "" {
 			// First segment is itself a wildcard ("*/...", "**/..."): it
 			// can match at varying depths, so stay conservative for walks.
-			// An escaped wildcard is a literal name, so it stays too.
-			if anchoredOnly && !strings.Contains(np, `\`) {
+			if anchoredOnly {
 				continue
 			}
 			return true

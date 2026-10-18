@@ -65,6 +65,14 @@ func TestMatcher_HasNegatedDescendant(t *testing.T) {
 			want:     true,
 		},
 		{
+			// literalAnchor keeps the backslash, so the anchor cannot match
+			// the folder name; an escaped negation stays conservative.
+			name:     "escaped literal character keeps its folder",
+			patterns: []string{"*", `!foo\+/keep.go`},
+			relDir:   "foo+",
+			want:     true,
+		},
+		{
 			name:     "sibling without reinclude is prunable",
 			patterns: []string{"wp-content/plugins/*", "!wp-content/plugins/foo/"},
 			relDir:   "wp-content/plugins/other",
@@ -196,6 +204,7 @@ func TestMatcher_HasAnchoredNegatedDescendant(t *testing.T) {
 		{"escaped_first_segment", `!foo\*/keep.go`, "foo*", true},
 		{"root_escaped_segment", `!/foo\*`, "foo*", true},
 		{"unanchored_escaped", `!foo\*`, "node_modules/pkg", false},
+		{"escaped_literal_char", `!foo\+/keep.go`, "foo+", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := New([]string{tc.pattern})
