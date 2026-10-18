@@ -60,6 +60,43 @@ func TestWalkDisk_PrunesDirectories(t *testing.T) {
 	}
 }
 
+func TestWalkDisk_SkipsGitFolders(t *testing.T) {
+	root := t.TempDir()
+	for _, path := range []string{
+		".git/HEAD", ".git/objects/ab/cdef", "a.go", "sub/.git/config", "sub/b.go",
+	} {
+		writeExcludeFixture(t, filepath.Join(root, filepath.FromSlash(path)), "package sample\n")
+	}
+	// A linked worktree's .git is a file that points at the repository; it is not skipped.
+	writeExcludeFixture(t, filepath.Join(root, "wt", ".git"), "gitdir: ../.git/worktrees/wt\n")
+
+	for _, tc := range []struct {
+		name  string
+		scope string
+		want  []string
+	}{
+		{name: "root", scope: ".", want: []string{".", "a.go", "sub", "sub/b.go", "wt", "wt/.git"}},
+		{name: "below_root", scope: "sub", want: []string{"sub", "sub/b.go"}},
+		{name: "git_scope", scope: ".git", want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A wildcard-led negation keeps every ignored folder open for the
+			// prune check, so only the .git rule keeps the walk out of .git/.
+			idx := newAdmissionTestIndexer(t, root, "!*.xcodeproj/x")
+			var visited []string
+			err := idx.walkDisk(root, filepath.Join(root, tc.scope), func(path string, d fs.DirEntry, err error) error {
+				require.NoError(t, err)
+				rel, relErr := filepath.Rel(root, path)
+				require.NoError(t, relErr)
+				visited = append(visited, filepath.ToSlash(rel))
+				return nil
+			})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, visited)
+		})
+	}
+}
+
 func TestWalkDisk_CallbackResult(t *testing.T) {
 	root := t.TempDir()
 	writeExcludeFixture(t, filepath.Join(root, "a", "child.go"), "package sample\n")
