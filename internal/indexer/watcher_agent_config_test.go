@@ -240,6 +240,23 @@ func TestWatcherAgentConfigUnanchoredFileVerdict(t *testing.T) {
 	require.True(t, w.isExcluded(filepath.Dir(path)))
 }
 
+// The cold walk keeps its conservative check (D12): only the watcher drops
+// ignored folders that an unanchored or wildcard-led negation could reach.
+func TestWatcherAgentConfigColdWalkKeepsUnanchoredNegations(t *testing.T) {
+	for _, negation := range []string{"!.gitkeep", "!**/keep/"} {
+		t.Run(negation, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "node_modules", "pkg")
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			idx := newAdmissionTestIndexer(t, root, "node_modules/", negation)
+			require.False(t, idx.shouldPruneDir(dir, root))
+			w, err := NewWatcher(&Indexer{rootPath: root}, config.WatchConfig{Exclude: []string{"node_modules/", negation}}, zap.NewNop())
+			require.NoError(t, err)
+			require.True(t, w.isExcluded(dir))
+		})
+	}
+}
+
 func TestWatcherAgentConfigDeletedDirectory(t *testing.T) {
 	root := t.TempDir()
 	idx := New(graph.New(), parser.NewRegistry(), config.IndexConfig{Workers: 1}, zap.NewNop())
