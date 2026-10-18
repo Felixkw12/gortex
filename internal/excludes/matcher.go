@@ -246,6 +246,16 @@ func (m *Matcher) ExplainAbsDir(absPath, root string, isDir bool) (bool, string)
 // can match at varying depths, so it is treated as "could be under
 // anything" and the directory is kept rather than pruned.
 func (m *Matcher) HasNegatedDescendant(relDir string) bool {
+	return m.hasNegatedDescendant(relDir, false)
+}
+
+// HasAnchoredNegatedDescendant counts only negations with a leading or
+// internal slash and a literal first segment, honoring later subtree excludes.
+func (m *Matcher) HasAnchoredNegatedDescendant(relDir string) bool {
+	return m.hasNegatedDescendant(relDir, true)
+}
+
+func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 	if m == nil {
 		return false
 	}
@@ -285,13 +295,19 @@ func (m *Matcher) HasNegatedDescendant(relDir string) bool {
 			}
 			// A negation with no internal slash is unanchored: gitignore
 			// matches it at any depth, so it can re-include something under
-			// any directory. Keep descending.
+			// any directory. Keep descending for the index walk only.
+			if anchoredOnly {
+				continue
+			}
 			return true
 		}
 		anchor := literalAnchor(np)
 		if anchor == "" {
 			// First segment is itself a wildcard ("*/...", "**/..."): it
-			// can match at varying depths, so stay conservative.
+			// can match at varying depths, so stay conservative for walks.
+			if anchoredOnly {
+				continue
+			}
 			return true
 		}
 		// At the root, every anchored negation lives somewhere beneath us.

@@ -5796,19 +5796,27 @@ func (idx *Indexer) shouldPruneDir(path, root string) bool {
 	if idx.contentSource() == nil {
 		perFolder = idx.dirIgnoreMatcher(root)
 	}
-	return shouldPruneDir(path, root, idx.excludeMatcher(), perFolder)
+	return shouldPruneDir(path, root, idx.excludeMatcher(), perFolder, false)
 }
 
-func shouldPruneDir(path, root string, flat *excludes.Matcher, perFolder *excludes.Hierarchical) bool {
+func shouldPruneDir(path, root string, flat *excludes.Matcher, perFolder *excludes.Hierarchical, anchoredOnly bool) bool {
 	if !shouldExcludeRules(path, root, true, flat, perFolder) {
 		return false
 	}
 	if flat != nil {
-		if rel, err := filepath.Rel(root, path); err == nil && flat.HasNegatedDescendant(filepath.ToSlash(rel)) {
+		hasNegatedDescendant := flat.HasNegatedDescendant
+		if anchoredOnly {
+			hasNegatedDescendant = flat.HasAnchoredNegatedDescendant
+		}
+		if rel, err := filepath.Rel(root, path); err == nil && hasNegatedDescendant(filepath.ToSlash(rel)) {
 			return false
 		}
 	}
-	if perFolder.HasNegatedDescendant(path) {
+	hasNegatedDescendant := perFolder.HasNegatedDescendant
+	if anchoredOnly {
+		hasNegatedDescendant = perFolder.HasAnchoredNegatedDescendant
+	}
+	if hasNegatedDescendant(path) {
 		return false
 	}
 	return true

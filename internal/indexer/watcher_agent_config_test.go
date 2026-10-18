@@ -1,17 +1,21 @@
 package indexer
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/indexer/source"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/thirdparty/fswatcher"
@@ -166,6 +170,226 @@ func TestWatcherAgentConfigNewDirectoryScan(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatal("new-directory create did not enqueue a discovery scan")
 			}
+		})
+	}
+}
+
+// Folder events use anchored negations only; file events keep the full matcher.
+func TestWatcherAgentConfigAnchoredNegations(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		patterns    []string
+		ignorePath  string
+		ignoreRules string
+		dir         string
+		backend     bool
+		scan        bool
+	}{
+		{"unanchored_gitkeep", []string{"node_modules/", "!.gitkeep"}, "", "", "node_modules/pkg", false, false},
+		{"unanchored_env", []string{"node_modules/", "!.env.example"}, "", "", "node_modules/pkg", false, false},
+		{"wildcard_led", []string{"node_modules/", "!**/.gitkeep"}, "", "", "node_modules/pkg", false, false},
+		{"root_anchored_unrelated", []string{"node_modules/", "!/AGENTS.md"}, "", "", "node_modules/pkg", false, false},
+		{"anchored_child", []string{"gen", "!gen/keep.go"}, "", "", "gen", true, true},
+		{"root_anchored_child", []string{"gen", "!/gen/keep.go"}, "", "", "gen", true, true},
+		{"per_folder_unanchored", nil, ".gortexignore", "vendor2/\n!.gitkeep\n", "vendor2/pkg", true, false},
+		{"nested_anchored", nil, "sub/.gortexignore", "gen/\n!gen/keep.go\nother/\n", "sub/gen", true, true},
+		{"nested_unrelated", nil, "sub/.gortexignore", "gen/\n!gen/keep.go\nother/\n", "sub/other", true, false},
+		{"flat_pruned", []string{"gen/"}, "", "", "gen", true, false},
+		{"per_folder_pruned", nil, "sub/.gortexignore", "gen/\n", "sub/gen", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tc.ignorePath != "" {
+				writeExcludeFixture(t, filepath.Join(root, tc.ignorePath), tc.ignoreRules)
+			}
+			w, err := NewWatcher(&Indexer{rootPath: root}, config.WatchConfig{Exclude: tc.patterns}, zap.NewNop())
+			require.NoError(t, err)
+			t.Cleanup(func() { w.signalStopped(); require.NoError(t, w.Stop()) })
+			dir := filepath.Join(root, tc.dir)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			filter := &watcherExcludeFilter{w: w}
+			assert.Equal(t, tc.backend, filter.ShouldInclude(dir), "backend folder verdict")
+			if strings.HasPrefix(tc.dir, "node_modules/") {
+				assert.False(t, filter.ShouldInclude(filepath.Join(dir, "index.js")), "backend ignored-tree file verdict")
+			}
+			assert.Equal(t, !tc.scan, w.isExcluded(dir), "full folder verdict")
+			scans := make(chan map[string]struct{}, 1)
+			w.scanFn = func(dirs map[string]struct{}) { scans <- dirs }
+			w.handleEvent(fswatcher.WatchEvent{Path: dir, Types: []fswatcher.EventType{fswatcher.EventCreate}})
+			// handleEvent has finished adding work; join the owned scan without a sleep.
+			w.asyncWork.Wait()
+			if tc.scan {
+				require.Len(t, scans, 1)
+				require.Equal(t, map[string]struct{}{dir: {}}, <-scans)
+			} else {
+				assert.Empty(t, scans, "a pruned folder must schedule no scan")
+			}
+		})
+	}
+}
+
+func TestWatcherAgentConfigUnanchoredFileVerdict(t *testing.T) {
+	root := t.TempDir()
+	w, err := NewWatcher(&Indexer{rootPath: root}, config.WatchConfig{Exclude: []string{"node_modules/", "!.gitkeep"}}, zap.NewNop())
+	require.NoError(t, err)
+	path := filepath.Join(root, "node_modules/pkg/.gitkeep")
+	writeExcludeFixture(t, path, "")
+	// On main the negation re-includes this file, though no language claims it.
+	require.True(t, (&watcherExcludeFilter{w: w}).ShouldInclude(path))
+	require.False(t, w.isExcluded(path))
+	require.True(t, w.isExcluded(filepath.Dir(path)))
+}
+
+func TestWatcherAgentConfigDeletedDirectory(t *testing.T) {
+	root := t.TempDir()
+	idx := New(graph.New(), parser.NewRegistry(), config.IndexConfig{Workers: 1}, zap.NewNop())
+	idx.SetRootPath(root)
+	w, err := NewWatcher(idx, config.WatchConfig{Exclude: []string{"gen/"}, DebounceMs: 60000}, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { w.signalStopped(); require.NoError(t, w.Stop()) })
+	path := filepath.Join(root, "gen")
+	require.NoError(t, os.Mkdir(path, 0o755))
+	require.True(t, w.isExcluded(path))
+	require.NoError(t, os.Remove(path))
+	// Lstat now fails, so the trailing-slash rule gets the file verdict.
+	require.False(t, w.isExcluded(path))
+	require.True(t, (&watcherExcludeFilter{w: w}).ShouldInclude(path))
+	w.handleEvent(fswatcher.WatchEvent{Path: path, Types: []fswatcher.EventType{fswatcher.EventRemove}})
+	w.mu.Lock()
+	generation := w.nextGeneration
+	w.mu.Unlock()
+	require.Equal(t, uint64(1), generation)
+}
+
+func TestWatcherAgentConfigRenameGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		from string
+		to   string
+	}{
+		{"into_excluded", "src/a.go", "ignored/a.go"},
+		{"out_of_excluded", "ignored/a.go", "src/a.go"},
+		{"within_admitted", "src/a.go", "src/b.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			reg := parser.NewRegistry()
+			reg.Register(languages.NewGoExtractor())
+			idx := New(graph.New(), reg, config.IndexConfig{Workers: 1}, zap.NewNop())
+			idx.SetRootPath(root)
+			w, err := NewWatcher(idx, config.WatchConfig{Exclude: []string{"ignored/"}, DebounceMs: 60000}, zap.NewNop())
+			require.NoError(t, err)
+			t.Cleanup(func() { w.signalStopped(); require.NoError(t, w.Stop()) })
+			from, to := filepath.Join(root, tc.from), filepath.Join(root, tc.to)
+			writeExcludeFixture(t, from, "package src\n")
+			require.NoError(t, os.MkdirAll(filepath.Dir(to), 0o755))
+			require.NoError(t, os.Rename(from, to))
+			for _, path := range []string{from, to} {
+				excluded := strings.HasPrefix(path, filepath.Join(root, "ignored")+string(filepath.Separator))
+				require.Equal(t, excluded, w.isExcluded(path), "main's flat-list file verdict")
+				require.Equal(t, !excluded, (&watcherExcludeFilter{w: w}).ShouldInclude(path))
+				w.handleEvent(fswatcher.WatchEvent{Path: path, Types: []fswatcher.EventType{fswatcher.EventRename}})
+				w.mu.Lock()
+				_, scheduled := w.pendingGeneration[path]
+				w.mu.Unlock()
+				require.Equal(t, !excluded, scheduled, "rename scheduling, including the renamed-away path")
+			}
+		})
+	}
+}
+
+func TestWatcherAgentConfigSymlinkDirectoryGuard(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "target")
+	require.NoError(t, os.Mkdir(inside, 0o755))
+	w, err := NewWatcher(&Indexer{rootPath: root}, config.WatchConfig{Exclude: []string{"gen/"}}, zap.NewNop())
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name   string
+		target string
+		want   bool
+	}{
+		{"gen", inside, false},
+		{"escape", t.TempDir(), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(root, tc.name)
+			if err := os.Symlink(tc.target, path); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			require.Equal(t, tc.want, w.isExcluded(path), "a directory link has the file verdict, with confinement first")
+		})
+	}
+}
+
+func TestWatcherAgentConfigRootlessGuard(t *testing.T) {
+	w, err := NewWatcher(&Indexer{}, config.WatchConfig{Exclude: []string{"gen", "!gen/keep.go", "ignored/"}}, zap.NewNop())
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		path    string
+		full    bool
+		backend bool
+	}{
+		{"gen", true, false},
+		{"gen/keep.go", false, true},
+		{"gen/drop.go", false, false},
+		{"ignored", false, true},
+		{"ignored/child.go", false, false},
+		{"main.go", false, true},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			// Main's full check matches Base(path); its backend matches path.
+			require.Equal(t, tc.full, w.isExcluded(tc.path))
+			require.Equal(t, tc.backend, (&watcherExcludeFilter{w: w}).ShouldInclude(tc.path))
+		})
+	}
+}
+
+func TestWatcherAgentConfigEscapingMCPGuard(t *testing.T) {
+	root := t.TempDir()
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewMCPConfigExtractor())
+	idx := New(graph.New(), reg, config.IndexConfig{Workers: 1}, zap.NewNop())
+	idx.SetRootPath(root)
+	w, err := NewWatcher(idx, config.WatchConfig{DebounceMs: 60000}, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { w.signalStopped(); require.NoError(t, w.Stop()) })
+	outside := filepath.Join(t.TempDir(), "mcp.json")
+	writeExcludeFixture(t, outside, `{"mcpServers":{"escape":{"command":"npx"}}}`)
+	path := filepath.Join(root, ".claude/mcp.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	if err := os.Symlink(outside, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	require.True(t, (&watcherExcludeFilter{w: w}).ShouldInclude(path))
+	require.True(t, w.isExcluded(path))
+	w.handleEvent(fswatcher.WatchEvent{Path: path, Types: []fswatcher.EventType{fswatcher.EventCreate}})
+	w.mu.Lock()
+	generation := w.nextGeneration
+	w.mu.Unlock()
+	require.Zero(t, generation, "escaping MCP link must not schedule a reindex")
+}
+
+func TestWatcherAgentConfigSnapshotGuard(t *testing.T) {
+	for _, isDir := range []bool{false, true} {
+		t.Run(fmt.Sprintf("directory_%v", isDir), func(t *testing.T) {
+			root := t.TempDir()
+			writeExcludeFixture(t, filepath.Join(root, "docs/.gortexignore"), "draft.go\n")
+			path := filepath.Join(root, "docs/draft.go")
+			if isDir {
+				require.NoError(t, os.Mkdir(path, 0o755))
+			} else {
+				writeExcludeFixture(t, path, "package draft\n")
+			}
+			idx := &Indexer{rootPath: root}
+			require.True(t, idx.shouldExclude(path, root, isDir))
+			require.True(t, idx.shouldPruneDir(path, root))
+			fsSource, err := source.NewFilesystemSource(root)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, fsSource.Close()) })
+			idx.SetContentSource(fsSource)
+			require.False(t, idx.shouldExclude(path, root, isDir))
+			require.False(t, idx.shouldPruneDir(path, root))
 		})
 	}
 }

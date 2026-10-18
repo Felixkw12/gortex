@@ -47,7 +47,7 @@ func (f *watcherExcludeFilter) ShouldInclude(path string) bool {
 	if !f.w.excludes.MatchAbs(path, root) {
 		return true
 	}
-	return err == nil && f.w.excludes.HasNegatedDescendant(filepath.ToSlash(rel))
+	return err == nil && f.w.excludes.HasAnchoredNegatedDescendant(filepath.ToSlash(rel))
 }
 
 // isProbeMarkerPath reports whether path names a watcher handshake probe.

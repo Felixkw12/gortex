@@ -173,3 +173,35 @@ func TestMatcher_CommentsAndEmpty(t *testing.T) {
 		t.Errorf("expected [foo/], got %v", pats)
 	}
 }
+
+func TestMatcher_HasAnchoredNegatedDescendant(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pattern string
+		dir     string
+		want    bool
+	}{
+		{"unanchored_gitkeep", "!.gitkeep", "node_modules/pkg", false},
+		{"unanchored_env", "!.env.example", "node_modules/pkg", false},
+		{"wildcard_led", "!**/.gitkeep", "node_modules/pkg", false},
+		{"root_wildcard_led", "!/**/.gitkeep", "node_modules/pkg", false},
+		{"root_anchored_unrelated", "!/AGENTS.md", "node_modules/pkg", false},
+		{"root_anchored_at_root", "!/AGENTS.md", ".", true},
+		{"anchored_child", "!gen/keep.go", "gen", true},
+		{"root_anchored_child", "!/gen/keep.go", "gen", true},
+		{"root_anchored_folder", "!/gen/", "gen/sub", true},
+		{"anchored_parent", "!gen/sub/keep.go", "./gen/", true},
+		{"anchored_unrelated", "!gen/keep.go", "other", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New([]string{tc.pattern})
+			if got := m.HasAnchoredNegatedDescendant(tc.dir); got != tc.want {
+				t.Fatalf("HasAnchoredNegatedDescendant(%q) = %v, want %v", tc.dir, got, tc.want)
+			}
+		})
+	}
+	var m *Matcher
+	if m.HasAnchoredNegatedDescendant("gen") || New(nil).HasAnchoredNegatedDescendant("gen") {
+		t.Fatal("nil and empty matchers have no negated descendants")
+	}
+}

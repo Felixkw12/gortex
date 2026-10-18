@@ -2958,7 +2958,7 @@ func (w *Watcher) isExcluded(path string) bool {
 		w.dirIgnore = excludes.NewHierarchical(root, dirIgnoreFiles...)
 	})
 	if isDir {
-		return shouldPruneDir(path, root, w.excludes, w.dirIgnore)
+		return shouldPruneDir(path, root, w.excludes, w.dirIgnore, true)
 	}
 	return shouldExcludeRules(path, root, false, w.excludes, w.dirIgnore)
 }
