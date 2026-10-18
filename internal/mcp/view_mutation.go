@@ -8,6 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
 )
@@ -128,19 +129,37 @@ func (s *Server) awaitRouteRecomposition(ctx context.Context, view *requestView)
 	}
 	resumeIntent := suspendSourceMutationWriteIntent(ctx)
 	defer resumeIntent()
-	ticket, err := s.lifecycle.RequestCheckoutRefresh(ctx, view.rider.CheckoutID, view.viewRoot)
-	if err != nil || ticket == nil || ticket.Ticket == nil {
-		return false
-	}
-	wait := time.NewTimer(routeRecompositionWait)
-	defer wait.Stop()
-	select {
-	case result := <-ticket.Ticket.Done:
-		return result.Err == nil
-	case <-wait.C:
-		return false
-	case <-ctx.Done():
-		return false
+	return awaitRouteRecompositionTickets(ctx, func(ctx context.Context) (*indexer.CheckoutRefreshTicket, error) {
+		return s.lifecycle.RequestCheckoutRefresh(ctx, view.rider.CheckoutID, view.viewRoot)
+	})
+}
+
+// Bulk checkpoint contention aborts one physical generation attempt so its
+// coordinator can retry after PASSIVE settles. Keep that retry inside the
+// original admission budget, before any edit reads or writes source bytes.
+// Semantic refusals and caller cancellation remain terminal.
+func awaitRouteRecompositionTickets(ctx context.Context, request func(context.Context) (*indexer.CheckoutRefreshTicket, error)) bool {
+	ctx, cancel := context.WithTimeout(ctx, routeRecompositionWait)
+	defer cancel()
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		ticket, err := request(ctx)
+		if err != nil || ticket == nil || ticket.Ticket == nil {
+			return false
+		}
+		select {
+		case result, open := <-ticket.Ticket.Done:
+			if !open {
+				return false
+			}
+			if !errors.Is(result.Err, store_sqlite.ErrGenerationBulkCheckpointBusy) {
+				return result.Err == nil
+			}
+		case <-ctx.Done():
+			return false
+		}
 	}
 }
 
