@@ -86,3 +86,33 @@ func TestExactNameDeclarationsPreserveRepoWrapperRefusal(t *testing.T) {
 		t.Fatalf("repo guard=%v optimizedcalls=%d", err, r.declarations)
 	}
 }
+
+func TestDeltaWriterDeclarationFallbackPreservesOwnedNames(t *testing.T) {
+	base := New()
+	base.AddBatch([]*Node{
+		{ID: "repo/covered.go::old", Name: "Match", RepoPrefix: "repo", FilePath: "repo/covered.go"},
+		{ID: "repo/deleted.go::gone", Name: "Match", RepoPrefix: "repo", FilePath: "repo/deleted.go"},
+		{ID: "repo/visible.go::kept", Name: "Match", RepoPrefix: "repo", FilePath: "repo/visible.go"},
+		{ID: "other/out.go::foreign", Name: "Match", RepoPrefix: "other", FilePath: "other/out.go"},
+	}, nil)
+	delta := NewDeltaWriter(base, nil)
+	delta.EvictFiles([]string{"repo/covered.go", "repo/deleted.go"})
+	delta.AddNode(&Node{ID: "repo/covered.go::new", Name: "Match", RepoPrefix: "repo", FilePath: "repo/covered.go"})
+	var ids []string
+	if err := VisitNodeDeclarationsByNamesInRepoContext(t.Context(), delta, []string{"Match", "Missing"}, "repo", func(n *Node) bool { ids = append(ids, n.ID); return true }); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(ids)
+	if !reflect.DeepEqual(ids, []string{"repo/covered.go::new", "repo/visible.go::kept"}) {
+		t.Fatalf("delta declarations=%v", ids)
+	}
+	seen := 0
+	if err := VisitNodeDeclarationsByNamesContext(t.Context(), delta, []string{"Match", "Missing"}, func(*Node) bool { seen++; return false }); err != nil || seen != 1 {
+		t.Fatalf("stop=%d err=%v", seen, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := VisitNodeDeclarationsByNamesInRepoContext(ctx, delta, []string{"Match"}, "repo", func(*Node) bool { t.Fatal("cancelled lookup visited a row"); return true }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation=%v", err)
+	}
+}
