@@ -293,25 +293,18 @@ func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 		if !strings.Contains(np, "/") {
 			// A leading slash anchors the negation at the root, so it can
 			// only re-include a root entry and what lies under it.
-			if rooted && !strings.ContainsAny(np, "*?[") {
-				if relDir == "" || relDir == np || strings.HasPrefix(relDir, np+"/") {
+			if lit, ok := unescapeLiteral(np); rooted && ok {
+				if relDir == "" || relDir == lit || strings.HasPrefix(relDir, lit+"/") {
 					return true
 				}
 				continue
 			}
 			// A negation with no internal slash is unanchored: gitignore
 			// matches it at any depth, so it can re-include something under
-			// any directory. Keep descending for the index walk only. A
-			// rooted segment with an escape may name a literal folder, so it
-			// stays conservative in both modes.
-			if anchoredOnly && (!rooted || !strings.Contains(np, `\`)) {
+			// any directory. Keep descending for the index walk only.
+			if anchoredOnly {
 				continue
 			}
-			return true
-		}
-		// literalAnchor does not decode escapes, so an escaped pattern's
-		// anchor cannot be compared with a folder path. Stay conservative.
-		if strings.Contains(np, `\`) {
 			return true
 		}
 		anchor := literalAnchor(np)
@@ -339,14 +332,9 @@ func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 	return false
 }
 
-// literalAnchor returns the leading path segments of a slash-bearing
-// gitignore pattern up to (but excluding) the first segment that holds a
-// wildcard meta-character. It returns "" when the first segment is
-// itself a wildcard ("*", "**", "?foo", ...).
 // isAnchoredNegation reports whether the "!" pattern p is one that
 // hasNegatedDescendant counts in anchored mode: a rooted single literal
-// segment, or an internal slash with a literal first segment. A pattern
-// with an escape counts, because an escaped wildcard is literal.
+// segment, or an internal slash with a literal first segment.
 func isAnchoredNegation(p string) bool {
 	np := strings.TrimSpace(p[1:])
 	rooted := strings.HasPrefix(np, "/")
@@ -354,21 +342,49 @@ func isAnchoredNegation(p string) bool {
 	if np == "" {
 		return false
 	}
-	escaped := strings.Contains(np, `\`)
 	if !strings.Contains(np, "/") {
-		return rooted && (escaped || !strings.ContainsAny(np, "*?["))
+		_, ok := unescapeLiteral(np)
+		return rooted && ok
 	}
-	return escaped || literalAnchor(np) != ""
+	return literalAnchor(np) != ""
 }
 
+// literalAnchor returns the leading path segments of a slash-bearing
+// gitignore pattern up to (but excluding) the first segment that holds a
+// wildcard meta-character. It returns "" when the first segment is
+// itself a wildcard ("*", "**", "?foo", ...). A backslash escape makes
+// the next character literal and is dropped, so `foo\*/keep.go` anchors
+// at `foo*`.
 func literalAnchor(pattern string) string {
 	segs := strings.Split(pattern, "/")
 	lit := make([]string, 0, len(segs))
 	for _, s := range segs {
-		if strings.ContainsAny(s, "*?[") {
+		u, ok := unescapeLiteral(s)
+		if !ok {
 			break
 		}
-		lit = append(lit, s)
+		lit = append(lit, u)
 	}
 	return strings.Join(lit, "/")
+}
+
+// unescapeLiteral returns segment s with its backslash escapes removed,
+// and false when s holds an unescaped wildcard meta-character.
+func unescapeLiteral(s string) (string, bool) {
+	if !strings.ContainsAny(s, `*?[\`) {
+		return s, true
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\\' && i+1 < len(s):
+			i++
+			b.WriteByte(s[i])
+		case c == '*' || c == '?' || c == '[':
+			return "", false
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), true
 }

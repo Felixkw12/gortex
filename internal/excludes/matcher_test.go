@@ -73,6 +73,12 @@ func TestMatcher_HasNegatedDescendant(t *testing.T) {
 			want:     true,
 		},
 		{
+			name:     "escaped negation leaves unrelated folders prunable",
+			patterns: []string{"*", `!foo\+/keep.go`},
+			relDir:   "other",
+			want:     false,
+		},
+		{
 			name:     "sibling without reinclude is prunable",
 			patterns: []string{"wp-content/plugins/*", "!wp-content/plugins/foo/"},
 			relDir:   "wp-content/plugins/other",
@@ -205,6 +211,7 @@ func TestMatcher_HasAnchoredNegatedDescendant(t *testing.T) {
 		{"root_escaped_segment", `!/foo\*`, "foo*", true},
 		{"unanchored_escaped", `!foo\*`, "node_modules/pkg", false},
 		{"escaped_literal_char", `!foo\+/keep.go`, "foo+", true},
+		{"escaped_unrelated", `!foo\+/keep.go`, "other", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := New([]string{tc.pattern})
