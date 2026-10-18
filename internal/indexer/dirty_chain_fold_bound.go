@@ -202,12 +202,7 @@ func (c *CheckoutCoordinator) verifyFlattenedChainInSteps(ctx context.Context, c
 		return err
 	}
 	defer release()
-	var baseReader graph.Reader = base
-	memo := newFoldBaseAdjacency(base)
-	if memo != nil {
-		baseReader = memo
-	}
-	chainView := baseReader
+	var chainView graph.Reader = base
 	paths := map[string]struct{}{}
 	ids := map[string]struct{}{}
 	for _, id := range oldestFirst {
@@ -234,7 +229,7 @@ func (c *CheckoutCoordinator) verifyFlattenedChainInSteps(ctx context.Context, c
 	if err != nil {
 		return err
 	}
-	foldedView := graph.NewOverlaidViewWithLayer(baseReader, foldedLayer)
+	foldedView := graph.NewOverlaidViewWithLayer(base, foldedLayer)
 	if got, want := foldedLayer.FilePaths(), foldSortedKeys(paths); !foldEqualStrings(got, want) {
 		return fmt.Errorf("the fold claims %d paths, the chain %d", len(got), len(want))
 	}
@@ -263,9 +258,6 @@ func (c *CheckoutCoordinator) verifyFlattenedChainInSteps(ctx context.Context, c
 			return err
 		}
 		end := min(start+verifyFoldChunk, len(pathList)+len(idList))
-		if memo != nil {
-			memo.reset()
-		}
 		want, err := renderFoldChunk(ctx, chainView, pathList, idList, start, end, wantSeen)
 		if err != nil {
 			return err
