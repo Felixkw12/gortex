@@ -211,9 +211,17 @@ func TestTearingDownARepositoryInvalidatesItsWorkspaceCohorts(t *testing.T) {
 	require.NotEmpty(t, siblingPrefix)
 	coordinator := settledCoordinator(t, f.lc, f.automatic.CheckoutID)
 
-	out, err := f.lc.Untrack(ctx, siblingPath)
+	preview, err := f.lc.PreviewUntrack(ctx, siblingPath)
 	require.NoError(t, err)
-	require.False(t, out.Pending, "the untrack did not finish, so this test proves nothing")
+	require.NotEmpty(t, preview.GraphID)
+	_, err = f.lc.Untrack(ctx, siblingPath)
+	require.NoError(t, err)
+	// A captured producer/reader may legitimately leave Untrack pending.
+	// Join the existing owned cleanup boundary before asserting teardown.
+	finishRepositoryCleanup(t, f.lc, siblingPrefix)
+	_, found, err := f.catalog.GetDedicatedGraph(ctx, preview.GraphID)
+	require.NoError(t, err)
+	require.False(t, found, "the untrack did not finish, so this test proves nothing")
 	require.Nil(t, f.mi.GetMetadata(siblingPrefix),
 		"the sibling is still served, so nothing was torn down")
 
@@ -854,9 +862,17 @@ func TestAReleaseWhoseSubjectCannotBeReadInvalidatesEveryCohort(t *testing.T) {
 		return store_sqlite.DedicatedGraph{}, false, errors.New("catalog: database is locked")
 	}
 
-	out, err := f.lc.Untrack(ctx, siblingPath)
+	preview, err := f.lc.PreviewUntrack(ctx, siblingPath)
 	require.NoError(t, err)
-	require.False(t, out.Pending, "the untrack did not finish, so this test proves nothing")
+	require.NotEmpty(t, preview.GraphID)
+	_, err = f.lc.Untrack(ctx, siblingPath)
+	require.NoError(t, err)
+	// A captured producer/reader may legitimately leave Untrack pending.
+	// Join the existing owned cleanup boundary before asserting teardown.
+	finishRepositoryCleanup(t, f.lc, siblingPrefix)
+	_, found, err := f.catalog.GetDedicatedGraph(ctx, preview.GraphID)
+	require.NoError(t, err)
+	require.False(t, found, "the untrack did not finish, so this test proves nothing")
 	require.Nil(t, f.mi.GetMetadata(siblingPrefix),
 		"the sibling is still served, so nothing was torn down")
 
