@@ -40,6 +40,25 @@ func normalizeContractBoundaryReceipt(row graph.ContractBoundaryReceipt) (graph.
 	return row, nil
 }
 
+// Reads already own the decoded row. Check the same envelope without cloning
+// its payload or sorting detached key copies that the read would discard.
+func validateContractBoundaryReceipt(row graph.ContractBoundaryReceipt) error {
+	if row.FilePath == "" || row.Version == "" || row.Fingerprint == "" || row.SourceFingerprint == "" {
+		return fmt.Errorf("%w: incomplete contract boundary receipt", ErrCatalogInvalidValue)
+	}
+	if len(row.Payload) > contractBoundaryPayloadLimit || len(row.LookupKeys)+len(row.ProducedKeys) > contractBoundaryKeyLimit {
+		return ErrContractBoundaryReceiptLimit
+	}
+	for _, keys := range [][]string{row.LookupKeys, row.ProducedKeys} {
+		for _, key := range keys {
+			if key == "" || len(key) > 8192 {
+				return fmt.Errorf("%w: empty boundary key", ErrCatalogInvalidValue)
+			}
+		}
+	}
+	return nil
+}
+
 type contractBoundaryScanner interface{ Scan(...any) error }
 
 func scanContractBoundaryReceipt(scan contractBoundaryScanner) (graph.ContractBoundaryReceipt, error) {
@@ -58,11 +77,11 @@ func scanContractBoundaryReceipt(scan contractBoundaryScanner) (graph.ContractBo
 	if row.RepoPrefix != columns.RepoPrefix || row.CheckoutID != columns.CheckoutID || row.FilePath != columns.FilePath || row.Version != columns.Version || row.Fingerprint != columns.Fingerprint || row.SourceFingerprint != columns.SourceFingerprint || row.Accepted != columns.Accepted {
 		return row, fmt.Errorf("%w: boundary receipt identity mismatch", ErrCatalogInvalidValue)
 	}
-	if _, err := normalizeContractBoundaryReceipt(row); err != nil {
+	if err := validateContractBoundaryReceipt(row); err != nil {
 		return row, err
 	}
 	if row.Previous != nil {
-		if _, err := normalizeContractBoundaryReceipt(*row.Previous); err != nil {
+		if err := validateContractBoundaryReceipt(*row.Previous); err != nil {
 			return row, err
 		}
 	}
