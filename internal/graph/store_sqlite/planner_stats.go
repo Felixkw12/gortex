@@ -45,17 +45,18 @@ var plannerStatsIndexQuery = buildPlannerStatsIndexQuery()
 // it competes with another on a left prefix, and a missing row there hands the
 // choice to the default cost model.
 var plannerStatsIndexesOutside = map[string]string{
-	"edges_by_file":                 "(file_path, kind): only edges_by_file_generation shares file_path, and the default model prefers the one that keys more of a statement",
-	"edges_by_file_generation":      "(file_path, view_gen): the lazy index, see edges_by_file",
-	"edges_by_from":                 "(view_gen, from_id, kind): its rivals edges_by_from_line and edges_by_from_line_kind carry the rows",
-	"edges_by_to":                   "(view_gen, to_id, kind): no other index leads with to_id",
-	"nodes_by_qual":                 "partial, qual_name <> '': the qualified-name reads only",
-	"nodes_missing_workspace_slugs": "partial, workspace_id = '' OR project_id = '': the slug backfill only",
-	"nodes_repo_files":              "partial, kind = 'file': the repository file listing only",
-	"nodes_name_candidates":         "partial, name <> '': supplementary reads select it explicitly; competing production name-key reads pin the stronger name or repo/language/name indexes",
-	"edges_by_unresolved":           "partial, is_unresolved = 1: the resolver's unresolved scan only",
-	"edges_fnvalue_prefixed":        "partial, to_id LIKE '%::unresolved::fnvalue::%': the fnvalue pass only",
-	"edges_external":                "partial, the external-call target predicate: the external-call synthesizer only",
+	contractOwnerGenerationIndexName: "partial, kind IN " + contractOwnerKindsSQL + ": contract ownership projection pins this index explicitly; generic key-list reads do not imply its owner-kind predicate",
+	"edges_by_file":                  "(file_path, kind): only edges_by_file_generation shares file_path, and the default model prefers the one that keys more of a statement",
+	"edges_by_file_generation":       "(file_path, view_gen): the lazy index, see edges_by_file",
+	"edges_by_from":                  "(view_gen, from_id, kind): its rivals edges_by_from_line and edges_by_from_line_kind carry the rows",
+	"edges_by_to":                    "(view_gen, to_id, kind): no other index leads with to_id",
+	"nodes_by_qual":                  "partial, qual_name <> '': the qualified-name reads only",
+	"nodes_missing_workspace_slugs":  "partial, workspace_id = '' OR project_id = '': the slug backfill only",
+	"nodes_repo_files":               "partial, kind = 'file': the repository file listing only",
+	"nodes_name_candidates":          "partial, name <> '': supplementary reads select it explicitly; competing production name-key reads pin the stronger name or repo/language/name indexes",
+	"edges_by_unresolved":            "partial, is_unresolved = 1: the resolver's unresolved scan only",
+	"edges_fnvalue_prefixed":         "partial, to_id LIKE '%::unresolved::fnvalue::%': the fnvalue pass only",
+	"edges_external":                 "partial, the external-call target predicate: the external-call synthesizer only",
 }
 
 func buildPlannerStatsIndexQuery() string {
