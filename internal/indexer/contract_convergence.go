@@ -2089,104 +2089,9 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 		}
 	}
 	stats.declare += time.Since(started)
-	var closingTime time.Duration
-	moved := false
-	closePlan := func(p *plan) error {
-		closeStarted := time.Now()
-		defer func() { closingTime += time.Since(closeStarted) }()
-		if c.hooks != nil && c.hooks.beforeRevalidateR1 != nil {
-			c.hooks.beforeRevalidateR1()
-		}
-		scanStarted := time.Now()
-		r1, err := c.scan(p.bracket)
-		if err != nil {
-			return err
-		}
-		if !r1.Settled {
-			return errContractJobKeyMoved
-		}
-		// No read of this unit follows its closing scan. Shared answers used
-		// by later units remain inside those units' own R0/R1 intervals.
-		c.quietFrom = c.observePoint(p.bracket, r1.Stamps)
-		stats.scans += time.Since(scanStarted)
-		stats.span = time.Since(opened)
-		// An answer asked while an input moved may be torn: it is asked again,
-		// never acted on, and the round waits for that input's window to close.
-		blockMoves := func(bracket []string) {
-			for _, path := range bracket {
-				before, had := r0.Stamps[path]
-				after, has := r1.Stamps[path]
-				if had != has || before != after {
-					stats.noteMoved(before, after, has)
-					c.block(path, r1.Stamps[path])
-				}
-			}
-		}
-		held := p.askErr == nil && p.equal
-		if p.unit == nil {
-			switch {
-			case changedBetween(r0, r1, p.bracket):
-				moved = true
-				blockMoves(p.bracket)
-			case !held:
-				c.pp.stale = true
-			default:
-				c.pp.round, c.pp.torn = clock, nil
-				c.progress++
-			}
-			return nil
-		}
-		path := p.unit.path
-		if p.forced {
-			// Newly returned owners were not necessarily in this point R0.
-			// Retain them and retry with their windows in the opening scan.
-			missing := false
-			for _, owner := range p.newOwners {
-				if !slices.Contains(p.bracket, owner) {
-					if c.coverage.extra[path] == nil {
-						c.coverage.extra[path] = map[string]bool{}
-					}
-					c.coverage.extra[path][owner] = true
-					missing = true
-				}
-			}
-			if missing {
-				c.blockMoved()
-				unproven = append(unproven, path)
-				return nil
-			}
-		}
-		if c.hooks != nil && c.hooks.revalidated != nil {
-			c.hooks.revalidated(path, held)
-		}
-		switch {
-		case changedBetween(r0, r1, p.bracket) || (p.forced && !contractCoverageBracketHolds(r0, r1, p.bracket)):
-			// An input moved while it was asked: its answers prove nothing,
-			// equal or not, and the round is blocked.
-			moved = true
-			blockMoves(p.bracket)
-			stats.moved++
-			if held {
-				stats.equalMoved++
-			}
-			unproven = append(unproven, path)
-		case !held:
-			stats.changed++
-			extract = append(extract, c.dropForExtraction(path))
-		default:
-			p.unit.round, p.unit.stamp, p.unit.torn = clock, p.own, nil
-			if p.forced {
-				c.coverage.record(p.unit, p.bracket)
-				c.noteFillRead(p.unit)
-			}
-			c.report.Revalidated++
-			proven = append(proven, p.unit)
-		}
-		return nil
-	}
 	started = time.Now()
-	askedPlans := 0
-	for i, p := range plans {
+	var asking []*plan
+	for _, p := range plans {
 		path := ""
 		if p.unit != nil {
 			path = p.unit.path
@@ -2307,26 +2212,103 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 				}
 			}
 		}
-		askedPlans++
-		refusedBefore := len(unproven)
-		if err := closePlan(p); err != nil {
-			return nil, nil, nil, err
-		}
-		if len(unproven) > refusedBefore {
-			// Preserve the existing refused/wake boundary, without asking
-			// later readers against an already torn proof interval.
-			for _, remaining := range plans[i+1:] {
-				if remaining.unit != nil {
-					unproven = append(unproven, remaining.unit.path)
-				}
+		asking = append(asking, p)
+	}
+	stats.ask += time.Since(started)
+	stats.reads += len(asked)
+	if len(asking) == 0 {
+		return nil, extract, unproven, nil
+	}
+	if c.hooks != nil && c.hooks.beforeRevalidateR1 != nil {
+		c.hooks.beforeRevalidateR1()
+	}
+	started = time.Now()
+	r1, err := c.scan(union)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !r1.Settled {
+		return nil, nil, nil, errContractJobKeyMoved
+	}
+	// No read of the pass follows R1.
+	c.quietFrom = c.observePoint(union, r1.Stamps)
+	stats.scans += time.Since(started)
+	stats.span = time.Since(opened)
+	moved := false
+	defer func() { c.noteReask(lead, woken, stats.span, moved, source, closedAt) }()
+	// An answer asked while an input moved may be torn: it is asked again,
+	// never acted on, and the round waits for that input's window to close.
+	blockMoves := func(bracket []string) {
+		for _, path := range bracket {
+			before, had := r0.Stamps[path]
+			after, has := r1.Stamps[path]
+			if had != has || before != after {
+				stats.noteMoved(before, after, has)
+				c.block(path, r1.Stamps[path])
 			}
-			break
 		}
 	}
-	stats.ask += time.Since(started) - closingTime
-	stats.reads += len(asked)
-	if askedPlans > 0 {
-		c.noteReask(lead, woken, stats.span, moved, source, closedAt)
+	for _, p := range asking {
+		held := p.askErr == nil && p.equal
+		if p.unit == nil {
+			switch {
+			case changedBetween(r0, r1, p.bracket):
+				moved = true
+				blockMoves(p.bracket)
+			case !held:
+				c.pp.stale = true
+			default:
+				c.pp.round, c.pp.torn = clock, nil
+				c.progress++
+			}
+			continue
+		}
+		path := p.unit.path
+		if p.forced {
+			// Newly returned owners were not necessarily in this point R0.
+			// Retain them and retry with their windows in the opening scan.
+			missing := false
+			for _, owner := range p.newOwners {
+				if !slices.Contains(p.bracket, owner) {
+					if c.coverage.extra[path] == nil {
+						c.coverage.extra[path] = map[string]bool{}
+					}
+					c.coverage.extra[path][owner] = true
+					missing = true
+				}
+			}
+			if missing {
+				c.blockMoved()
+				unproven = append(unproven, path)
+				continue
+			}
+		}
+		if c.hooks != nil && c.hooks.revalidated != nil {
+			c.hooks.revalidated(path, held)
+		}
+		switch {
+		case changedBetween(r0, r1, p.bracket) || (p.forced && !contractCoverageBracketHolds(r0, r1, p.bracket)):
+			// An input moved while it was asked: its answers prove nothing,
+			// equal or not, and the round is blocked.
+			moved = true
+			blockMoves(p.bracket)
+			stats.moved++
+			if held {
+				stats.equalMoved++
+			}
+			unproven = append(unproven, path)
+		case !held:
+			stats.changed++
+			extract = append(extract, c.dropForExtraction(path))
+		default:
+			p.unit.round, p.unit.stamp, p.unit.torn = clock, p.own, nil
+			if p.forced {
+				c.coverage.record(p.unit, p.bracket)
+				c.noteFillRead(p.unit)
+			}
+			c.report.Revalidated++
+			proven = append(proven, p.unit)
+		}
 	}
 	return proven, extract, unproven, nil
 }
