@@ -111,6 +111,29 @@ func (c *contractCapturedCore) VisitNodesByNamesContext(ctx context.Context, nam
 	}
 	return ctx.Err()
 }
+func (c *contractCapturedCore) VisitNodeDeclarationsByNamesContext(ctx context.Context, names []string, yield func(*graph.Node) bool) error {
+	repos := make([]string, 0, len(c.readers))
+	for repo := range c.readers {
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
+	stopped := false
+	for _, repo := range repos {
+		if err := graph.VisitNodeDeclarationsByNamesInRepoContext(ctx, c.readers[repo], names, repo, func(node *graph.Node) bool {
+			if node == nil || node.RepoPrefix != repo {
+				return true
+			}
+			stopped = !yield(node)
+			return !stopped
+		}); err != nil {
+			return err
+		}
+		if stopped {
+			break
+		}
+	}
+	return ctx.Err()
+}
 func (c *contractCapturedCore) ReadConstantValueProjectionContext(ctx context.Context, ids []string, files []graph.ConstantFileKey) (graph.ConstantValueProjection, error) {
 	byRepo := make(map[string][]string)
 	fileRepo := make(map[string][]graph.ConstantFileKey)

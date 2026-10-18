@@ -49,7 +49,7 @@ func (b *contractEndpointReplayBatch) lookup(e *contractFollowupEvidence, name s
 			pending[name] = contractEndpointReplayRows{}
 		}
 		count, size, complete := 0, b.bytes, true
-		err := graph.VisitNodesByNamesContext(e.ctx, e.core, b.names, func(node *graph.Node) bool {
+		err := graph.VisitNodeDeclarationsByNamesContext(e.ctx, e.core, b.names, func(node *graph.Node) bool {
 			count++
 			if node == nil || count > graph.ContractProjectionRowLimit {
 				complete = false
@@ -62,8 +62,8 @@ func (b *contractEndpointReplayBatch) lookup(e *contractFollowupEvidence, name s
 			}
 			rows.count++
 			if node.Kind == graph.KindConstant {
-				// Full selected rows were decoded above; retain only the declaration
-				// fields this endpoint door consumes, detached from reader allocations.
+				// Retain only the checked declaration fields this endpoint door
+				// consumes, detached from reader allocations.
 				cost := len(node.ID) + len(node.FilePath) + len(node.RepoPrefix)
 				if cost > contractFollowupCompactLimit-size {
 					complete = false

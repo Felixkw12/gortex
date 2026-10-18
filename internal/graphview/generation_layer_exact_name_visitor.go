@@ -45,3 +45,22 @@ func (l *GenerationLayer) VisitNodesByNamesContext(ctx context.Context, names []
 		return yield(node)
 	})
 }
+
+// VisitNodeDeclarationsByNamesContext retains the identical context-path mask.
+func (l *GenerationLayer) VisitNodeDeclarationsByNamesContext(ctx context.Context, names []string, yield func(*graph.Node) bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if yield == nil {
+		return nil
+	}
+	return l.handle.VisitNodeDeclarationsByNamesContext(ctx, names, func(node *graph.Node) bool {
+		if !l.servesNode(node) {
+			return true
+		}
+		return yield(node)
+	})
+}
