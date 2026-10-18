@@ -21,6 +21,10 @@ type Matcher struct {
 	// Positive patterns proven to cover a matched directory and all its children.
 	// Blank entries preserve line numbers in patterns.
 	subtreeExcludes *ignore.GitIgnore
+	// Whether any negation, and any anchored negation, exists, so the
+	// descendant checks can return before matching when none can apply.
+	hasNegation         bool
+	hasAnchoredNegation bool
 }
 
 // New compiles the given patterns into a Matcher. A nil/empty list is
@@ -59,6 +63,8 @@ func New(patterns []string) *Matcher {
 	seen := make(map[string]bool)
 	for i, p := range cleaned {
 		if strings.HasPrefix(p, "!") {
+			m.hasNegation = true
+			m.hasAnchoredNegation = m.hasAnchoredNegation || isAnchoredNegation(p)
 			continue
 		}
 		if coversSubtree(p) {
@@ -256,7 +262,7 @@ func (m *Matcher) HasAnchoredNegatedDescendant(relDir string) bool {
 }
 
 func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
-	if m == nil {
+	if m == nil || !m.hasNegation || anchoredOnly && !m.hasAnchoredNegation {
 		return false
 	}
 	relDir = pathkey.Normalize(filepath.ToSlash(relDir))
@@ -330,6 +336,22 @@ func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 // gitignore pattern up to (but excluding) the first segment that holds a
 // wildcard meta-character. It returns "" when the first segment is
 // itself a wildcard ("*", "**", "?foo", ...).
+// isAnchoredNegation reports whether the "!" pattern p is one that
+// hasNegatedDescendant counts in anchored mode: a rooted single literal
+// segment, or an internal slash with a literal first segment.
+func isAnchoredNegation(p string) bool {
+	np := strings.TrimSpace(p[1:])
+	rooted := strings.HasPrefix(np, "/")
+	np = strings.TrimSuffix(strings.TrimPrefix(np, "/"), "/")
+	if np == "" {
+		return false
+	}
+	if !strings.Contains(np, "/") {
+		return rooted && !strings.ContainsAny(np, "*?[")
+	}
+	return literalAnchor(np) != ""
+}
+
 func literalAnchor(pattern string) string {
 	segs := strings.Split(pattern, "/")
 	lit := make([]string, 0, len(segs))
