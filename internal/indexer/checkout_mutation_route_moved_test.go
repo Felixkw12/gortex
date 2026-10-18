@@ -98,6 +98,9 @@ func TestCheckoutMutationSampledAdmissionKeepsHEADAndDiskMotionStale(t *testing.
 			if !errors.Is(err, ErrCheckoutMutationStale) || errors.Is(err, ErrCheckoutMutationRouteMoved) {
 				t.Fatalf("%s = %v, want non-retryable snapshot staleness", change, err)
 			}
+			if errors.Is(err, ErrCheckoutMutationDiskMoved) != (change == "disk before admission") {
+				t.Fatalf("%s = %v: only unchanged-HEAD disk motion may be recomposed before target reads", change, err)
+			}
 			if f.route() != route {
 				t.Fatal("external change refusal changed the route")
 			}

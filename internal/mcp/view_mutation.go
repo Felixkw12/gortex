@@ -82,9 +82,12 @@ func (s *Server) prepareRoutedViewMutation(
 	// recomposes it, and an immediate reselection returns that same route:
 	// the second retry asks the coordinator for a refresh, which recomposes
 	// the route over the new base, waits for it (bounded), and reselects.
-	// A route that keeps moving after that is refused as before, and a HEAD
+	// Concurrent disk motion can leave the same coherent route awaiting its
+	// publication; it needs the same pre-read recomposition. Target-content
+	// guards are evaluated only after admission against the reselected view.
+	// A route or disk that keeps moving is refused as before, and a HEAD
 	// change is refused by the lease's own pre-write sample.
-	for attempt := 0; attempt < 2 && errors.Is(err, indexer.ErrCheckoutMutationRouteMoved); attempt++ {
+	for attempt := 0; attempt < 2 && (errors.Is(err, indexer.ErrCheckoutMutationRouteMoved) || errors.Is(err, indexer.ErrCheckoutMutationDiskMoved)); attempt++ {
 		if attempt == 1 && !s.awaitRouteRecomposition(ctx, view) {
 			break
 		}

@@ -22,9 +22,15 @@ var ErrCheckoutMutationStale = errors.New("indexer: checkout mutation view is st
 // caller selected, or the primary base under its commit layer, moved after
 // the selection — a rebuild published, a base advance applied. It says
 // nothing about the working copy: HEAD and disk comparisons refuse separately
-// as ErrCheckoutMutationStale. The caller may select the view again and retry
+// as ErrCheckoutMutationStale (disk motion has its own typed identity). The caller may select the view again and retry
 // admission. It is ErrCheckoutMutationStale too.
 var ErrCheckoutMutationRouteMoved = fmt.Errorf("%w: the selected route moved", ErrCheckoutMutationStale)
+
+// ErrCheckoutMutationDiskMoved means HEAD still matches the routed commit,
+// but the working-copy fingerprint changed before it was published. Admission
+// may recompose and select a fresh view before reading an edit's target.
+// Prepare still refuses this error without replaying a prepared edit.
+var ErrCheckoutMutationDiskMoved = fmt.Errorf("%w: checkout disk changed; wait for a fresh view and retry", ErrCheckoutMutationStale)
 
 // ErrCheckoutMutationPending means a disk mutation has not yet reached a fresh
 // routed generation. It does not mean the disk mutation was rolled back.
@@ -562,7 +568,7 @@ func (c *CheckoutCoordinator) checkRoutedSnapshot(ctx context.Context, route sto
 		return fmt.Errorf("%w: checkout HEAD changed", ErrCheckoutMutationStale)
 	}
 	if layers.dirty.LowerViewFingerprint != sample.Fingerprint {
-		return fmt.Errorf("%w: checkout disk changed; wait for a fresh view and retry", ErrCheckoutMutationStale)
+		return ErrCheckoutMutationDiskMoved
 	}
 	return nil
 }
