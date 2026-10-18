@@ -1917,31 +1917,6 @@ func (c *contractConvergence) prove(units []*contractUnit, r0 ContractFollowupSc
 // marks it stale, to rerun; a bracket with a window open or moved leaves it as
 // it was, to ask again.
 func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit, extract, unproven []string, err error) {
-	// Each retained unit has its own closed proof bracket. Asking an unrelated
-	// later unit must not widen an earlier unit's R0/R1 interval. Every unit
-	// still replays its entire required ledger and the final full fence remains.
-	if len(paths) <= 1 {
-		return c.revalidateUnit(paths, true)
-	}
-	for i, path := range paths {
-		ok, changed, refused, readErr := c.revalidateUnit([]string{path}, i == len(paths)-1)
-		proven = append(proven, ok...)
-		extract = append(extract, changed...)
-		unproven = append(unproven, refused...)
-		if readErr != nil {
-			return nil, nil, nil, readErr
-		}
-		if len(refused) > 0 {
-			// Keep the existing refusal/wake boundary. Do not spin through
-			// the remaining units against a core-write window that moved.
-			unproven = append(unproven, paths[i+1:]...)
-			break
-		}
-	}
-	return proven, extract, unproven, nil
-}
-
-func (c *contractConvergence) revalidateUnit(paths []string, enrichmentRead bool) (proven []*contractUnit, extract, unproven []string, err error) {
 	type plan struct {
 		// unit is nil for the enrichment round's plan.
 		unit      *contractUnit
@@ -1983,7 +1958,7 @@ func (c *contractConvergence) revalidateUnit(paths []string, enrichmentRead bool
 		add(&plan{unit: unit, ledger: unit.ledger, moves: c.movesSince(unit.round, unit.torn), bracket: []string{path}, forced: c.coverage.needsRead(unit)})
 	}
 	var enrichment *plan
-	if enrichmentRead && c.enrichmentNeedsRecheck() {
+	if c.enrichmentNeedsRecheck() {
 		if c.pp.ledger.opaque {
 			// A read it cannot ask again: any move reruns it.
 			c.pp.stale = true
