@@ -19,7 +19,8 @@ import (
 // ContractReceiptStamp is the winning receipt row of one file in a job's
 // selected chain, without its payload. Two stamps of a file are equal only
 // when the same row (generation and actor) carries the same identity, the
-// same acceptance and the same process-local write seq: a same-identity
+// same acceptance and, for mutable/pending rows, the same process-local
+// write seq: a same-identity
 // rewrite or an evict/add pair between two scans always shows. Settled marks
 // an unaccepted row whose mutation completed its core writes without being
 // accepted (a newer mutation took its owner over). Writing marks an open
@@ -146,14 +147,19 @@ type contractRepoScan struct {
 // chain change between jobs (a published worktree generation, a fold) can
 // never hide behind a reused scan.
 type contractStampScanner struct {
-	repos   []string
-	chains  map[string][]contractScanLayer // top-down per repository
-	inputs  *graphview.SelectedContractInputs
-	census  func(context.Context) (map[string]bool, error)
-	mu      sync.Mutex
-	last    map[string]contractRepoScan
-	reused  int
-	scanned int
+	repos  []string
+	chains map[string][]contractScanLayer // top-down per repository
+	inputs *graphview.SelectedContractInputs
+	census func(context.Context) (map[string]bool, error)
+	mu     sync.Mutex
+	last   map[string]contractRepoScan
+	// Positive published payloads are sealed against core writes. These
+	// sources stay leased for the scanner lifetime. Pending receipt rows
+	// retain their write-window proof; only accepted sealed rows can ignore
+	// unrelated generations' process-wide actor/path write clocks.
+	immutable map[int64]bool
+	reused    int
+	scanned   int
 	// phase, when set by a test, runs after each scan phase: "sample",
 	// "rows", "seqs" and "inputs".
 	phase func(string)
@@ -304,10 +310,33 @@ func (s *contractStampScanner) scan(ctx context.Context, paths []string) (Contra
 	}
 	for g, groupPaths := range byGroup {
 		chain := s.chains[g.repo]
+		immutable := false
+		if g.gen > 0 {
+			var known bool
+			immutable, known = s.immutable[g.gen]
+			if !known {
+				generation, found, stateErr := chain[0].handle.Catalog().GetViewGeneration(ctx, g.gen)
+				if stateErr != nil {
+					return ContractFollowupScan{}, stateErr
+				}
+				immutable = found && (generation.State == store_sqlite.ViewGenerationReady || generation.State == store_sqlite.ViewGenerationSuperseded)
+				if s.immutable == nil {
+					s.immutable = make(map[int64]bool)
+				}
+				s.immutable[g.gen] = immutable
+			}
+		}
 		states := chain[0].handle.ContractReceiptWriteStates(g.repo, g.actor, groupPaths)
 		for _, path := range groupPaths {
 			w := winners[path]
 			state := states[path]
+			if immutable && w.stamp.Accepted {
+				// The accepted physical core is complete and sealed; a write
+				// in another generation cannot overlap its reads. Receipt
+				// identity/acceptance, selected-input and lease fences remain.
+				// Unaccepted or mutable rows keep every original seq/window.
+				state = store_sqlite.ContractReceiptWriteState{}
+			}
 			out.Stamps[path] = ContractReceiptStamp{Generation: w.gen, Actor: w.actor, Fingerprint: w.stamp.Fingerprint,
 				SourceFingerprint: w.stamp.SourceFingerprint, Accepted: w.stamp.Accepted, Seq: state.Seq, Settled: state.Settled && !w.stamp.Accepted,
 				Writing: state.Writing}

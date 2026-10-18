@@ -1674,12 +1674,17 @@ func TestContractStampScanFoldLeavesEveryStampEqual(t *testing.T) {
 	}
 	before := scanOver(generation)
 	begun, done := f.store.ContractReceiptWriteSample("fixture")
+	seqs := f.store.ContractReceiptWriteSeqs("fixture", "linked", []string{"fixture/consts.go", "fixture/routes.go"})
 	folded, _, err := f.store.BeginPayloadGeneration(ctx, store_sqlite.PayloadGenerationRequest{OwnerKind: "dedicated_graph", GraphID: "linked-worktree", CheckoutID: "linked", LayerID: "linked-folded", GenerationKind: "commit", BaseGenerationID: 0, TreeOID: "tree-linked-folded", CreatedAt: 2})
 	require.NoError(t, err)
 	_, err = f.store.FlattenGenerationChain(ctx, []int64{generation}, folded)
 	require.NoError(t, err)
 	afterBegun, afterDone := f.store.ContractReceiptWriteSample("fixture")
 	require.Equal(t, [2]uint64{begun, done}, [2]uint64{afterBegun, afterDone}, "a fold writes no receipt through the sequenced path")
+	require.Equal(t, seqs, f.store.ContractReceiptWriteSeqs("fixture", "linked", []string{"fixture/consts.go", "fixture/routes.go"}), "the building copy preserves every original process write sequence")
+	// The production chain selects the folded payload only after publication.
+	// Compare stamps with the same immutable-core proof on both sides.
+	require.NoError(t, f.store.PublishPayloadGeneration(ctx, folded, 3000))
 	after := scanOver(folded)
 	require.Len(t, after.Stamps, len(before.Stamps))
 	for path, stamp := range before.Stamps {
