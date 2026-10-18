@@ -310,6 +310,16 @@ SELECT ` + strings.Join(projection, ", ") + ` FROM ` + table + ` WHERE ` + viewG
 // that owns its SOURCE node — so the scope is the same join GetRepoEdges uses,
 // including its generation equality, which keeps a cross-generation node from
 // admitting an edge.
+// Start from the selected repository, then seek each source adjacency. Letting
+// SQLite reorder this join can scan every repository's edges through a
+// generation-only index while holding the shared writer for the whole copy.
+// The generation equality and source-node ownership remain the copy fence.
+const generationCopyEdgesFromSQL = `
+  FROM nodes n
+ CROSS JOIN edges e INDEXED BY edges_by_from
+    ON n.id = e.from_id AND n.` + viewGenColumnName + ` = e.` + viewGenColumnName + `
+ WHERE n.` + viewGenColumnName + ` = ? AND n.repo_prefix = ?`
+
 func copyGenerationEdgesTx(ctx context.Context, tx *sql.Tx, from, to int64, repoPrefix string) (int64, error) {
 	columns, err := generationCopyColumns(ctx, tx, "edges")
 	if err != nil {
@@ -337,9 +347,7 @@ func copyGenerationEdgesTx(ctx context.Context, tx *sql.Tx, from, to int64, repo
 	}
 	query := `INSERT INTO edges (` + strings.Join(insert, ", ") + `)
 SELECT ` + strings.Join(projection, ", ") + `
-  FROM edges e
-  JOIN nodes n ON n.id = e.from_id AND n.` + viewGenColumnName + ` = e.` + viewGenColumnName + `
- WHERE e.` + viewGenColumnName + ` = ? AND n.repo_prefix = ?`
+` + generationCopyEdgesFromSQL
 	args = append(args, from, repoPrefix)
 	result, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
