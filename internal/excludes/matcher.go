@@ -369,7 +369,8 @@ func literalAnchor(pattern string) string {
 }
 
 // unescapeLiteral returns segment s with its backslash escapes removed,
-// and false when s holds an unescaped wildcard meta-character.
+// and false when s holds an unescaped wildcard meta-character or ends in
+// a backslash.
 func unescapeLiteral(s string) (string, bool) {
 	if !strings.ContainsAny(s, `*?[\`) {
 		return s, true
@@ -380,7 +381,9 @@ func unescapeLiteral(s string) (string, bool) {
 		case c == '\\' && i+1 < len(s):
 			i++
 			b.WriteByte(s[i])
-		case c == '*' || c == '?' || c == '[':
+		case c == '\\', c == '*', c == '?', c == '[':
+			// A trailing backslash escapes the slash the split removed, so
+			// the segment is not a plain literal either.
 			return "", false
 		default:
 			b.WriteByte(c)

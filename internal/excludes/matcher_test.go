@@ -73,6 +73,14 @@ func TestMatcher_HasNegatedDescendant(t *testing.T) {
 			want:     true,
 		},
 		{
+			// A backslash before the slash is not a plain literal segment,
+			// so the walk stays conservative.
+			name:     "escaped slash stays conservative",
+			patterns: []string{"*", `!foo\/keep.go`},
+			relDir:   "foo",
+			want:     true,
+		},
+		{
 			name:     "escaped negation leaves unrelated folders prunable",
 			patterns: []string{"*", `!foo\+/keep.go`},
 			relDir:   "other",
