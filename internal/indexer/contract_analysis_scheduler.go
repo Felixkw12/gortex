@@ -1400,7 +1400,15 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 			c.endCapture(a, want, ContractActorPending)
 			return
 		}
-		c.endCapture(a, want, c.captureRefusal(err))
+		if !a.primary() && c.options.LinkedInputs != nil && errors.Is(err, graph.ErrContractProjectionStale) {
+			// A fold can rebase the leased route after input validation but
+			// before publication ancestry is captured. Reopen it through the
+			// existing independently owned linked-input path; reusing the
+			// request's consumed handoff would repeat the same refusal.
+			c.endInputs(a, want, err)
+		} else {
+			c.endCapture(a, want, c.captureRefusal(err))
+		}
 		return
 	}
 	if len(targets) == 0 {
