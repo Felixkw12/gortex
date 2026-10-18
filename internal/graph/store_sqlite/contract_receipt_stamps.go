@@ -741,7 +741,7 @@ func (s *Store) contractSeedNodeIDsContext(ctx context.Context, tx *sql.Tx, repo
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, repoNodesByKindsProjectionQuery(false, "n.id,n.kind,n.language,n.meta"), string(kindsJSON), repo, s.viewGen, s.viewGen)
+	rows, err := tx.QueryContext(ctx, contractSeedCandidateRowsQuery(), string(kindsJSON), repo, s.viewGen)
 	if err != nil {
 		return nil, err
 	}

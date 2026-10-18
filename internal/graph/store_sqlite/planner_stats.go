@@ -45,6 +45,7 @@ var plannerStatsIndexQuery = buildPlannerStatsIndexQuery()
 // it competes with another on a left prefix, and a missing row there hands the
 // choice to the default cost model.
 var plannerStatsIndexesOutside = map[string]string{
+	contractSeedCandidateIndexName:   "partial covering, kind IN " + contractSeedCandidateKindsSQL + ": checked seed eligibility pins this projection explicitly; generic key-list reads do not imply its candidate-kind predicate",
 	contractOwnerGenerationIndexName: "partial, kind IN " + contractOwnerKindsSQL + ": contract ownership projection pins this index explicitly; generic key-list reads do not imply its owner-kind predicate",
 	"edges_by_file":                  "(file_path, kind): only edges_by_file_generation shares file_path, and the default model prefers the one that keys more of a statement",
 	"edges_by_file_generation":       "(file_path, view_gen): the lazy index, see edges_by_file",
