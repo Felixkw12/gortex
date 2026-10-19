@@ -100,13 +100,17 @@ const (
 	edgesByFromLineKindIndexDDL = `CREATE INDEX IF NOT EXISTS edges_by_from_line_kind ON edges(view_gen, from_id, line, kind)`
 )
 
+// Keep id before projection columns: the prior WITHOUT ROWID name index
+// carried id as its implicit suffix, defining same-name enumeration order.
+const nodesByNameIndexDDL = `CREATE INDEX IF NOT EXISTS nodes_by_name ON nodes(name, view_gen, id, repo_prefix, kind, file_path)`
+
 const nodesStatsHistogramIndexDDL = `CREATE INDEX IF NOT EXISTS nodes_stats_histogram ON nodes(view_gen, kind, language)`
 
 var bulkDroppableIndexes = []bulkDroppableIndex{
 	// Exact global histograms read one selected generation without loading wide
 	// node payloads. Keep this droppable during cold bulk writes like other read indexes.
 	{"nodes_stats_histogram", nodesStatsHistogramIndexDDL},
-	{"nodes_by_name", `CREATE INDEX IF NOT EXISTS nodes_by_name ON nodes(name, view_gen)`},
+	{"nodes_by_name", nodesByNameIndexDDL},
 	{"nodes_by_kind", `CREATE INDEX IF NOT EXISTS nodes_by_kind ON nodes(kind, view_gen)`},
 	{"nodes_by_file", `CREATE INDEX IF NOT EXISTS nodes_by_file ON nodes(file_path, view_gen)`},
 	// Keep this dense. Repository projection queries discover their prefixes

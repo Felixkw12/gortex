@@ -20,7 +20,7 @@ type generationLookupIndexDefinition struct {
 }
 
 var generationLookupIndexDefinitions = []generationLookupIndexDefinition{
-	{"nodes_by_name", `CREATE INDEX nodes_by_name ON nodes(name)`, `CREATE INDEX nodes_by_name ON nodes(name, view_gen)`, `CREATE INDEX nodes_by_name ON nodes(name, view_gen)`, []string{"name", "view_gen"}},
+	{"nodes_by_name", `CREATE INDEX nodes_by_name ON nodes(name)`, `CREATE INDEX nodes_by_name ON nodes(name, view_gen)`, `CREATE INDEX nodes_by_name ON nodes(name, view_gen, id, repo_prefix, kind, file_path)`, []string{"name", "view_gen", "id", "repo_prefix", "kind", "file_path"}},
 	{"nodes_by_file", `CREATE INDEX nodes_by_file ON nodes(file_path)`, `CREATE INDEX nodes_by_file ON nodes(file_path, view_gen)`, `CREATE INDEX nodes_by_file ON nodes(file_path, view_gen)`, []string{"file_path", "view_gen"}},
 	{"nodes_by_repo", `CREATE INDEX nodes_by_repo ON nodes(repo_prefix) WHERE repo_prefix <> ''`, `CREATE INDEX nodes_by_repo ON nodes(repo_prefix, view_gen)`, `CREATE INDEX nodes_by_repo ON nodes(repo_prefix, view_gen)`, []string{"repo_prefix", "view_gen"}},
 	{"nodes_by_repo_language_name", `CREATE INDEX nodes_by_repo_language_name ON nodes(repo_prefix, language, name) WHERE name <> ''`, `CREATE INDEX nodes_by_repo_language_name ON nodes(repo_prefix, language, name, view_gen) WHERE name <> ''`, `CREATE INDEX nodes_by_repo_language_name ON nodes(repo_prefix, language, name, view_gen) WHERE name <> ''`, []string{"repo_prefix", "language", "name", "view_gen"}},

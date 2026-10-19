@@ -34,7 +34,7 @@ import (
 // index changes in a way an old on-disk DB would not already have, and append a
 // matching schemaMigrations entry describing how to bring an older store
 // forward (in place, or by rebuild).
-const currentSchemaVersion = 37
+const currentSchemaVersion = 38
 
 // schemaMigration is one forward step. Exactly one strategy applies:
 //   - rebuild=true: the change introduces structure/data that can only come
@@ -134,6 +134,17 @@ var schemaMigrations = []schemaMigration{
 	{version: 35, name: "persist indexed contract boundary receipts", inPlace: createContractBoundaryReceiptTables},
 	{version: 36, name: "cover exact selected-generation node histograms", inPlace: createStatsHistogramIndex},
 	{version: 37, name: "cover payload-free contract receipt stamps", inPlace: createContractBoundaryStampIndex},
+	{version: 38, name: "cover exact node declaration reads", inPlace: coverNodeDeclarationIndex},
+}
+
+// Rebuild just the secondary index; graph payload, identity and receipts stay
+// unchanged. The same DDL serves fresh stores and existing bulk sealing.
+func coverNodeDeclarationIndex(tx *sql.Tx) error {
+	if _, err := tx.Exec(`DROP INDEX IF EXISTS nodes_by_name`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(nodesByNameIndexDDL)
+	return err
 }
 
 func createStatsHistogramIndex(tx *sql.Tx) error {
