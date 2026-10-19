@@ -90,6 +90,10 @@ func TestBashGrepUnknownTrackedReposKeepsPolicy(t *testing.T) {
 }
 
 func TestGrepSearchPaths(t *testing.T) {
+	abs := filepath.ToSlash(fixtureAbs("/abs"))
+	if !filepath.IsAbs(abs) {
+		t.Fatalf("absolute search operand fixture is relative: %q", abs)
+	}
 	cases := []struct {
 		command string
 		dir     string
@@ -103,7 +107,7 @@ func TestGrepSearchPaths(t *testing.T) {
 		{"grep -- -panel a", "", []string{"a"}},
 		{"rg -j 4 --type go panel a", "", []string{"a"}},
 		{"ag -f panel a", "", []string{"a"}}, // ag -f follows symlinks
-		{"grep -rn panel . /abs", "sub", []string{filepath.Join("sub", "."), "/abs"}},
+		{"grep -rn panel . " + abs, "sub", []string{filepath.Join("sub", "."), abs}},
 		{"grep -rn panel", "", nil},
 		{"grep panel -", "", nil},
 	}
