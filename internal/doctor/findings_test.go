@@ -103,8 +103,11 @@ func TestSingleStaleHookIsReported(t *testing.T) {
 	if got.Severity != SeverityWarn {
 		t.Errorf("severity=%s want WARN", got.Severity)
 	}
-	if strings.Contains(got.Remedy, "/hooks") {
-		t.Errorf("trust remedy offered while sibling hooks ran: %q", got.Remedy)
+	// Codex records trust per hook, so a single entry's trust can lapse when
+	// its definition changes: the remedy offers re-trusting that one entry
+	// as an alternative, not the agent-wide "none has run" diagnosis.
+	if !strings.Contains(got.Remedy, "re-trust that entry") || !strings.Contains(got.Remedy, "/hooks") {
+		t.Errorf("remedy should offer re-trusting the one entry: %q", got.Remedy)
 	}
 	if !strings.Contains(got.Summary, "3d ago") {
 		t.Errorf("should date the last run so a stale hook is distinguishable: %q", got.Summary)
@@ -147,17 +150,57 @@ func TestSilentStopBesideRunningHooksIsNotABlocker(t *testing.T) {
 	}
 }
 
-// TestSessionEndEventsAcrossHarnessSpellings: the session-end classification
-// covers every spelling the adapters configure, not just Claude/Codex "Stop".
-func TestSessionEndEventsAcrossHarnessSpellings(t *testing.T) {
-	for _, event := range []string{"Stop", "SubagentStop", "SessionEnd", "agentStop", "sessionEnd", "subagentStop"} {
-		if !isSessionEndEvent(event) {
-			t.Errorf("%s should be a session-end event", event)
-		}
+// TestSilentClaudeStopIsAWarn: Claude Code's Stop fires at the end of every
+// turn, so unlike Codex's it cannot be explained away by sessions that never
+// end cleanly. Silence beside running siblings stays a WARN, and Claude Code
+// has no per-hook trust, so the remedy carries no re-trust hint.
+func TestSilentClaudeStopIsAWarn(t *testing.T) {
+	agent := AgentHooks{
+		Agent:      "claude-code",
+		Configured: map[string]int{"SessionStart": 1, "UserPromptSubmit": 1, "PreToolUse": 1, "PostToolUse": 1, "Stop": 1},
 	}
-	for _, event := range []string{"SessionStart", "PreToolUse", "PostToolUse", "UserPromptSubmit", "PreCompact"} {
-		if isSessionEndEvent(event) {
-			t.Errorf("%s should not be a session-end event", event)
+
+	findings := Diagnose(agent, activity(map[string]hooks.EventActivity{
+		"SessionStart":     {Runs: 12, Emitted: 12},
+		"UserPromptSubmit": {Runs: 40, Emitted: 5},
+		"PreToolUse":       {Runs: 300, Emitted: 30},
+		"PostToolUse":      {Runs: 120, Emitted: 10},
+	}), Adoption{GortexCalls: 20}, time.Now())
+
+	got := findingWith(t, findings, "Stop is configured but never ran")
+	if got.Severity != SeverityWarn {
+		t.Errorf("severity=%s want WARN", got.Severity)
+	}
+	if strings.Contains(got.Summary, "session ends cleanly") {
+		t.Errorf("Claude Code's Stop is per turn, not session-end: %q", got.Summary)
+	}
+	if strings.Contains(got.Remedy, "trust") {
+		t.Errorf("trust hint offered to an agent without per-hook trust: %q", got.Remedy)
+	}
+	if HasBlocker(findings) {
+		t.Errorf("a silent Stop beside running hooks is not a blocker: %+v", findings)
+	}
+}
+
+// TestSessionEndEventsArePerAgent: the same event name means different
+// things on different hosts, so the classification is keyed by agent.
+func TestSessionEndEventsArePerAgent(t *testing.T) {
+	for _, tc := range []struct {
+		agent, event string
+		want         bool
+	}{
+		{"codex", "Stop", true},
+		{"codex", "SessionStart", false},
+		{"claude-code", "Stop", false},
+		{"claude-code", "SubagentStop", false},
+		{"claude-code", "SessionEnd", true},
+		{"copilot-cli", "sessionEnd", true},
+		{"copilot-cli", "agentStop", false},
+		{"opencode", "Stop", false},
+		{"unknown-agent", "Stop", false},
+	} {
+		if got := isSessionEndEvent(tc.agent, tc.event); got != tc.want {
+			t.Errorf("isSessionEndEvent(%q, %q)=%v want %v", tc.agent, tc.event, got, tc.want)
 		}
 	}
 }
@@ -365,7 +408,7 @@ func TestMixedAttributionDoesNotAccuse(t *testing.T) {
 // TestAttributedSilenceStillReported: once the window holds no unattributed
 // runs of an event, an empty bucket really is silence and must still be
 // reported — the guard above must not swallow the finding it exists to
-// protect. A sibling ran, so it is a WARN without the trust remedy (#766).
+// protect. A sibling ran, so it is a WARN rather than a blocker (#766).
 func TestAttributedSilenceStillReported(t *testing.T) {
 	now := time.Now()
 	clean := hooks.EffectivenessSummary{
@@ -385,7 +428,7 @@ func TestAttributedSilenceStillReported(t *testing.T) {
 	if got.Severity != SeverityWarn {
 		t.Errorf("severity=%s want WARN", got.Severity)
 	}
-	if strings.Contains(got.Remedy, "/hooks") {
+	if !strings.Contains(got.Remedy, "re-trust that entry") {
 		t.Errorf("remedy=%q", got.Remedy)
 	}
 }

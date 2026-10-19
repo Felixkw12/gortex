@@ -373,11 +373,12 @@ config, the hook-invocation log, the Codex session transcripts, and the savings
 ledger into one verdict — *hooks configured but none has run* is the
 untrusted-hook signature, reported as a blocker with the `/hooks` remedy.
 A single event that never ran while its siblings did is a different
-diagnosis: the siblings prove the hooks are trusted, so it is never a blocker.
-`Stop` (and other session-end events) fires only when a session ends cleanly —
-long-lived sessions that are killed or still open never reach it — so its
-silence is reported as INFO; any other silent event is a WARN pointing at that
-event's entry in the hook configuration.
+diagnosis: the siblings prove the hooks run, so it is never a blocker.
+Codex's `Stop` fires only when a session ends cleanly — long-lived sessions
+that are killed or still open never reach it — so its silence is reported as
+INFO. Any other silent event is a WARN pointing at that event's entry, with a
+hint to re-trust that one entry via `/hooks`, since Codex records trust per
+hook and an upgrade that changes one definition lapses only its trust.
 `--redact` hashes repo paths and branch names so the report can be pasted into
 an issue, `--json` emits it machine-readably, and the exit status is non-zero
 when a blocker is found.
