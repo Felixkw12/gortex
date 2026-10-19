@@ -568,9 +568,18 @@ func enrichRead(toolInput map[string]any, cwd string) enrichResult {
 	}
 
 	st := queryFileIndexScope(cwd, filePath)
+	// A file in a linked worktree the session is not working in is served by
+	// that worktree's view, not the one graph tools default to (#820).
+	wtRoot := foreignWorktreeRoot(cwd, filePath)
 
 	// If the file is indexed, BLOCK the read and provide graph alternatives.
 	if st.Indexed {
+		if wtRoot != "" {
+			return enrichResult{
+				deny:   true,
+				reason: worktreeReadDeny(filePath, wtRoot, st) + readOutlineEvidence(cwd, filePath),
+			}
+		}
 		var reason strings.Builder
 		fmt.Fprintf(&reason, "[Gortex] BLOCKED: Read of %s (%d symbols indexed). Call `explore` first, then use `read` instead:\n", filePath, st.Count)
 		reason.WriteString("  - `read(target:{symbol:\"<id>\"})` — one symbol\n")
@@ -598,6 +607,9 @@ func enrichRead(toolInput map[string]any, cwd string) enrichResult {
 	}
 
 	// Tracked and indexable, just not indexed yet — allow with advisory.
+	if wtRoot != "" {
+		return enrichResult{context: worktreeReadAdvisory(filePath, wtRoot, st)}
+	}
 	var guidance strings.Builder
 	guidance.WriteString("[Gortex] Use `explore` first, then `read` for indexed source:\n")
 	guidance.WriteString("  - one symbol: `read(target:{symbol:\"<id>\"})`\n")
@@ -696,9 +708,15 @@ func enrichGrep(toolInput map[string]any, _ int, cwdArg ...string) enrichResult 
 		// surface both point at has no answer for it either.
 		return enrichResult{}
 	case searchScopeIndexed:
+		reason := formatTrackedSearchDeny("Grep", pattern)
+		if scope, _ := toolInput["path"].(string); strings.TrimSpace(scope) != "" {
+			if root := foreignWorktreeRoot(cwd, scope); root != "" {
+				reason = worktreeSearchDeny("Grep", pattern, root)
+			}
+		}
 		return enrichResult{
 			deny:   true,
-			reason: formatTrackedSearchDeny("Grep", pattern),
+			reason: reason,
 		}
 	}
 	return probeSymbolPattern("Grep", pattern, cwd, defaultGrepGuidance())
@@ -1136,6 +1154,9 @@ type fileIndexStatus struct {
 	ProbeOK        bool // the daemon resolved the path to a graph and read it
 	Unreached      bool // the probe never came back
 	Count          int
+	// View is the graph that answered, as the daemon reported it; nil when
+	// it named none. It shapes message text only and decides nothing.
+	View *daemon.ProbeView
 }
 
 // noGraphAnswer reports whether a redirect to graph tools has nothing true to
@@ -1223,6 +1244,7 @@ func fileIndexScopeViaDaemon(cwd, filePath string, timeout time.Duration) fileIn
 	st := fileIndexStatus{
 		Tracked: result.Tracked,
 		ProbeOK: result.Answered || result.Covered,
+		View:    result.View,
 	}
 	if !st.ProbeOK {
 		return st
@@ -1365,6 +1387,16 @@ func enrichBash(toolInput map[string]any, cwd string) enrichResult {
 		// also reads still deserves the read answer, so re-read it without
 		// the write pre-pass instead of returning silence.
 		c = classifyBashReadCommand(cmd)
+	}
+	// A grep whose every target lies outside every tracked repo gets the
+	// silence `cat` of the same file and Grep with `path:` already get (#893):
+	// the graph the redirect names has nothing for it. Pass over it rather than
+	// stopping, so a source read chained after it is still answered.
+	outsideGraph := func(next BashClassification) bool {
+		return next.Action == BashActionGrepLike && bashSearchOutsideTrackedRepos(next.Paths, cwd)
+	}
+	if outsideGraph(c) {
+		c = classifyBashReadCommandSkipping(cmd, outsideGraph)
 	}
 	switch c.Action {
 	case BashActionGrepLike:
