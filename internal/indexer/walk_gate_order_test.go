@@ -105,7 +105,8 @@ func TestWalkGateOrderAdmittedSets(t *testing.T) {
 			root := t.TempDir()
 			writeExcludeFixture(t, filepath.Join(root, filepath.FromSlash(tc.path)), tc.body)
 			idx := newAdmissionTestIndexer(t, root, "ignored.*")
-			assert.Equal(t, tc.admit, idx.HasChangesSinceMtimes(root))
+			// The probe counts the same files as the census.
+			assert.Equal(t, tc.census, idx.HasChangesSinceMtimes(root))
 
 			idx.SetFileMtimes(map[string]int64{tc.path: 1})
 			changed, deleted, detected, err := idx.changedSinceMtimesCensus(root)

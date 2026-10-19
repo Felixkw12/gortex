@@ -9004,7 +9004,10 @@ func (idx *Indexer) HasChangesSinceMtimes(root string) bool {
 		if d.IsDir() {
 			return nil
 		}
-		if !idx.admitWalkEntry(absRoot, path, -1, false).admit {
+		// Same file set as the census: admitted source plus the root
+		// go.mod / go.work, which no extractor claims.
+		adm := idx.admitWalkFileKnownType(absRoot, path, -1, d.Type())
+		if adm.excluded || (!adm.admit && !idx.isIncrementalContractManifest(path)) {
 			return nil
 		}
 		rel := idx.relKey(path)
@@ -9146,10 +9149,11 @@ func (idx *Indexer) changedSinceMtimesCensus(root string) (
 		if d.IsDir() {
 			return nil
 		}
-		if idx.shouldExclude(path, absRoot, false) {
+		adm := idx.admitWalkFileKnownType(absRoot, path, -1, d.Type())
+		if adm.excluded {
 			return nil
 		}
-		lang, supported := idx.effectiveLanguage(path, nil)
+		lang, supported := adm.lang, adm.admit
 		if !supported && !idx.isIncrementalContractManifest(path) {
 			return nil
 		}

@@ -89,7 +89,6 @@ func (idx *Indexer) dryRunIntake(ctx context.Context, root string) (*IntakeManif
 		return nil, err
 	}
 
-	maxSize := idx.config.MaxFileSize
 	// Apply the same corpus-admission gates the real index walk uses, so the
 	// manifest's admitted/skipped split matches what IndexCtx would actually
 	// do — oversized documents and (by default) data assets are reported as
@@ -126,15 +125,16 @@ func (idx *Indexer) dryRunIntake(ctx context.Context, root string) (*IntakeManif
 		manifest.BytesSeen += size
 
 		reason := ""
-		if idx.shouldExclude(path, absRoot, false) {
+		adm := idx.admitWalkFileKnownType(absRoot, path, size, info.Mode())
+		if adm.excluded {
 			reason = "excluded"
-		} else if lang, ok := idx.effectiveLanguage(path, nil); !ok {
+		} else if adm.lang == "" {
 			reason = "no_language"
-		} else if maxSize > 0 && size > maxSize {
+		} else if adm.oversize {
 			reason = "max_file_size"
-		} else if r, skip := untrackedGate.skip(lang, path); skip {
+		} else if r, skip := untrackedGate.skip(adm.lang, path); skip {
 			reason = r
-		} else if r, skip := contentGate.skip(lang, size); skip {
+		} else if r, skip := contentGate.skip(adm.lang, size); skip {
 			reason = r
 		}
 
