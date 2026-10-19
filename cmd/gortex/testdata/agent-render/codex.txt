@@ -719,7 +719,7 @@ For every coding task:
 
 Common calls: `search(operation:"symbols", query:"<name>")` · `read(target:{symbol:"<id>"})` · `relations(operation:"usages", target:{symbol:"<id>"})`.
 
-If the Gortex server is configured but these tools are missing from the callable MCP tools, report a Gortex MCP integration failure and stop. Do not start a daemon or switch to a CLI/shell fallback.
+If these tools are missing from the callable MCP tools, report a Gortex MCP integration failure and stop. Do not start a daemon or switch to a CLI/shell fallback. Outside a Gortex-tracked repo, or when the user says to proceed without Gortex, say so once and continue with native tools.
 
 Use `recall` before revisiting prior work. Call `remember` immediately for a durable decision, invariant, constraint, or gotcha.
 
@@ -736,7 +736,7 @@ Never restart the daemon, delete its store, or re-track merely to expose a workt
 
 - **`gortex://guide` resource** (or the `gortex guide [topic]` CLI) is the full reference: LLM-provider matrix, capabilities catalog, analyze / search_ast catalogs, token-economy detail, MCP resources, session-start checklist. Read it on demand — it is not pre-paid here.
 - **`capabilities`** — request an exact operation schema only when the compact tool description is insufficient; ordinary coding requires no tool discovery or promotion.
-- MCP startup manages daemon availability. If the configured server or its tools are unavailable, report a Gortex MCP integration failure; do not start a daemon manually. "cwd is not covered by any tracked repo" means graph tools are unavailable there.
+- MCP startup manages daemon availability; do not start a daemon manually. "cwd is not covered by any tracked repo" means graph tools are unavailable there: use native tools.
 - **Instruction profiles** — this block is the active `core` profile. `gortex instructions list` shows the others (`core` balanced default · `localization` lean · `full` maximum guidance); switch with `gortex instructions switch <name>` — applies to NEW sessions only (instructions, tools/list, and skills all load at session start).
 
 <!-- gortex:rules:end -->
