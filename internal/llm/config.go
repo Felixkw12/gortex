@@ -440,16 +440,21 @@ func IsBuiltinProvider(name string) bool {
 	return builtinProviders[strings.ToLower(strings.TrimSpace(name))]
 }
 
-// ActiveCustom returns the custom provider entry the active provider
+// ActiveCustom returns the OpenAI-compatible entry the active provider
 // name resolves to, with any env / routing model and effort overrides
-// applied. ok is false when the active provider is a built-in or names
-// no registered entry.
+// applied. Resolution order: a built-in provider name never resolves
+// here (ok is false); otherwise the user's custom provider of that name
+// (providers.json or inline `llm.custom`) wins, and only then a gateway
+// preset (see Preset). ok is false when nothing matches.
 func (c Config) ActiveCustom() (CustomProvider, bool) {
 	name := c.ProviderName()
 	if IsBuiltinProvider(name) {
 		return CustomProvider{}, false
 	}
 	cp, ok := c.Custom[name]
+	if !ok {
+		cp, ok = Preset(name)
+	}
 	if !ok {
 		return CustomProvider{}, false
 	}

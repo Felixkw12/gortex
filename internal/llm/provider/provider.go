@@ -77,20 +77,26 @@ func New(cfg llm.Config) (llm.Provider, error) {
 		return requesty.New(cfg.Requesty)
 	default:
 		if cp, ok := cfg.ActiveCustom(); ok {
-			return newCustom(cfg.ProviderName(), cp)
+			name := cfg.ProviderName()
+			id := "custom"
+			if _, user := cfg.Custom[name]; !user {
+				id = name // a gateway preset reports its own name
+			}
+			return newCustom(name, id, cp)
 		}
 		return nil, fmt.Errorf("llm: unknown provider %q (want local|anthropic|openai|azure|ollama|claudecli|codex|copilot|cursor|opencode|gemini|bedrock|deepseek|requesty, or a registered custom provider)", cfg.ProviderName())
 	}
 }
 
-// newCustom builds a registered OpenAI-compatible custom provider from
-// its CustomProvider entry. The endpoint is BaseURL + "/chat/completions";
-// the bearer key (when APIKeyEnv is set) and any extra headers are
-// applied to every request; the structured-output strategy comes from
-// SchemaMode. Name() reports "custom" while the httpx/error tag carries
-// the specific "custom:<name>"; the prompt tier comes from the entry's
-// prompt_profile (see llm.ProfileFor).
-func newCustom(name string, cp llm.CustomProvider) (llm.Provider, error) {
+// newCustom builds an OpenAI-compatible provider from a CustomProvider
+// entry — a user-registered one or a gateway preset. The endpoint is
+// BaseURL + "/chat/completions"; the bearer key (when APIKeyEnv is set)
+// and any extra headers are applied to every request; the
+// structured-output strategy comes from SchemaMode. Name() reports id
+// ("custom" for a user entry, the preset name for a preset) while the
+// httpx/error tag carries "custom:<name>" (or the preset name); the
+// prompt tier comes from the entry's prompt_profile (see llm.ProfileFor).
+func newCustom(name, id string, cp llm.CustomProvider) (llm.Provider, error) {
 	base := strings.TrimRight(strings.TrimSpace(cp.BaseURL), "/")
 	if base == "" {
 		return nil, fmt.Errorf("llm: custom provider %q has no base_url", name)
@@ -130,9 +136,13 @@ func newCustom(name string, cp llm.CustomProvider) (llm.Provider, error) {
 		return nil, fmt.Errorf("llm: custom provider %q unknown schema_mode %q (want json_schema|json_object|prompt)", name, cp.SchemaMode)
 	}
 
+	tag := "custom:" + name
+	if id != "custom" {
+		tag = id
+	}
 	return &openaicompat.Client{
-		ProviderID:      "custom",
-		Tag:             "custom:" + name,
+		ProviderID:      id,
+		Tag:             tag,
 		Model:           cp.Model,
 		URL:             base + "/chat/completions",
 		Headers:         headers,
