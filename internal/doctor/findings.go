@@ -172,26 +172,40 @@ func Diagnose(agent AgentHooks, summary hooks.EffectivenessSummary, adoption Ado
 			"%d %s hook(s) are configured but none has run in this window.", configured, agent.Agent)
 	}
 
-	// A per-event zero while other events ran is a narrower version of the
-	// same problem: one hook's definition changed, so only its trust lapsed.
+	// A per-event zero while other events ran is not the silence the switch
+	// above diagnoses. Sibling hooks of the same agent running proves the
+	// harness executes Gortex's hooks — PATH and the agent-wide trust
+	// approval are fine — so this is not a blocker (#766). Session-end events
+	// are the common case: they fire only when a session ends cleanly, and a
+	// long-lived session that is killed or still open never reaches them, so
+	// their silence is informational. Any other silent event is worth a look
+	// at its own entry; where trust is recorded per hook, that one entry's
+	// trust may also have lapsed when its definition changed.
 	//
 	// Skipped when execution is turned off, for the same reason the switch
 	// above skips its silence rules. `ran > 0` survives the switch being
 	// flipped — runs earlier in the window still count — so without this the
-	// trust remedy reappears event by event on a machine that simply has
-	// hooks disabled.
+	// rule reappears event by event on a machine that simply has hooks
+	// disabled.
 	if ran > 0 && !agent.HooksDisabled {
 		for _, event := range events {
 			stats := activity.events[event]
 			if stats.Runs > 0 || activity.ambiguous(event) {
 				continue
 			}
-			remedy := "re-run `gortex install`"
-			if agent.RequiresTrust {
-				remedy = agent.TrustRemedy
+			if isSessionEndEvent(agent.Agent, event) {
+				add(SeverityInfo, "",
+					"%s is configured but never ran, while other hooks did%s — it fires only when a session ends cleanly; killed or still-open sessions never reach it.",
+					event, lastSeenSuffix(stats.LastSeen, now))
+				continue
 			}
-			add(SeverityBlocker, remedy,
-				"%s is configured but never ran, while other hooks did%s.", event, lastSeenSuffix(stats.LastSeen, now))
+			remedy := "check this event's entry in the agent's hook configuration, or re-run `gortex install`"
+			if agent.RequiresTrust && agent.TrustRemedy != "" {
+				remedy += ", or re-trust that entry (" + agent.TrustRemedy + ")"
+			}
+			add(SeverityWarn, remedy,
+				"%s is configured but never ran, while other hooks did%s — the harness runs Gortex's hooks, so this event has either not been triggered yet or its entry is wrong.",
+				event, lastSeenSuffix(stats.LastSeen, now))
 		}
 	}
 
@@ -316,6 +330,31 @@ func severityRank(s Severity) int {
 	default:
 		return 3
 	}
+}
+
+// sessionEndEvents lists, per agent (the adapter Name constants), the hook
+// events that fire only when a session ends. The same event name means
+// different things on different hosts: Claude Code's Stop and SubagentStop
+// fire at the end of every turn or subagent run, so their silence beside
+// running siblings is a real problem, while Codex's Stop was observed to
+// fire only when a session terminates (#766). Copilot CLI's agentStop is a
+// turn-end event; only its sessionEnd is session-scoped. An agent or event
+// not listed here gets the WARN, since its semantics are not established.
+var sessionEndEvents = map[string][]string{
+	"codex":       {"Stop"},
+	"claude-code": {"SessionEnd"},
+	"copilot-cli": {"sessionEnd"},
+}
+
+// isSessionEndEvent reports whether event fires only when one of agent's
+// sessions ends.
+func isSessionEndEvent(agent, event string) bool {
+	for _, e := range sessionEndEvents[agent] {
+		if e == event {
+			return true
+		}
+	}
+	return false
 }
 
 // lastSeenSuffix turns a never/stale timestamp into a clause, so "never ran"
