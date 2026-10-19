@@ -153,6 +153,10 @@ func TestGenerationWindowCheckpointsABacklogWithinTheBudgetInline(t *testing.T) 
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = store.Close() }()
+	// PASSIVE never waits for readers. Join the asynchronous startup probes
+	// before requiring complete backfill over a quiet store; Open returning
+	// alone does not establish that no internal read snapshot is in flight.
+	store.stopCheckpointLoop()
 	if err := store.CheckpointWAL(); err != nil {
 		t.Fatalf("drain the seed WAL: %v", err)
 	}
