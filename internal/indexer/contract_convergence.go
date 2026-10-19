@@ -3503,9 +3503,7 @@ func (c *contractConvergence) enrichFrom(r0 ContractFollowupScan, clock uint64) 
 		if evidence.err != nil {
 			return false, evidence.err
 		}
-		for _, id := range registry.AllIDs() {
-			registry.ReplaceByID(id, contractFollowupOtherOwners(registry.ByID(id), repo))
-		}
+		contractFollowupRemoveRepo(registry, repo)
 		registry.AddAll(local.All(), repo)
 	}
 	allRecords := registry.All()

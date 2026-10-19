@@ -718,6 +718,20 @@ func contractFollowupOtherOwners(rows []contracts.Contract, repo string) []contr
 	}
 	return out
 }
+
+func contractFollowupRemoveRepo(registry *contracts.Registry, repo string) {
+	for _, id := range registry.AllIDs() {
+		rows := registry.ByID(id)
+		other := contractFollowupOtherOwners(rows, repo)
+		// The filter only removes this repo's records. A foreign-only bucket
+		// is already correct; replacing it would rebuild every secondary index
+		// and move its records behind unrelated IDs in those indexes.
+		if len(other) != len(rows) {
+			registry.ReplaceByID(id, other)
+		}
+	}
+}
+
 func contractFollowupPolicy(idx *Indexer, language string) (string, error) {
 	return contractBoundaryPolicy(idx, language, 0)
 }
