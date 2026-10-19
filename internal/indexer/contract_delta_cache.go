@@ -11,7 +11,22 @@ import (
 	"github.com/zzet/gortex/internal/contracts"
 )
 
+// Standalone/unknown-limit coordinators retain the original conservative budget.
 const contractDeltaCacheBudget int64 = 64 << 20
+const contractDeltaCacheMaxBudget int64 = 512 << 20
+
+// contractDeltaMemoryBudget reserves at most one sixteenth of the installed
+// standing Go memory limit for the ONE coordinator-global checkpoint registry.
+// The 512 MiB ceiling accommodates a primary and four linked actors without
+// unbounded retention. Unknown/unlimited runtimes keep the conservative default;
+// explicit small limits never inherit a larger minimum allocation.
+func contractDeltaMemoryBudget(memoryLimit int64) int64 {
+	if memoryLimit <= 0 || memoryLimit >= 1<<60 {
+		return contractDeltaCacheBudget
+	}
+	return max(int64(1), min(memoryLimit/16, contractDeltaCacheMaxBudget))
+}
+
 const contractDeltaRefresh = 256
 
 // contractDeltaIdentity binds a checkpoint to the selected chain and extraction

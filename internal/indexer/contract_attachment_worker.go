@@ -464,9 +464,9 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 		prepareStart := time.Now()
 		var nameWitness *store_sqlite.PayloadInputWitness
 		if req.delta != nil && snap.positiveNameCapture != nil && snap.CaptureProjectionWitness != nil {
-			budget := int64(1 << 20)
+			budget := min(int64(1<<20), req.delta.retainedBudget())
 			if req.delta.cache != nil {
-				budget = min(budget, contractDeltaCacheBudget-req.delta.cache.retainedBytes)
+				budget = min(budget, req.delta.retainedBudget()-req.delta.cache.retainedBytes)
 			}
 			if budget >= 4096 {
 				nameWitness, err = snap.CaptureProjectionWitness(ctx)

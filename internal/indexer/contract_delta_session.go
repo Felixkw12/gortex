@@ -18,6 +18,9 @@ import (
 // A session owns the actor's values exclusively while its LRU reservation
 // remains charged. Fresh evidence, postpasses and seeds belong only to the job.
 type contractDeltaSession struct {
+	// Immutable snapshot of the coordinator-global policy, also used by optional
+	// pre-clone admission. Standalone fixture sessions keep the original default.
+	cacheBudget                                                  int64
 	currentNames                                                 *contractPositiveNameProjection
 	bodyQuestions                                                map[string][]contractBodyBindingQuestion
 	providerQuestions                                            map[string][]contracts.Contract
@@ -32,6 +35,13 @@ type contractDeltaSession struct {
 	membershipUnknown                                            bool
 	receiptStamps                                                map[string]ContractReceiptStamp
 	receipts                                                     map[string]contractDeltaReceipt
+}
+
+func (s *contractDeltaSession) retainedBudget() int64 {
+	if s != nil && s.cacheBudget > 0 {
+		return s.cacheBudget
+	}
+	return contractDeltaCacheBudget
 }
 
 func newContractDeltaSession(p *contractDeltaCache, snap ContractFollowupSnapshot, cfg config.IndexConfig) (*contractDeltaSession, error) {
@@ -237,7 +247,7 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 		p.retainedBytes += unit.retainedRawBytes
 		rawBytes += unit.retainedRawBytes
 	}
-	trimContractOptionalCheckpoint(p, contractDeltaCacheBudget)
+	trimContractOptionalCheckpoint(p, s.retainedBudget())
 	proofBytes := p.retainedBytes - rawBytes
 	c.logger.Info("contract cache checkpoint", zap.String("reason", "prepared"), zap.Bool("cache_present", true), zap.Bool("complete", p.complete), zap.Int("units", len(p.units)), zap.Int64("retained_bytes", p.retainedBytes), zap.Int64("raw_bytes", rawBytes), zap.Int64("proof_bytes", proofBytes), zap.Int("receipts", len(p.receipts)), zap.Int("deltas", p.deltas), zap.Int("pooled_strings", p.proofStringCount), zap.Int64("pooled_backing_bytes", pooledBacking), zap.Int("declarer_queries", len(p.declarers.queries)), zap.Int("normalized_raw_units", s.normalizedRaw))
 	s.cache = p

@@ -1430,6 +1430,7 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 			a.fillCheckpoint = ContractFillCheckpointMissing
 		}
 	}
+	cacheBudget := c.deltaCaches.budget
 	retainedBytes := c.deltaCaches.bytes
 	cacheComplete, cacheBytes := false, int64(0)
 	if cached != nil {
@@ -1449,6 +1450,7 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 		c.endCapture(a, want, ContractActorPending)
 		return
 	}
+	session.cacheBudget = cacheBudget
 	job.delta = session
 	if (a.primary() || c.options.LinkedInputs != nil) && canContinueFill {
 		job.otherActorWaiting = func() bool { return c.otherActorWaiting(a) }
