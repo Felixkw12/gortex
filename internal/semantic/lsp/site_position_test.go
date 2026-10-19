@@ -300,15 +300,16 @@ func TestSameLineNamesakesRefuse(t *testing.T) {
 }
 
 func TestResolveSiteDefinition(t *testing.T) {
-	const absRoot = "/repo"
+	absRoot := filepath.Join(t.TempDir(), "repo")
 	uri := pathToURI(filepath.Join(absRoot, "src", "models.ts"))
+	require.Equal(t, "src/models.ts", uriToPath(uri, absRoot))
 	view := newLSPGraphView(nestedReceiverNodes(), nil)
 	declCol := column(t, nestedReceiverTS, 7, "serialize", 0)
 	useCol := column(t, nestedReceiverTS, 7, "serialize", 1)
 	self := siteDefinitionAnswer{col: declCol, locs: []Location{{URI: uri, Range: nameRange(6, declCol, "serialize")}}}
 	leaf := siteDefinitionAnswer{col: useCol, locs: []Location{{URI: uri, Range: nameRange(1, 2, "serialize")}}}
 	box := siteDefinitionAnswer{col: useCol, locs: []Location{{URI: uri, Range: nameRange(6, declCol, "serialize")}}}
-	external := siteDefinitionAnswer{col: useCol, locs: []Location{{URI: "file:///elsewhere/lib.d.ts"}}}
+	external := siteDefinitionAnswer{col: useCol, locs: []Location{{URI: pathToURI(filepath.Join(filepath.Dir(absRoot), "elsewhere", "lib.d.ts"))}}}
 	resolve := func(want string, answers ...siteDefinitionAnswer) string {
 		n := resolveSiteDefinition(view, "", absRoot, "src/models.ts", 7, "serialize", want, answers)
 		if n == nil {
