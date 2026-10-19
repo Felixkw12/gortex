@@ -451,6 +451,23 @@ func TestRunPreToolUse_AutoApprove_FiresInAnyMode(t *testing.T) {
 	}
 }
 
+// TestRunPreToolUse_AutoApprove_RecordsConsultMarker verifies an
+// auto-approved Gortex call under ModeConsultUnlock still records the
+// consult marker — otherwise a permissive permission mode would keep
+// fallback reads locked for the whole session.
+func TestRunPreToolUse_AutoApprove_RecordsConsultMarker(t *testing.T) {
+	withSessionDir(t)
+	payload := []byte(`{"hook_event_name":"PreToolUse","tool_name":"mcp__gortex__get_symbol","permission_mode":"acceptEdits","session_id":"aa-consult","tool_input":{}}`)
+	out := captureStdout(t, func() { runPreToolUse(payload, 0, ModeConsultUnlock) })
+	dec := decodeHookOutput(t, out)
+	if dec.HookSpecificOutput == nil || dec.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Fatalf("expected auto-approve allow, got: %+v", dec.HookSpecificOutput)
+	}
+	if !loadSessionState("aa-consult").GraphConsulted {
+		t.Error("auto-approved gortex call must record the consult-unlock marker")
+	}
+}
+
 // TestIsPermissivePermissionMode exercises the allowlist directly:
 // only "acceptEdits" and "auto" are permissive; everything else,
 // including unknown future modes, is not.

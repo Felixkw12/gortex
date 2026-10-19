@@ -145,6 +145,11 @@ func runPreToolUseForHost(data []byte, gortexPort int, mode Mode, host preToolUs
 	// switch and the other modes' logic so a gortex tool is never
 	// processed further.
 	if isGortexMCP && isPermissivePermissionMode(input.PermissionMode) {
+		// Returning early skips the consult-unlock branch below, so record
+		// the marker here or fallback reads would stay locked all session.
+		if mode == ModeConsultUnlock {
+			markGraphConsulted(input.SessionID)
+		}
 		hso := &HookSpecificOutput{
 			HookEventName:            "PreToolUse",
 			PermissionDecision:       "allow",
