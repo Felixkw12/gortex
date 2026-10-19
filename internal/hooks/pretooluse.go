@@ -441,13 +441,15 @@ func consultUnlockReason(reason string) string {
 // isPermissivePermissionMode reports whether the host's permission mode
 // is one under which Gortex's own MCP tools should be auto-approved.
 //
-// Implemented as an allowlist — only "acceptEdits" and "auto" return
-// true. Everything else (including "bypassPermissions", "default",
+// Implemented as an allowlist — only "acceptEdits", "auto", and
+// "bypassPermissions" return true. Everything else (including "default",
 // "plan", and the empty string) returns false, so an unknown future
-// permission mode is never auto-approved by default.
+// permission mode is never auto-approved by default. bypassPermissions
+// must be on the list: a rewrite carrying updatedInput (the terminal-auth
+// token) otherwise falls back to "ask", which print-mode runs reject (#841).
 func isPermissivePermissionMode(mode string) bool {
 	switch strings.TrimSpace(mode) {
-	case "acceptEdits", "auto":
+	case "acceptEdits", "auto", "bypassPermissions":
 		return true
 	default:
 		return false
