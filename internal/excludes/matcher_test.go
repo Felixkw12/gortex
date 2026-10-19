@@ -1,6 +1,7 @@
 package excludes
 
 import (
+	"fmt"
 	"path"
 	"testing"
 )
@@ -247,6 +248,16 @@ func TestIsBracketExprCachesItsResult(t *testing.T) {
 		if allocs := testing.AllocsPerRun(100, func() { isBracketExpr(s) }); allocs != 0 {
 			t.Fatalf("isBracketExpr(%q) allocates %v times after its first call, want 0", s, allocs)
 		}
+	}
+	// Patterns from earlier policies must not keep the cache growing.
+	for i := 0; i < 3*maxBracketExprs; i++ {
+		isBracketExpr(fmt.Sprintf("[ab]rev%d", i))
+	}
+	bracketExprs.RLock()
+	n := len(bracketExprs.m)
+	bracketExprs.RUnlock()
+	if n > maxBracketExprs {
+		t.Fatalf("bracket cache holds %d entries, want at most %d", n, maxBracketExprs)
 	}
 }
 

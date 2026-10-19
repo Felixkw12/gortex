@@ -429,8 +429,11 @@ func literalSegment(s string) (string, segKind) {
 
 // bracketExprs caches isBracketExpr results. scanBracketExpr compiles a
 // regexp, and the watcher's backend filter classifies negation segments
-// on every excluded event. Keys are substrings of configured patterns, so
-// the cache stays small.
+// on every excluded event. Keys are substrings of configured patterns.
+// A policy refresh can bring new patterns, so the cache is cleared when
+// it reaches maxBracketExprs entries.
+const maxBracketExprs = 1024
+
 var bracketExprs = struct {
 	sync.RWMutex
 	m map[string]bool
@@ -447,6 +450,9 @@ func isBracketExpr(s string) bool {
 	}
 	_, _, ok = scanBracketExpr(s)
 	bracketExprs.Lock()
+	if len(bracketExprs.m) >= maxBracketExprs {
+		clear(bracketExprs.m)
+	}
 	bracketExprs.m[s] = ok
 	bracketExprs.Unlock()
 	return ok
