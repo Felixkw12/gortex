@@ -469,6 +469,12 @@ func TestGitWatcherRefRecoveryReconcilesMissedHeadAdvance(t *testing.T) {
 	watcher.debounce = 5 * time.Millisecond
 	watcher.topologyRetryBase = 5 * time.Millisecond
 	watcher.topologyRetryMax = 20 * time.Millisecond
+	// The 1s ref-control probe is an independent missed-event recovery path.
+	// Left at its default, a tick landing after the commit (git is slow on
+	// Windows CI) consumes the injected HEAD outage itself and recovers via
+	// the retry, so the explicit refresh below sees no error. Park it so the
+	// test isolates exponential-retry recovery.
+	watcher.topologyProbeInterval = time.Hour
 	watcher.currentIndexer = func() *Indexer { return multi.GetIndexer("ref-recovery") }
 	watcher.batchReindex = func(paths []string) (*IndexResult, error) {
 		return multi.IncrementalReindexRepo("ref-recovery", paths)
