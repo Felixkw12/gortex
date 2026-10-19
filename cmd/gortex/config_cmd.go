@@ -39,6 +39,11 @@ Targets (in precedence order; later layers override earlier):
   3. Repo    - GlobalConfig.repos[].exclude        (--repo <name>)
   4. Workspace - ./.gortex.yaml at the repo root   (default)
 
+The workspace target is the nearest .gortex.yaml between the current
+directory and the enclosing git root; the search never climbs past the
+git root (or past the current directory outside a git repo). When none
+exists there, "add" creates one at the git root (or current directory).
+
 Use "!pattern" in a later layer to re-include something an earlier layer
 excluded.`,
 }
@@ -389,13 +394,20 @@ func looksLikeGlob(s string) bool {
 }
 
 // findWorkspaceConfigPath walks up from the cwd looking for an existing
-// .gortex.yaml. When one is found, its path and containing dir are
-// returned. Otherwise it returns a prospective path at the nearest
-// git root (or cwd as a last resort) so `add` can create the file.
+// .gortex.yaml, stopping at the enclosing git root: the workspace config
+// is the one the daemon reads at the repo root, so a file above the repo
+// boundary belongs to some other project and must never be adopted.
+// Outside a git repo the search is bounded to the cwd itself. When no
+// file is found within that scope, it returns a prospective path at the
+// git root (or the cwd) so `add` can create the file.
 func findWorkspaceConfigPath() (path, repoRoot string, err error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", "", err
+	}
+	floor := gitToplevel(cwd)
+	if floor == "" {
+		floor = cwd
 	}
 	dir := cwd
 	for {
@@ -404,21 +416,21 @@ func findWorkspaceConfigPath() (path, repoRoot string, err error) {
 			return candidate, dir, nil
 		}
 		parent := filepath.Dir(dir)
-		if parent == dir {
+		if dir == floor || parent == dir {
 			break
 		}
 		dir = parent
 	}
-	if root := gitToplevel(cwd); root != "" {
-		return filepath.Join(root, ".gortex.yaml"), root, nil
-	}
-	return filepath.Join(cwd, ".gortex.yaml"), cwd, nil
+	return filepath.Join(floor, ".gortex.yaml"), floor, nil
 }
 
+// gitToplevel returns the nearest ancestor of start (inclusive) holding a
+// .git entry — a directory for a regular checkout, a file for a linked
+// worktree or submodule — or "" when start is not inside a git repo.
 func gitToplevel(start string) string {
 	dir := start
 	for {
-		if info, err := os.Stat(filepath.Join(dir, ".git")); err == nil && info.IsDir() {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			return dir
 		}
 		parent := filepath.Dir(dir)

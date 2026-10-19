@@ -94,6 +94,7 @@ func resolvePath(t *testing.T, p string) string {
 
 func TestFindWorkspaceConfigPath_ExistingFile(t *testing.T) {
 	root := resolvePath(t, t.TempDir())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0755))
 	configPath := filepath.Join(root, ".gortex.yaml")
 	require.NoError(t, os.WriteFile(configPath, []byte(""), 0644))
 
@@ -105,6 +106,83 @@ func TestFindWorkspaceConfigPath_ExistingFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, configPath, path)
 	assert.Equal(t, root, wsRoot)
+}
+
+// TestFindWorkspaceConfigPath_StopsAtGitRoot pins the search floor
+// (#761): a .gortex.yaml above the enclosing git root belongs to another
+// project and must not be adopted — the prospective path is the repo's own.
+func TestFindWorkspaceConfigPath_StopsAtGitRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		makeGit func(t *testing.T, repo string)
+	}{
+		{"git dir", func(t *testing.T, repo string) {
+			require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0755))
+		}},
+		// Linked worktrees and submodules carry a .git file, not a dir.
+		{"git file", func(t *testing.T, repo string) {
+			require.NoError(t, os.WriteFile(filepath.Join(repo, ".git"), []byte("gitdir: /elsewhere\n"), 0644))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outer := resolvePath(t, t.TempDir())
+			require.NoError(t, os.WriteFile(filepath.Join(outer, ".gortex.yaml"), []byte("exclude:\n  - outer/\n"), 0644))
+			repo := filepath.Join(outer, "repo")
+			sub := filepath.Join(repo, "pkg", "deep")
+			require.NoError(t, os.MkdirAll(sub, 0755))
+			tc.makeGit(t, repo)
+			t.Chdir(sub)
+
+			path, wsRoot, err := findWorkspaceConfigPath()
+			require.NoError(t, err)
+			assert.Equal(t, filepath.Join(repo, ".gortex.yaml"), path)
+			assert.Equal(t, repo, wsRoot)
+		})
+	}
+}
+
+// TestFindWorkspaceConfigPath_NoGitBoundedToCwd pins the issue's repro:
+// outside any git repo the search does not climb past the cwd.
+func TestFindWorkspaceConfigPath_NoGitBoundedToCwd(t *testing.T) {
+	outer := resolvePath(t, t.TempDir())
+	if gitToplevel(outer) != "" {
+		t.Skip("temp dir is inside a git checkout; the no-git case cannot be exercised")
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(outer, ".gortex.yaml"), []byte("exclude:\n  - outer/\n"), 0644))
+	sub := filepath.Join(outer, "nested", "deeper")
+	require.NoError(t, os.MkdirAll(sub, 0755))
+	t.Chdir(sub)
+
+	path, wsRoot, err := findWorkspaceConfigPath()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(sub, ".gortex.yaml"), path)
+	assert.Equal(t, sub, wsRoot)
+}
+
+// TestWorkspaceTarget_DoesNotRewriteAncestorConfig drives a save from a
+// nested repo and checks the ancestor project's config is left byte-for-byte
+// intact while the repo's own .gortex.yaml receives the pattern.
+func TestWorkspaceTarget_DoesNotRewriteAncestorConfig(t *testing.T) {
+	outer := resolvePath(t, t.TempDir())
+	ancestor := "# A comment that must survive.\nexclude:\n  - \"vendor/**\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(outer, ".gortex.yaml"), []byte(ancestor), 0644))
+	repo := filepath.Join(outer, "repo")
+	sub := filepath.Join(repo, "nested", "deeper")
+	require.NoError(t, os.MkdirAll(sub, 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0755))
+	t.Chdir(sub)
+
+	tgt, err := newWorkspaceTarget()
+	require.NoError(t, err)
+	require.NoError(t, tgt.save([]string{"a/"}))
+
+	got, err := os.ReadFile(filepath.Join(outer, ".gortex.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, ancestor, string(got))
+	patterns, err := tgt.load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a/"}, patterns)
+	assert.FileExists(t, filepath.Join(repo, ".gortex.yaml"))
 }
 
 func TestFindWorkspaceConfigPath_GitRootFallback(t *testing.T) {
