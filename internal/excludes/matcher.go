@@ -3,6 +3,7 @@ package excludes
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 
 	ignore "github.com/sabhiram/go-gitignore"
 
@@ -411,7 +412,7 @@ func literalSegment(s string) (string, segKind) {
 		case '[':
 			// literalizePattern keeps an unclosed "[" as a literal
 			// character; only a bracket expression is a wildcard.
-			if _, _, ok := scanBracketExpr(s[i:]); ok {
+			if isBracketExpr(s[i:]) {
 				wild = true
 			} else {
 				b.WriteByte(c)
@@ -424,4 +425,29 @@ func literalSegment(s string) (string, segKind) {
 		return "", segWildcard
 	}
 	return b.String(), segLiteral
+}
+
+// bracketExprs caches isBracketExpr results. scanBracketExpr compiles a
+// regexp, and the watcher's backend filter classifies negation segments
+// on every excluded event. Keys are substrings of configured patterns, so
+// the cache stays small.
+var bracketExprs = struct {
+	sync.RWMutex
+	m map[string]bool
+}{m: map[string]bool{}}
+
+// isBracketExpr reports whether s starts with a bracket expression that
+// the compiled matcher reads as a character class.
+func isBracketExpr(s string) bool {
+	bracketExprs.RLock()
+	ok, hit := bracketExprs.m[s]
+	bracketExprs.RUnlock()
+	if hit {
+		return ok
+	}
+	_, _, ok = scanBracketExpr(s)
+	bracketExprs.Lock()
+	bracketExprs.m[s] = ok
+	bracketExprs.Unlock()
+	return ok
 }

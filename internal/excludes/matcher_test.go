@@ -237,6 +237,19 @@ func TestMatcher_EscapedNegationsAgreeWithMatchRel(t *testing.T) {
 	}
 }
 
+// The watcher classifies negation segments on every excluded event, so a
+// bracket expression must not compile a regexp after its first check.
+func TestIsBracketExprCachesItsResult(t *testing.T) {
+	for s, want := range map[string]bool{"[ab]": true, "[ab]c": true, "[abc": false, "[z-a]": false} {
+		if got := isBracketExpr(s); got != want {
+			t.Fatalf("isBracketExpr(%q) = %v, want %v", s, got, want)
+		}
+		if allocs := testing.AllocsPerRun(100, func() { isBracketExpr(s) }); allocs != 0 {
+			t.Fatalf("isBracketExpr(%q) allocates %v times after its first call, want 0", s, allocs)
+		}
+	}
+}
+
 func TestMatcher_HasAnchoredNegatedDescendant(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
