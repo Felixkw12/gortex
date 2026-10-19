@@ -491,6 +491,12 @@ func TestWatcherAgentConfigUserExcludes(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, idx.shouldExclude(kiro, root, false))
 	assert.True(t, w.isExcluded(kiro))
+
+	// So does the same line in a list without Builtin, as the embedded MCP
+	// server's watch.exclude can supply.
+	w, err = NewWatcher(idx, config.WatchConfig{Exclude: []string{".kiro/"}}, zap.NewNop())
+	require.NoError(t, err)
+	assert.True(t, w.isExcluded(kiro))
 }
 
 // Ignore-file events pass the backend filter even when the user excludes

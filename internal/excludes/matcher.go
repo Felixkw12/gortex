@@ -2,7 +2,9 @@ package excludes
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 
 	ignore "github.com/sabhiram/go-gitignore"
 
@@ -150,12 +152,20 @@ func (m *Matcher) Patterns() []string {
 	return out
 }
 
-// patternCount reports how often pattern occurs in the cleaned list.
-func (m *Matcher) patternCount(pattern string) int {
+// cleanedBuiltin is Builtin as New cleans it.
+var cleanedBuiltin = sync.OnceValue(func() []string { return New(Builtin).patterns })
+
+// onlyInBuiltinPrefix reports whether the cleaned list starts with Builtin
+// and pattern occurs nowhere after it.
+func (m *Matcher) onlyInBuiltinPrefix(pattern string) bool {
 	if m == nil {
-		return 0
+		return false
 	}
-	return countOf(m.patterns, pattern)
+	builtin := cleanedBuiltin()
+	if len(m.patterns) < len(builtin) || !slices.Equal(m.patterns[:len(builtin)], builtin) {
+		return false
+	}
+	return !slices.Contains(m.patterns[len(builtin):], pattern)
 }
 
 // MatchRel reports whether a repo-root-relative path is excluded.
