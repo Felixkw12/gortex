@@ -39,6 +39,40 @@ func InAgentConfigDir(relPath string) bool {
 	return false
 }
 
+// IsAgentConfigMCPDir reports whether a repo-root-relative folder inside an
+// agent-config root is one where an agent keeps its MCP config: the root
+// itself or its settings/ folder (.kiro/settings/mcp.json). Every other
+// folder under an agent-config root holds agent state only, such as the
+// checkouts under .claude/worktrees/.
+func IsAgentConfigMCPDir(relDir string) bool {
+	rel := strings.TrimPrefix(filepath.ToSlash(relDir), "./")
+	for _, root := range agentConfigRoots {
+		if rel == root || rel == root+"/settings" {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAgentConfigMCPFile reports whether a repo-root-relative path is an MCP
+// config file in one of the folders IsAgentConfigMCPDir accepts.
+func IsAgentConfigMCPFile(relPath string) bool {
+	rel := strings.TrimPrefix(filepath.ToSlash(relPath), "./")
+	return IsMCPConfigFile(rel) && IsAgentConfigMCPDir(path.Dir(rel))
+}
+
+// IsAgentConfigRootPattern reports whether pattern is the Builtin line that
+// excludes an agent-config root wholesale. The MCP config exception lifts
+// only these lines, so a user's own exclude still applies.
+func IsAgentConfigRootPattern(pattern string) bool {
+	for _, root := range agentConfigRoots {
+		if pattern == root+"/" {
+			return true
+		}
+	}
+	return false
+}
+
 // IsMCPConfigFile reports whether a path's basename is a recognised MCP
 // server config file name.
 func IsMCPConfigFile(relPath string) bool {

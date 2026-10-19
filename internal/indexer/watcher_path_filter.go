@@ -39,9 +39,10 @@ func (f *watcherExcludeFilter) ShouldInclude(path string) bool {
 		return !f.w.excludes.MatchRel(path)
 	}
 	rel, err := filepath.Rel(root, path)
-	// Defer agent-config files and potentially re-included subtrees to the
-	// full check, without statting paths in this backend hot path.
-	if err == nil && excludes.InAgentConfigDir(rel) {
+	// Defer MCP config paths and potentially re-included subtrees to the
+	// full check, without statting paths in this backend hot path. Other
+	// agent-config paths fall to the Builtin exclusion below.
+	if err == nil && (excludes.IsAgentConfigMCPDir(rel) || excludes.IsAgentConfigMCPFile(rel)) {
 		return true
 	}
 	if !f.w.excludes.MatchAbs(path, root) {

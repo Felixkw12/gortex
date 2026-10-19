@@ -5661,15 +5661,27 @@ func (idx *Indexer) perFolderIgnores(root string) *excludes.Hierarchical {
 
 func shouldExcludeRules(path, root string, isDir bool, flat *excludes.Matcher, perFolder *excludes.Hierarchical) bool {
 	// .claude/ and .kiro/ are Builtin-excluded wholesale, but may hold an
-	// MCP server config the MCP-config-as-graph feature targets (the
-	// extractor's own docs name .kiro/mcp.json). Descend those subtrees
-	// and index only the MCP config files within them — everything else
-	// stays excluded, so the agent-state noise never reaches the graph.
+	// MCP server config the MCP-config-as-graph feature targets
+	// (.kiro/settings/mcp.json). Only the folders where an agent keeps that
+	// config stay open, and only the MCP config files in them are admitted;
+	// agent state such as the checkouts under .claude/worktrees/ never
+	// reaches the graph or the watcher.
 	if rel, err := filepath.Rel(root, path); err == nil && excludes.InAgentConfigDir(rel) {
+		open := excludes.IsAgentConfigMCPFile(rel)
 		if isDir {
-			return false
+			open = excludes.IsAgentConfigMCPDir(rel)
 		}
-		return !excludes.IsMCPConfigFile(rel)
+		if !open {
+			return true
+		}
+		// The exception lifts only the Builtin line for the agent-config
+		// root; the user's excludes and per-folder ignore files still apply.
+		if flat != nil {
+			if matched, pattern := flat.ExplainAbsDir(path, root, isDir); matched && !excludes.IsAgentConfigRootPattern(pattern) {
+				return true
+			}
+		}
+		return perFolder.Match(path, isDir)
 	}
 	if flat != nil && flat.MatchAbsDir(path, root, isDir) {
 		return true
@@ -5802,6 +5814,11 @@ func (idx *Indexer) shouldPruneDir(path, root string) bool {
 func shouldPruneDir(path, root string, flat *excludes.Matcher, perFolder *excludes.Hierarchical, anchoredOnly bool) bool {
 	if !shouldExcludeRules(path, root, true, flat, perFolder) {
 		return false
+	}
+	// No re-include reaches a file under a closed agent-config folder (see
+	// shouldExcludeRules), so the negation checks below do not apply.
+	if rel, err := filepath.Rel(root, path); err == nil && excludes.InAgentConfigDir(rel) && !excludes.IsAgentConfigMCPDir(rel) {
+		return true
 	}
 	if flat != nil {
 		hasNegatedDescendant := flat.HasNegatedDescendant

@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,8 +73,11 @@ func TestWatcherAgentConfigBackendFilter(t *testing.T) {
 	}{
 		{"probe_first", ".git/" + probeMarker + "check", true},
 		{"claude_mcp", ".claude/mcp.json", true},
-		{"claude_subdirectory", ".claude/sub", true},
-		{"agent_state_deferred", ".claude/state.unknown", true},
+		{"kiro_settings", ".kiro/settings", true},
+		{"kiro_settings_mcp", ".kiro/settings/mcp.json", true},
+		{"claude_subdirectory", ".claude/sub", false},
+		{"agent_state", ".claude/state.unknown", false},
+		{"worktree_mcp", ".claude/worktrees/foo/.mcp.json", false},
 		{"negated_child_folder", "gen", true},
 		{"ordinary_file", "main.go", true},
 		{"ignored_tree", "node_modules/pkg/main.js", false},
@@ -130,7 +134,7 @@ func TestWatcherAgentConfigNewDirectoryScan(t *testing.T) {
 	}{
 		{"reincluded_child", "gen", "keep.go", "package gen\nfunc Keep() {}\n", []string{"gen", "!gen/keep.go"}},
 		{"claude_directory", ".claude", "mcp.json", `{"mcpServers":{"newserver":{"command":"npx"}}}`, nil},
-		{"claude_subdirectory", ".claude/sub", "mcp.json", `{"mcpServers":{"newserver":{"command":"npx"}}}`, nil},
+		{"kiro_settings", ".kiro/settings", "mcp.json", `{"mcpServers":{"newserver":{"command":"npx"}}}`, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -414,4 +418,69 @@ func TestWatcherAgentConfigSnapshotGuard(t *testing.T) {
 			require.False(t, w.isExcluded(path))
 		})
 	}
+}
+
+// Agent state under .claude/ and .kiro/ stays closed: only the folders that
+// hold an agent's MCP config are open, so a checkout under .claude/worktrees/
+// starts no scan and its MCP config copies stay out of the graph.
+func TestWatcherAgentConfigClosedFolders(t *testing.T) {
+	root := t.TempDir()
+	// An unanchored negation keeps ignored folders open for the cold walk;
+	// closed agent-config folders are pruned regardless.
+	patterns := append(append([]string{}, excludes.Builtin...), "!.gitkeep")
+	idx := newAdmissionTestIndexer(t, root, "!.gitkeep")
+	w, err := NewWatcher(idx, config.WatchConfig{Exclude: patterns}, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { w.signalStopped(); require.NoError(t, w.Stop()) })
+	checkout := filepath.Join(root, ".claude", "worktrees", "foo")
+	writeExcludeFixture(t, filepath.Join(checkout, "main.go"), "package main\n")
+	writeExcludeFixture(t, filepath.Join(checkout, ".mcp.json"), `{"mcpServers":{}}`)
+	writeExcludeFixture(t, filepath.Join(root, ".kiro", "settings", "mcp.json"), `{"mcpServers":{}}`)
+
+	for _, rel := range []string{".claude/worktrees", ".claude/worktrees/foo"} {
+		assert.True(t, idx.shouldPruneDir(filepath.Join(root, rel), root), rel)
+		assert.True(t, w.isExcluded(filepath.Join(root, rel)), rel)
+	}
+	assert.True(t, w.isExcluded(filepath.Join(checkout, ".mcp.json")))
+	assert.False(t, w.isExcluded(filepath.Join(root, ".kiro", "settings", "mcp.json")))
+
+	scans := make(chan map[string]struct{}, 1)
+	w.scanFn = func(dirs map[string]struct{}) { scans <- dirs }
+	w.handleEvent(fswatcher.WatchEvent{Path: checkout, Types: []fswatcher.EventType{fswatcher.EventCreate}})
+	w.asyncWork.Wait()
+	assert.Empty(t, scans, "a new folder under .claude/worktrees/ must start no scan")
+
+	var walked []string
+	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		require.NoError(t, err)
+		if d.IsDir() && idx.shouldPruneDir(path, root) {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() && !idx.shouldExclude(path, root, false) {
+			rel, _ := filepath.Rel(root, path)
+			walked = append(walked, filepath.ToSlash(rel))
+		}
+		return nil
+	}))
+	assert.Equal(t, []string{".kiro/settings/mcp.json"}, walked)
+}
+
+// The MCP config exception lifts only the Builtin .claude/ and .kiro/ lines:
+// the user's own excludes and per-folder ignore files still apply.
+func TestWatcherAgentConfigUserExcludes(t *testing.T) {
+	root := t.TempDir()
+	writeExcludeFixture(t, filepath.Join(root, ".gortexignore"), ".claude/mcp.json\n")
+	patterns := append(append([]string{}, excludes.Builtin...), ".kiro/settings/")
+	idx := newAdmissionTestIndexer(t, root, ".kiro/settings/")
+	w, err := NewWatcher(idx, config.WatchConfig{Exclude: patterns}, zap.NewNop())
+	require.NoError(t, err)
+	for _, rel := range []string{".claude/mcp.json", ".kiro/settings/mcp.json"} {
+		path := filepath.Join(root, rel)
+		writeExcludeFixture(t, path, `{"mcpServers":{}}`)
+		assert.True(t, idx.shouldExclude(path, root, false), rel)
+		assert.True(t, w.isExcluded(path), rel)
+	}
+	kiro := filepath.Join(root, ".kiro", "mcp.json")
+	writeExcludeFixture(t, kiro, `{"mcpServers":{}}`)
+	assert.False(t, w.isExcluded(kiro), "an MCP config no user rule names stays admitted")
 }
