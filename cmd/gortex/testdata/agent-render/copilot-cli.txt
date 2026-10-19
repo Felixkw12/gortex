@@ -93,7 +93,7 @@ For every coding task:
 3. Before mutation, call `change(operation:"impact")`; for a signature change, also `change(operation:"verify")` with the proposed signature. Mutate only with `edit` or `refactor`. After mutation, call `change(operation:"detect")`, then its symbol IDs with `change(operation:"tests")`, `change(operation:"guards")`, and `change(operation:"contract")`.
 4. Call `capabilities` only for an operation's exact fields.
 
-Common calls: `search(operation:"symbols", query:"<name>")` · `read(target:{symbol:"<id>"})` · `relations(operation:"usages", target:{symbol:"<id>"})`.
+Example: `search(operation:"symbols", query:"<name>")`.
 
 If the Gortex server is configured but these tools are missing from the callable MCP tools, report a Gortex MCP integration failure and stop. Do not start a daemon or fall back to a CLI/shell. Outside a Gortex-tracked repo, or when the user says to proceed without Gortex, say so once and continue with native tools.
 
