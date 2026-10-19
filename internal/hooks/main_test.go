@@ -57,6 +57,14 @@ func TestMain(m *testing.M) {
 	// Same reason: attribution resolves the diffed repo through the daemon's
 	// tracked-repo list. Tests that want a resolved repo stub this.
 	hookTrackedReposFn = func() []daemon.TrackedRepoStatus { return nil }
+	// The symbol probes default to "no daemon" explicitly as well, so the
+	// soft fallbacks they feed never depend on the sandbox alone. Tests that
+	// want hits stub them (stubProbe and friends) and restore on cleanup.
+	noDaemon := func(string, string, time.Duration) ([]grepSymbolHit, error) {
+		return nil, errDaemonUnreachable
+	}
+	grepProbe = noDaemon
+	userPromptProbe = noDaemon
 
 	// os.Exit skips deferred calls, so clean up explicitly.
 	code := m.Run()
