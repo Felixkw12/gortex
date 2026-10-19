@@ -848,7 +848,8 @@ func TestPayloadGenerationLosingPublisherKeepsTheSeal(t *testing.T) {
 
 // TestPayloadGenerationPublishDrainsRacingWriter proves the publish window is
 // closed. A second builder holding the same generation — what a coalesced
-// begin hands out — streams mask writes across the whole publish, so rows
+// begin hands out — streams mask writes until one is refused, and always
+// attempts at least one after the publish has returned, so rows
 // arrive on both sides of every step it takes. Each mask is sound on its own,
 // which leaves the rollup as the observable: affected_files is measured once,
 // and a row admitted after that measurement but before the ready flip lands
@@ -876,6 +877,7 @@ func TestPayloadGenerationPublishDrainsRacingWriter(t *testing.T) {
 		var (
 			wg         sync.WaitGroup
 			start      = make(chan struct{})
+			published  = make(chan struct{})
 			writeErr   error
 			publishErr error
 		)
@@ -885,19 +887,36 @@ func TestPayloadGenerationPublishDrainsRacingWriter(t *testing.T) {
 			<-start
 			// A delete mask over a path the generation carries nothing for is
 			// valid, so every one of these could legitimately be published.
-			for i := 0; i < 400; i++ {
+			//
+			// The writer runs until it is refused rather than for a fixed
+			// count: a fixed batch can finish before the publisher is even
+			// scheduled (GOMAXPROCS=1, a loaded runner), and then no write
+			// crosses the publish at all. Once the publish has returned, one
+			// more write is attempted; it must be refused, so a writer that
+			// gets past it ends with a nil error.
+			for i := 0; ; i++ {
+				var after bool
+				select {
+				case <-published:
+					after = true
+				default:
+				}
 				if err := second.SetFileMasks([]FileMask{{
 					RepoPrefix: payloadRepo,
-					FilePath:   fmt.Sprintf("%s::pkg/late%04d.go", payloadRepo, i),
+					FilePath:   fmt.Sprintf("%s::pkg/late%06d.go", payloadRepo, i),
 					Mode:       OwnershipDelete,
 				}}); err != nil {
 					writeErr = err
+					return
+				}
+				if after {
 					return
 				}
 			}
 		}()
 		go func() {
 			defer wg.Done()
+			defer close(published)
 			<-start
 			publishErr = store.PublishPayloadGeneration(ctx, generationID, 9000)
 		}()
