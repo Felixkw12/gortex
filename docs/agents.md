@@ -135,12 +135,13 @@ lives in per-repo instruction files because it is workspace-specific.
 
 ## Compact MCP surface
 
-Every MCP connection with a non-empty `clientInfo.name` receives the
-same 21-tool compact surface in `hide` mode by default. The complete
-static roster is documented in [`mcp.md`](mcp.md#compact-mcp-surface).
-Empty and pre-initialize sessions retain the server default. Explicit
-forwarded, operator, or instruction-profile policy wins over the
-named-client default. Wire-format negotiation is independent, so an
+Every MCP client connection receives the same 21-tool compact surface
+in `hide` mode by default, whether or not its `initialize` carried a
+`clientInfo.name`. The complete static roster is documented in
+[`mcp.md`](mcp.md#compact-mcp-surface). Only internal session-less
+callers (the HTTP dashboard and `/v1` REST routes) retain the server
+default. Explicit forwarded, operator, or instruction-profile policy
+wins over the client default. Wire-format negotiation is independent, so an
 unknown named client remains on JSON unless it is separately
 GCX-capable.
 
