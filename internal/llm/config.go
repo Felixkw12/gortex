@@ -91,6 +91,15 @@ type Config struct {
 	// add/remove` (providers.json) — the config loader merges the two.
 	// Selecting one is just setting Provider to its name.
 	Custom map[string]CustomProvider `mapstructure:"custom" yaml:"custom,omitempty"`
+
+	// modelOverride / effortOverride carry a GORTEX_LLM_MODEL /
+	// GORTEX_LLM_EFFORT value (or a WithModel routing pick) aimed at an
+	// active custom provider. They are kept apart from the Custom map
+	// because MergeEnv runs before the providers.json entries are merged
+	// in (registry.Augment), and are applied on top of whichever entry
+	// ActiveCustom resolves.
+	modelOverride  string
+	effortOverride string
 }
 
 // CustomProvider describes a user-registered OpenAI-compatible LLM
@@ -127,6 +136,11 @@ type CustomProvider struct {
 	// Headers are extra HTTP headers applied to every request (e.g. an
 	// OpenRouter `HTTP-Referer`).
 	Headers map[string]string `mapstructure:"headers" yaml:"headers,omitempty" json:"headers,omitempty"`
+	// PromptProfile selects the search-assist prompt tier: "small"
+	// (default — the verbose, rule-heavy prompts written for small local
+	// models) or "frontier" (the terse prompts for hosted frontier
+	// models). Set "frontier" when the endpoint serves a frontier model.
+	PromptProfile string `mapstructure:"prompt_profile" yaml:"prompt_profile,omitempty" json:"prompt_profile,omitempty"`
 	// Pricing is optional USD-per-1M-token pricing, surfaced by
 	// `gortex provider show` and EstimateCost. Purely informational.
 	Pricing ProviderPricing `mapstructure:"pricing" yaml:"pricing,omitempty" json:"pricing,omitempty"`
@@ -426,6 +440,28 @@ func IsBuiltinProvider(name string) bool {
 	return builtinProviders[strings.ToLower(strings.TrimSpace(name))]
 }
 
+// ActiveCustom returns the custom provider entry the active provider
+// name resolves to, with any env / routing model and effort overrides
+// applied. ok is false when the active provider is a built-in or names
+// no registered entry.
+func (c Config) ActiveCustom() (CustomProvider, bool) {
+	name := c.ProviderName()
+	if IsBuiltinProvider(name) {
+		return CustomProvider{}, false
+	}
+	cp, ok := c.Custom[name]
+	if !ok {
+		return CustomProvider{}, false
+	}
+	if c.modelOverride != "" {
+		cp.Model = c.modelOverride
+	}
+	if c.effortOverride != "" {
+		cp.ReasoningEffort = c.effortOverride
+	}
+	return cp, true
+}
+
 // ProviderName returns the effective provider, applying the "local"
 // default for an empty value.
 func (c Config) ProviderName() string {
@@ -467,7 +503,7 @@ func (c Config) ActiveModel() string {
 	case "requesty":
 		return c.Requesty.Model
 	default:
-		if cp, ok := c.Custom[c.ProviderName()]; ok {
+		if cp, ok := c.ActiveCustom(); ok {
 			return cp.Model
 		}
 		return c.Local.Model
@@ -510,15 +546,12 @@ func (c Config) WithModel(model string) Config {
 	case "requesty":
 		c.Requesty.Model = model
 	default:
-		// For a custom provider, copy-on-write the Custom map so routing
-		// (which derives per-request configs via WithModel) never
-		// mutates the shared base config.
-		if cp, ok := c.Custom[c.ProviderName()]; ok {
-			nc := make(map[string]CustomProvider, len(c.Custom))
-			maps.Copy(nc, c.Custom)
-			cp.Model = model
-			nc[c.ProviderName()] = cp
-			c.Custom = nc
+		// For a custom provider, record the model as an override rather
+		// than writing the Custom map, so routing (which derives
+		// per-request configs via WithModel) never mutates the shared
+		// base config.
+		if _, ok := c.ActiveCustom(); ok {
+			c.modelOverride = model
 			return c
 		}
 		c.Local.Model = model
@@ -559,7 +592,7 @@ func (c Config) IsEnabled() bool {
 		// A registered custom OpenAI-compatible provider is enabled
 		// once it carries a model; the API key (if any) is validated at
 		// construction time.
-		if cp, ok := c.Custom[c.ProviderName()]; ok {
+		if cp, ok := c.ActiveCustom(); ok {
 			return strings.TrimSpace(cp.Model) != ""
 		}
 		return false
@@ -607,8 +640,12 @@ func (c Config) MergeEnv() Config {
 			c.DeepSeek.Model = v
 		case "requesty":
 			c.Requesty.Model = v
-		default:
+		case "local":
 			c.Local.Model = v
+		default:
+			// A custom provider — possibly one registry.Augment merges
+			// in after this runs, so the value rides as an override.
+			c.modelOverride = v
 		}
 	}
 	if v := os.Getenv("GORTEX_LLM_CLAUDECLI_BINARY"); v != "" {
@@ -656,6 +693,10 @@ func (c Config) MergeEnv() Config {
 			c.DeepSeek.Effort = v
 		case "requesty":
 			c.Requesty.Effort = v
+		default:
+			if !IsBuiltinProvider(c.ProviderName()) {
+				c.effortOverride = v // custom provider → reasoning_effort
+			}
 		}
 	}
 	if v := os.Getenv("GORTEX_LLM_CTX"); v != "" {

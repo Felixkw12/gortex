@@ -193,3 +193,17 @@ func TestLoad_PlaintextHTTPWarning(t *testing.T) {
 		t.Error("expected a cleartext-http warning for a non-loopback host")
 	}
 }
+
+func TestAdd_PromptProfile(t *testing.T) {
+	isolate(t)
+	if err := Add("gw", llm.CustomProvider{BaseURL: "https://x/v1", Model: "m", PromptProfile: "huge"}); err == nil {
+		t.Error("an unknown prompt_profile must be rejected")
+	}
+	if err := Add("gw", llm.CustomProvider{BaseURL: "https://x/v1", Model: "m", PromptProfile: "frontier"}); err != nil {
+		t.Fatal(err)
+	}
+	cp, ok, err := Get("gw")
+	if err != nil || !ok || cp.PromptProfile != "frontier" {
+		t.Errorf("Get gw: %+v ok=%v err=%v, want prompt_profile frontier", cp, ok, err)
+	}
+}

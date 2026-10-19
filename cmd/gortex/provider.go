@@ -65,6 +65,7 @@ var (
 	providerModel       string
 	providerAPIKeyEnv   string
 	providerSchemaMode  string
+	providerProfile     string
 	providerMaxTokensF  string
 	providerReasoning   string
 	providerTemperature float64
@@ -79,6 +80,7 @@ func init() {
 	providerAddCmd.Flags().StringVar(&providerModel, "model", "", "default model identifier (required)")
 	providerAddCmd.Flags().StringVar(&providerAPIKeyEnv, "api-key-env", "", "env var holding the bearer key (omit for keyless local endpoints)")
 	providerAddCmd.Flags().StringVar(&providerSchemaMode, "schema-mode", "", "structured-output mode: json_schema (default) | json_object | prompt")
+	providerAddCmd.Flags().StringVar(&providerProfile, "prompt-profile", "", "search-assist prompt tier: small (default) | frontier — use frontier for hosted frontier models")
 	providerAddCmd.Flags().StringVar(&providerMaxTokensF, "max-tokens-field", "", "override the output-token body key (default max_completion_tokens)")
 	providerAddCmd.Flags().StringVar(&providerReasoning, "reasoning-effort", "", "value sent as reasoning_effort (e.g. low|medium|high)")
 	providerAddCmd.Flags().Float64Var(&providerTemperature, "temperature", 0, "temperature to send (only sent when --temperature is set)")
@@ -106,6 +108,7 @@ func runProviderAdd(cmd *cobra.Command, args []string) error {
 		Model:           strings.TrimSpace(providerModel),
 		APIKeyEnv:       strings.TrimSpace(providerAPIKeyEnv),
 		SchemaMode:      strings.TrimSpace(providerSchemaMode),
+		PromptProfile:   strings.TrimSpace(providerProfile),
 		MaxTokensField:  strings.TrimSpace(providerMaxTokensF),
 		ReasoningEffort: strings.TrimSpace(providerReasoning),
 		Headers:         headers,
@@ -151,13 +154,13 @@ func runProviderList(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "%-16s  %-40s  %-24s  %s\n", "NAME", "BASE_URL", "MODEL", "SCHEMA")
+	fmt.Fprintf(w, "%-16s  %-40s  %-24s  %-12s  %s\n", "NAME", "BASE_URL", "MODEL", "SCHEMA", "PROFILE")
 	for _, e := range entries {
 		mode := e.Provider.SchemaMode
 		if mode == "" {
 			mode = "json_schema"
 		}
-		fmt.Fprintf(w, "%-16s  %-40s  %-24s  %s\n", e.Name, e.Provider.BaseURL, e.Provider.Model, mode)
+		fmt.Fprintf(w, "%-16s  %-40s  %-24s  %-12s  %s\n", e.Name, e.Provider.BaseURL, e.Provider.Model, mode, promptProfileLabel(e.Provider.PromptProfile))
 	}
 	return nil
 }
@@ -183,6 +186,11 @@ func runProviderShow(cmd *cobra.Command, args []string) error {
 		mode = "json_schema (default)"
 	}
 	fmt.Fprintf(w, "schema_mode:      %s\n", mode)
+	profile := promptProfileLabel(cp.PromptProfile)
+	if cp.PromptProfile == "" {
+		profile += " (default)"
+	}
+	fmt.Fprintf(w, "prompt_profile:   %s\n", profile)
 	if cp.MaxTokensField != "" {
 		fmt.Fprintf(w, "max_tokens_field: %s\n", cp.MaxTokensField)
 	}
@@ -206,6 +214,15 @@ func runProviderShow(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(w, "pricing:          $%.4f in / $%.4f out per 1M tokens\n", cp.Pricing.Input, cp.Pricing.Output)
 	}
 	return nil
+}
+
+// promptProfileLabel renders a prompt_profile value, naming the
+// implicit "small" default.
+func promptProfileLabel(p string) string {
+	if p == "" {
+		return "small"
+	}
+	return p
 }
 
 // parseHeaderFlags turns repeated --header key=value flags into a map.

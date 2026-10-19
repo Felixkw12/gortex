@@ -571,3 +571,41 @@ func TestConfig_MergedWith(t *testing.T) {
 		t.Errorf("max_steps=%d — global should fill", got.MaxSteps)
 	}
 }
+
+// TestConfig_MergeEnv_CustomProviderModelAndEffort pins that
+// GORTEX_LLM_MODEL / GORTEX_LLM_EFFORT reach the active custom provider —
+// including one whose entry is merged in after MergeEnv runs (the
+// providers.json entries arrive via registry.Augment).
+func TestConfig_MergeEnv_CustomProviderModelAndEffort(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "mygw")
+	t.Setenv("GORTEX_LLM_MODEL", "env-model")
+	t.Setenv("GORTEX_LLM_EFFORT", "high")
+	entry := CustomProvider{BaseURL: "https://x/v1", Model: "file-model", ReasoningEffort: "low"}
+
+	inline := Config{Custom: map[string]CustomProvider{"mygw": entry}}.MergeEnv()
+	late := Config{}.MergeEnv()
+	late.Custom = map[string]CustomProvider{"mygw": entry}
+
+	for name, c := range map[string]Config{"inline": inline, "merged later": late} {
+		cp, ok := c.ActiveCustom()
+		if !ok {
+			t.Fatalf("%s: ActiveCustom not resolved", name)
+		}
+		if cp.Model != "env-model" || c.ActiveModel() != "env-model" {
+			t.Errorf("%s: model=%q active=%q want env-model", name, cp.Model, c.ActiveModel())
+		}
+		if cp.ReasoningEffort != "high" {
+			t.Errorf("%s: reasoning_effort=%q want high", name, cp.ReasoningEffort)
+		}
+		if c.Custom["mygw"].Model != "file-model" {
+			t.Errorf("%s: env override must not rewrite the Custom map", name)
+		}
+		if c.Local.Model != "" {
+			t.Errorf("%s: env model leaked into llm.local.model: %q", name, c.Local.Model)
+		}
+		// A routing pick still wins over the env model.
+		if got := c.WithModel("routed").ActiveModel(); got != "routed" {
+			t.Errorf("%s: WithModel after env override = %q want routed", name, got)
+		}
+	}
+}

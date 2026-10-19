@@ -76,7 +76,7 @@ func New(cfg llm.Config) (llm.Provider, error) {
 	case "requesty":
 		return requesty.New(cfg.Requesty)
 	default:
-		if cp, ok := cfg.Custom[cfg.ProviderName()]; ok {
+		if cp, ok := cfg.ActiveCustom(); ok {
 			return newCustom(cfg.ProviderName(), cp)
 		}
 		return nil, fmt.Errorf("llm: unknown provider %q (want local|anthropic|openai|azure|ollama|claudecli|codex|copilot|cursor|opencode|gemini|bedrock|deepseek|requesty, or a registered custom provider)", cfg.ProviderName())
@@ -87,8 +87,9 @@ func New(cfg llm.Config) (llm.Provider, error) {
 // its CustomProvider entry. The endpoint is BaseURL + "/chat/completions";
 // the bearer key (when APIKeyEnv is set) and any extra headers are
 // applied to every request; the structured-output strategy comes from
-// SchemaMode. Name() reports "custom" (frontier prompt tier) while the
-// httpx/error tag carries the specific "custom:<name>".
+// SchemaMode. Name() reports "custom" while the httpx/error tag carries
+// the specific "custom:<name>"; the prompt tier comes from the entry's
+// prompt_profile (see llm.ProfileFor).
 func newCustom(name string, cp llm.CustomProvider) (llm.Provider, error) {
 	base := strings.TrimRight(strings.TrimSpace(cp.BaseURL), "/")
 	if base == "" {
@@ -99,6 +100,10 @@ func newCustom(name string, cp llm.CustomProvider) (llm.Provider, error) {
 	}
 	if strings.TrimSpace(cp.Model) == "" {
 		return nil, fmt.Errorf("llm: custom provider %q has no model", name)
+	}
+
+	if _, err := llm.ParsePromptProfile(cp.PromptProfile); err != nil {
+		return nil, fmt.Errorf("llm: custom provider %q: %w", name, err)
 	}
 
 	headers := make(map[string]string, len(cp.Headers)+1)
