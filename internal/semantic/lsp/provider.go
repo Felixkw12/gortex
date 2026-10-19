@@ -542,17 +542,19 @@ func edgeExistsAt(view *lspGraphView, from, to string, kind graph.EdgeKind, line
 
 // definitionNodeAtSite asks the language server which declaration the
 // identifier `name` at (siteRel, siteLine) resolves to, and maps the
-// answer back to a graph node by declaration file + line + name.
+// answer back to a graph node by declaration file + line + name. wantID is
+// the edge's current target (see resolveSiteDefinition for how several
+// occurrences of name on the line are weighed against it).
 //
 // Returns (node, true) when the server answered and the definition
 // landed on a known node; (nil, true) when the server answered but no
-// graph node anchors there (external / builtin / unindexed target);
-// (nil, false) when there is no verdict (identifier not on the line,
-// open/transport failure, empty response) — callers must not draw
-// conclusions from a no-verdict.
+// single graph node anchors there (external / builtin / unindexed target,
+// or uses on the line that disagree); (nil, false) when there is no
+// verdict (identifier not on the line, open/transport failure, empty
+// response) — callers must not draw conclusions from a no-verdict.
 //
-// cache memoises verdicts per (file, line, name) within one enrichment
-// pass; multiple ambiguous edges can share a call site.
+// cache memoises the server's answers per (file, line, name) within one
+// enrichment pass; multiple ambiguous edges can share a call site.
 //
 // content is the site file's bytes, already opened on the server and read
 // from disk by the caller (via the shared document session). A nil content
@@ -565,53 +567,40 @@ func edgeExistsAt(view *lspGraphView, from, to string, kind graph.EdgeKind, line
 // through every sited target at one timeout each. Only transport results
 // feed it — a cache hit or an identifier miss never reaches the server,
 // and an answered-but-empty response counts as success.
-func (p *Provider) definitionNodeAtSite(view *lspGraphView, repoPrefix, absRoot, siteRel string, siteLine int, name string, content []byte, breaker *phaseBreaker, cache map[string]*graph.Node) (*graph.Node, bool) {
+func (p *Provider) definitionNodeAtSite(view *lspGraphView, repoPrefix, absRoot, siteRel string, siteLine int, name, wantID string, content []byte, breaker *phaseBreaker, cache map[string][]siteDefinitionAnswer) (*graph.Node, bool) {
 	if siteRel == "" || siteLine <= 0 || name == "" {
 		return nil, false
 	}
 	key := siteRel + "\x00" + strconv.Itoa(siteLine) + "\x00" + name
-	if cached, ok := cache[key]; ok {
-		return cached, true
+	answers, cached := cache[key]
+	if !cached {
+		text, _ := sourceLine(content, siteLine)
+		cols := identifierIndices(text, name)
+		if len(cols) == 0 {
+			// The identifier is not on the recorded line — a definition
+			// request would return junk for whatever token sits there.
+			return nil, false
+		}
+		// Every whole-identifier occurrence is asked about: the first one
+		// may be the enclosing declaration's own name rather than the use
+		// the edge records (`serialize() { return this.leaf.serialize(); }`).
+		answers = make([]siteDefinitionAnswer, 0, len(cols))
+		for _, col := range cols {
+			locs, err := p.FindDefinition(absRoot, siteRel, siteLine-1, col, lspCallTimeout())
+			if breaker != nil {
+				breaker.observe(err == nil)
+			}
+			if err != nil {
+				return nil, false
+			}
+			answers = append(answers, siteDefinitionAnswer{col: col, locs: locs})
+		}
+		if len(answers) == 1 && len(answers[0].locs) == 0 {
+			return nil, false
+		}
+		cache[key] = answers
 	}
-	col, found := identifierColumnStrict(content, siteLine, name)
-	if !found {
-		// The identifier is not on the recorded line — a definition
-		// request would return junk for whatever token sits there.
-		return nil, false
-	}
-	locs, err := p.FindDefinition(absRoot, siteRel, siteLine-1, col, lspCallTimeout())
-	if breaker != nil {
-		breaker.observe(err == nil)
-	}
-	if err != nil || len(locs) == 0 {
-		return nil, false
-	}
-	defPath := uriToPath(locs[0].URI, absRoot)
-	if defPath == "" {
-		// Definition outside the workspace (stdlib, site-packages…).
-		cache[key] = nil
-		return nil, true
-	}
-	node := findDeclarationNode(view, scopedPath(repoPrefix, defPath), locs[0].Range.Start.Line+1, name)
-	if node == nil {
-		// A definition can land on a member declaration INSIDE the target
-		// type — `new T(...)` answers the constructor's line, not the type's,
-		// and the ctor node carries its own name. A type declaration named
-		// exactly `name` whose span contains the answered line is the same
-		// verdict: the site binds to that type.
-		node = view.findEnclosingTypeNamed(scopedPath(repoPrefix, defPath), locs[0].Range.Start.Line+1, name)
-	}
-	cache[key] = node
-	return node, true
-}
-
-// findDeclarationNode locates the graph node whose declaration matches
-// (filePath, oneBasedLine, name). Exact StartLine match wins; a ±1
-// slack covers servers that anchor the definition on the identifier
-// line of a multi-line declaration header. The name must match — that
-// is the identity check this lookup exists for.
-func findDeclarationNode(view *lspGraphView, filePath string, oneBasedLine int, name string) *graph.Node {
-	return view.findDeclarationNode(filePath, oneBasedLine, name)
+	return resolveSiteDefinition(view, repoPrefix, absRoot, siteRel, siteLine, name, wantID, answers), true
 }
 
 // Enrich runs the full LSP enrichment pass for a single-repo (un-
@@ -1097,7 +1086,11 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 			if implPath == "" {
 				continue
 			}
-			implNode := view.matchNodeByFileLine(scopedPath(repoPrefix, implPath), loc.Range.Start.Line+1)
+			implNode := view.matchNodeAt(scopedPath(repoPrefix, implPath), lspSite{
+				line: loc.Range.Start.Line + 1,
+				col:  loc.Range.Start.Character,
+				src:  p.fileSource(absRoot, implPath),
+			})
 			if implNode == nil {
 				continue
 			}
@@ -1334,7 +1327,7 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 				}
 				// Cache keys carry the site file, so the cache is
 				// group-local by construction — no sharing to guard.
-				cache := map[string]*graph.Node{}
+				cache := map[string][]siteDefinitionAnswer{}
 				for _, t := range grp.targets {
 					if targetedCtx.Err() != nil || targetedBreaker.isTripped() {
 						return
@@ -1343,7 +1336,7 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 					if toNode == nil {
 						continue
 					}
-					cand, ok := p.definitionNodeAtSite(view, repoPrefix, absRoot, grp.rel, t.edge.Line, toNode.Name, content, targetedBreaker, cache)
+					cand, ok := p.definitionNodeAtSite(view, repoPrefix, absRoot, grp.rel, t.edge.Line, toNode.Name, toNode.ID, content, targetedBreaker, cache)
 					// The verdict switch reads the view's edge indexes
 					// (edgeExistsAt, the dispatch-member helpers) that the
 					// staged mutations also update, so the whole switch —
@@ -1724,12 +1717,19 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 			// keeps prepare* from failing with "non-added document" and
 			// preserves exactly one didOpen per file.
 			if callHierOK || typeHierOK {
+				sharedDecl := sameLineNamesakes(ft.nodes)
 				for _, n := range ft.nodes {
 					if aborted.Load() || ctx.Err() != nil {
 						break
 					}
 					line, ok := lspLine(n)
 					if !ok {
+						continue
+					}
+					if sharedDecl[n.ID] {
+						// The column below is the name's FIRST occurrence on the
+						// line, which may be a namesake's declaration: the
+						// hierarchy would hang that member's calls on n.
 						continue
 					}
 					col := identifierColumn(content, n.StartLine, n.Name)
@@ -3094,7 +3094,8 @@ func (p *Provider) ConfirmSymbolRefs(g graph.Store, repoRoot string, n *graph.No
 	seenCaller := make(map[string]struct{}, len(hops))
 	for _, h := range hops {
 		otherPath := uriToPath(h.other.URI, absRoot)
-		otherNode := view.matchCallableByFileLine(scopedPath(n.RepoPrefix, otherPath), h.other.SelectionRange.Start.Line+1)
+		otherNode := view.matchCallableAt(scopedPath(n.RepoPrefix, otherPath),
+			p.hierarchyItemSite(absRoot, otherPath, h.other.Name, h.other.SelectionRange))
 		if otherNode == nil {
 			continue
 		}
@@ -3509,8 +3510,8 @@ func (p *Provider) recordHierarchyCall(view *lspGraphView, mutations *lspMutatio
 	if otherPath == "" {
 		return
 	}
-	otherNode := view.matchCallableByFileLine(scopedPath(repoPrefix, otherPath),
-		other.SelectionRange.Start.Line+1)
+	otherNode := view.matchCallableAt(scopedPath(repoPrefix, otherPath),
+		p.hierarchyItemSite(absRoot, otherPath, other.Name, other.SelectionRange))
 	if otherNode == nil {
 		return
 	}
@@ -3609,7 +3610,8 @@ func (p *Provider) linkTypeHierarchy(view *lspGraphView, mutations *lspMutationB
 	if otherPath == "" {
 		return
 	}
-	otherNode := view.matchNodeByFileLine(scopedPath(repoPrefix, otherPath), other.SelectionRange.Start.Line+1)
+	otherNode := view.matchNodeAt(scopedPath(repoPrefix, otherPath),
+		p.hierarchyItemSite(absRoot, otherPath, other.Name, other.SelectionRange))
 	if otherNode == nil {
 		return
 	}
@@ -3974,28 +3976,13 @@ func identifierColumn(src []byte, oneBasedLine int, name string) int {
 // an LSP request at a junk position (column 0 of an unrelated token)
 // can skip the round trip instead.
 func identifierColumnStrict(src []byte, oneBasedLine int, name string) (int, bool) {
-	if name == "" || oneBasedLine <= 0 || len(src) == 0 {
+	if name == "" {
 		return 0, false
 	}
-	// Walk to the start of the requested line.
-	target := oneBasedLine - 1
-	lineStart := 0
-	cur := 0
-	for cur < len(src) && target > 0 {
-		if src[cur] == '\n' {
-			target--
-			lineStart = cur + 1
-		}
-		cur++
-	}
-	if target > 0 {
+	line, ok := sourceLine(src, oneBasedLine)
+	if !ok {
 		return 0, false
 	}
-	lineEnd := lineStart
-	for lineEnd < len(src) && src[lineEnd] != '\n' {
-		lineEnd++
-	}
-	line := string(src[lineStart:lineEnd])
 	idx := identifierIndex(line, name)
 	if idx < 0 {
 		return 0, false
