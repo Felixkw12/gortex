@@ -378,7 +378,7 @@ type segKind int
 
 const (
 	segLiteral  segKind = iota // plain text once escapes are decoded
-	segWildcard                // holds an unescaped "*", "?" or "["
+	segWildcard                // holds an unescaped "*", "?" or bracket expression
 	segUnsure                  // holds an escape the matcher may read differently
 )
 
@@ -406,8 +406,16 @@ func literalSegment(s string) (string, segKind) {
 			}
 			i++
 			b.WriteByte(s[i])
-		case '*', '?', '[':
+		case '*', '?':
 			wild = true
+		case '[':
+			// literalizePattern keeps an unclosed "[" as a literal
+			// character; only a bracket expression is a wildcard.
+			if _, _, ok := scanBracketExpr(s[i:]); ok {
+				wild = true
+			} else {
+				b.WriteByte(c)
+			}
 		default:
 			b.WriteByte(c)
 		}

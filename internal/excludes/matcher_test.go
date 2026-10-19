@@ -66,8 +66,8 @@ func TestMatcher_HasNegatedDescendant(t *testing.T) {
 			want:     true,
 		},
 		{
-			// literalAnchor keeps the backslash, so the anchor cannot match
-			// the folder name; an escaped negation stays conservative.
+			// literalAnchor decodes the escaped plus, so this exact folder
+			// stays reachable while unrelated folders remain prunable.
 			name:     "escaped literal character keeps its folder",
 			patterns: []string{"*", `!foo\+/keep.go`},
 			relDir:   "foo+",
@@ -206,12 +206,14 @@ func TestMatcher_EscapedNegationsAgreeWithMatchRel(t *testing.T) {
 		`!foo\./keep.go`, `!foo\\/keep.go`, `!foo\/keep.go`, `!foo\a/keep.go`,
 		`!foo\ /keep.go`, `!foo\$/keep.go`, `!foo\(/keep.go`, `!foo\]/keep.go`,
 		`!/foo\?`, `!/foo\*`, `!/foo\.`,
+		`![abc/keep.go`, `!/[abc`,
 	}
 	files := []string{
 		"foo/keep.go", "foo*/keep.go", "foo?/keep.go", "foo[/keep.go",
 		"foo+/keep.go", "foo./keep.go", `foo\/keep.go`, `foo\x/keep.go`,
 		"fooa/keep.go", "foo\a/keep.go", "foo /keep.go", "foo$/keep.go",
 		"foo(/keep.go", "foo]/keep.go", "foox/keep.go",
+		"[abc/keep.go", "[abc",
 	}
 	checked := 0
 	for _, neg := range negations {
@@ -259,6 +261,11 @@ func TestMatcher_HasAnchoredNegatedDescendant(t *testing.T) {
 		{"unanchored_escaped", `!foo\*`, "node_modules/pkg", false},
 		{"escaped_literal_char", `!foo\+/keep.go`, "foo+", true},
 		{"escaped_unrelated", `!foo\+/keep.go`, "other", false},
+		// An unclosed "[" is literal in the compiled matcher; a closed one
+		// is a wildcard-led negation, which anchored mode leaves out.
+		{"unclosed_bracket", "![abc/keep.go", "[abc", true},
+		{"unclosed_bracket_unrelated", "![abc/keep.go", "other", false},
+		{"bracket_class_first", "![ab]c/keep.go", "ac", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := New([]string{tc.pattern})
