@@ -8,7 +8,12 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+
+	"github.com/zzet/gortex/internal/excludes"
 )
 
 func TestWalkDisk_PrunesDirectories(t *testing.T) {
@@ -63,7 +68,7 @@ func TestWalkDisk_PrunesDirectories(t *testing.T) {
 func TestWalkDisk_SkipsGitFolders(t *testing.T) {
 	root := t.TempDir()
 	for _, path := range []string{
-		".git/HEAD", ".git/objects/ab/cdef", "a.go", "sub/.git/config", "sub/b.go",
+		".git/HEAD", ".git/objects/ab/cdef", "a.go", "sub/.git/config", "sub/b.go", "up/.GIT/config",
 	} {
 		writeExcludeFixture(t, filepath.Join(root, filepath.FromSlash(path)), "package sample\n")
 	}
@@ -75,9 +80,10 @@ func TestWalkDisk_SkipsGitFolders(t *testing.T) {
 		scope string
 		want  []string
 	}{
-		{name: "root", scope: ".", want: []string{".", "a.go", "sub", "sub/b.go", "wt", "wt/.git"}},
+		{name: "root", scope: ".", want: []string{".", "a.go", "sub", "sub/b.go", "up", "wt", "wt/.git"}},
 		{name: "below_root", scope: "sub", want: []string{"sub", "sub/b.go"}},
 		{name: "git_scope", scope: ".git", want: nil},
+		{name: "inside_git", scope: ".git/objects", want: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// A wildcard-led negation keeps every ignored folder open for the
@@ -184,4 +190,20 @@ func TestWalkDisk_DirectoryReadError(t *testing.T) {
 	})
 	require.Same(t, callbackErr, err)
 	require.Equal(t, []string{".", "locked", "locked:error"}, visited)
+}
+
+// A re-include under .git no longer reaches the walk, so each one is
+// reported when the ignore list is compiled.
+func TestExcludeMatcher_WarnsAboutGitReincludes(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	idx := newAdmissionTestIndexer(t, t.TempDir())
+	idx.logger = zap.New(core)
+	idx.SetExcludePatterns(append(append([]string{}, excludes.Builtin...),
+		"!.git/hooks/", "!.gitkeep", "!/.GIT/info/", "!**/.git/config"))
+
+	var warned []string
+	for _, entry := range logs.All() {
+		warned = append(warned, entry.ContextMap()["pattern"].(string))
+	}
+	assert.Equal(t, []string{"!.git/hooks/", "!/.GIT/info/", "!**/.git/config"}, warned)
 }
