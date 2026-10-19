@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-SHARDS = {"store": 6, "indexer": 6}
+SHARDS = {"store": 6, "indexer": 6, "mcp": 3}
 NAME_BUNDLE = 32
 WINDOWS_COMMAND_BUDGET = 30000
 TEST_EXECUTION_BUDGET_SECONDS = 45 * 60
@@ -186,7 +186,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--manifest", type=Path, default=Path("test-selection.json"))
     args = parser.parse_args()
-    valid = {"remaining", "mcp"} | {f"{package}-{index}" for package, count in SHARDS.items() for index in range(count)}
+    valid = {"remaining"} | {f"{package}-{index}" for package, count in SHARDS.items() for index in range(count)}
     if args.partition not in valid:
         parser.error(f"partition must be one of {sorted(valid)}")
     windows = os.environ.get("TEST_WINDOWS", "false") == "true"
@@ -207,7 +207,7 @@ def main():
         command += ["-v", "-timeout=45m"]
     else:
         command += ["-race", "-timeout=45m", "-coverprofile=coverage.out"]
-    if family in ("store", "indexer"):
+    if family in SHARDS:
         if len(selected) != 1:
             raise ValueError("a test shard must own exactly one package")
         census_command = ["go", "test"] + ([] if windows else ["-race"]) + ["-list", ".", selected[0]]
