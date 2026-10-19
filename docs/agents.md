@@ -435,7 +435,7 @@ coverage:
 | Surface | Intentional status |
 | ------- | ------------------ |
 | `PreCompact` / `PostCompact` | Not installed. `SessionStart(source="compact")` restores the mandatory workflow after compaction without paying for two more lifecycle hooks. |
-| `Stop` | Not installed. A Stop hook can continue a turn, so adding it is a separate policy decision rather than implicit mutation handling. |
+| `Stop` | Installed. The post-turn working-tree diagnostics ride a top-level `systemMessage`, because Codex's Stop output schema has no `hookSpecificOutput`; the hook continues a turn (`decision: block`) only when a localization claim check fails. |
 | Native output-suppression fields | Not emitted while Codex rejects `suppressOutput` and `updatedMCPToolOutput`; the opt-in `suppress` posture uses supported PostToolUse result replacement. |
 
 `apply_patch` mutation handling and opt-in deny/rewrite/suppress postures are
