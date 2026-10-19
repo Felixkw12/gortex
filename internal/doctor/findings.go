@@ -172,26 +172,35 @@ func Diagnose(agent AgentHooks, summary hooks.EffectivenessSummary, adoption Ado
 			"%d %s hook(s) are configured but none has run in this window.", configured, agent.Agent)
 	}
 
-	// A per-event zero while other events ran is a narrower version of the
-	// same problem: one hook's definition changed, so only its trust lapsed.
+	// A per-event zero while other events ran is not the silence the switch
+	// above diagnoses. Sibling hooks of the same agent running proves the
+	// harness executes Gortex's hooks — trust and PATH are fine — so neither
+	// the trust remedy nor a blocker applies (#766). Session-end events are
+	// the common case: they fire only when a session ends cleanly, and a
+	// long-lived session that is killed or still open never reaches them, so
+	// their silence is informational. Any other silent event is worth a look
+	// at its own entry, but nothing else is broken.
 	//
 	// Skipped when execution is turned off, for the same reason the switch
 	// above skips its silence rules. `ran > 0` survives the switch being
 	// flipped — runs earlier in the window still count — so without this the
-	// trust remedy reappears event by event on a machine that simply has
-	// hooks disabled.
+	// rule reappears event by event on a machine that simply has hooks
+	// disabled.
 	if ran > 0 && !agent.HooksDisabled {
 		for _, event := range events {
 			stats := activity.events[event]
 			if stats.Runs > 0 || activity.ambiguous(event) {
 				continue
 			}
-			remedy := "re-run `gortex install`"
-			if agent.RequiresTrust {
-				remedy = agent.TrustRemedy
+			if isSessionEndEvent(event) {
+				add(SeverityInfo, "",
+					"%s is configured but never ran, while other hooks did%s — it fires only when a session ends cleanly; killed or still-open sessions never reach it.",
+					event, lastSeenSuffix(stats.LastSeen, now))
+				continue
 			}
-			add(SeverityBlocker, remedy,
-				"%s is configured but never ran, while other hooks did%s.", event, lastSeenSuffix(stats.LastSeen, now))
+			add(SeverityWarn, "check this event's entry in the agent's hook configuration, or re-run `gortex install`",
+				"%s is configured but never ran, while other hooks did%s — the harness runs Gortex's hooks, so this event has either not been triggered yet or its entry is wrong.",
+				event, lastSeenSuffix(stats.LastSeen, now))
 		}
 	}
 
@@ -316,6 +325,18 @@ func severityRank(s Severity) int {
 	default:
 		return 3
 	}
+}
+
+// isSessionEndEvent reports whether event fires only when a session (or a
+// subagent) ends. Matched case-insensitively because harnesses spell the same
+// events differently — Claude Code's "Stop" and "SubagentStop", Copilot CLI's
+// "agentStop", "sessionEnd" and "subagentStop".
+func isSessionEndEvent(event string) bool {
+	switch strings.ToLower(event) {
+	case "stop", "agentstop", "sessionend", "subagentstop":
+		return true
+	}
+	return false
 }
 
 // lastSeenSuffix turns a never/stale timestamp into a clause, so "never ran"

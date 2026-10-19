@@ -87,8 +87,9 @@ func TestNeverRanWithoutTrustGateAvoidsTheTrustRemedy(t *testing.T) {
 	}
 }
 
-// TestSingleStaleHookIsReported covers the upgrade case: trust is recorded
-// per hook hash, so changing one hook's definition silences only that hook.
+// TestSingleStaleHookIsReported: one event silent while its siblings run is
+// still worth naming, but the siblings prove the harness runs Gortex's hooks,
+// so it is a WARN without the trust remedy rather than a blocker (#766).
 func TestSingleStaleHookIsReported(t *testing.T) {
 	now := time.Now()
 	findings := Diagnose(codexAgent(), activity(map[string]hooks.EventActivity{
@@ -99,13 +100,66 @@ func TestSingleStaleHookIsReported(t *testing.T) {
 	}), Adoption{GortexCalls: 10, ShellCalls: 1}, now)
 
 	got := findingWith(t, findings, "SessionStart is configured but never ran")
-	if got.Severity != SeverityBlocker {
-		t.Errorf("severity=%s want BLOCKER", got.Severity)
+	if got.Severity != SeverityWarn {
+		t.Errorf("severity=%s want WARN", got.Severity)
+	}
+	if strings.Contains(got.Remedy, "/hooks") {
+		t.Errorf("trust remedy offered while sibling hooks ran: %q", got.Remedy)
 	}
 	if !strings.Contains(got.Summary, "3d ago") {
 		t.Errorf("should date the last run so a stale hook is distinguishable: %q", got.Summary)
 	}
 	assertNoFindingWith(t, findings, "none has run")
+	if HasBlocker(findings) {
+		t.Errorf("a single silent event beside running siblings is not a blocker: %+v", findings)
+	}
+}
+
+// TestSilentStopBesideRunningHooksIsNotABlocker is #766: Codex ran its other
+// hooks thousands of times and Stop never, because the user's long-lived
+// sessions were killed rather than ended cleanly. Trust is demonstrably fine,
+// so the /hooks remedy is wrong and nothing is blocked.
+func TestSilentStopBesideRunningHooksIsNotABlocker(t *testing.T) {
+	agent := codexAgent()
+	agent.Configured["Stop"] = 1
+
+	findings := Diagnose(agent, activity(map[string]hooks.EventActivity{
+		"SessionStart":     {Runs: 139, Emitted: 139, DaemonKnown: 139, DaemonUp: 139},
+		"UserPromptSubmit": {Runs: 236, Emitted: 13, DaemonKnown: 236, DaemonUp: 236},
+		"PreToolUse":       {Runs: 10219, Emitted: 102, DaemonKnown: 10219, DaemonUp: 10219},
+		"PostToolUse":      {Runs: 3352, Emitted: 56, DaemonKnown: 3352, DaemonUp: 3352},
+	}), Adoption{GortexCalls: 87}, time.Now())
+
+	got := findingWith(t, findings, "Stop is configured but never ran")
+	if got.Severity != SeverityInfo {
+		t.Errorf("severity=%s want INFO", got.Severity)
+	}
+	if !strings.Contains(got.Summary, "session ends cleanly") {
+		t.Errorf("should explain when Stop fires: %q", got.Summary)
+	}
+	for _, f := range findings {
+		if strings.Contains(f.Remedy, "/hooks") {
+			t.Errorf("trust remedy offered while sibling hooks ran: %+v", f)
+		}
+	}
+	if HasBlocker(findings) {
+		t.Errorf("a silent Stop beside running hooks is not a blocker: %+v", findings)
+	}
+}
+
+// TestSessionEndEventsAcrossHarnessSpellings: the session-end classification
+// covers every spelling the adapters configure, not just Claude/Codex "Stop".
+func TestSessionEndEventsAcrossHarnessSpellings(t *testing.T) {
+	for _, event := range []string{"Stop", "SubagentStop", "SessionEnd", "agentStop", "sessionEnd", "subagentStop"} {
+		if !isSessionEndEvent(event) {
+			t.Errorf("%s should be a session-end event", event)
+		}
+	}
+	for _, event := range []string{"SessionStart", "PreToolUse", "PostToolUse", "UserPromptSubmit", "PreCompact"} {
+		if isSessionEndEvent(event) {
+			t.Errorf("%s should not be a session-end event", event)
+		}
+	}
 }
 
 // TestHookThatRunsButNeverInjectsIsAWarn separates "never fires" from "fires
@@ -308,10 +362,11 @@ func TestMixedAttributionDoesNotAccuse(t *testing.T) {
 	}
 }
 
-// TestAttributedSilenceStillBlocks: once the window holds no unattributed
-// runs of an event, an empty bucket really is silence and must still block —
-// the guard above must not swallow the finding it exists to protect.
-func TestAttributedSilenceStillBlocks(t *testing.T) {
+// TestAttributedSilenceStillReported: once the window holds no unattributed
+// runs of an event, an empty bucket really is silence and must still be
+// reported — the guard above must not swallow the finding it exists to
+// protect. A sibling ran, so it is a WARN without the trust remedy (#766).
+func TestAttributedSilenceStillReported(t *testing.T) {
 	now := time.Now()
 	clean := hooks.EffectivenessSummary{
 		Present:    true,
@@ -327,10 +382,10 @@ func TestAttributedSilenceStillBlocks(t *testing.T) {
 
 	findings := Diagnose(codexAgent(), clean, Adoption{FilesFound: 1, InWindow: 1, GortexCalls: 9, ShellCalls: 1}, now)
 	got := findingWith(t, findings, "SessionStart is configured but never ran")
-	if got.Severity != SeverityBlocker {
-		t.Errorf("severity=%s want BLOCKER", got.Severity)
+	if got.Severity != SeverityWarn {
+		t.Errorf("severity=%s want WARN", got.Severity)
 	}
-	if !strings.Contains(got.Remedy, "/hooks") {
+	if strings.Contains(got.Remedy, "/hooks") {
 		t.Errorf("remedy=%q", got.Remedy)
 	}
 }
