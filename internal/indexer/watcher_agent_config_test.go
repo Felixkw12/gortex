@@ -484,3 +484,33 @@ func TestWatcherAgentConfigUserExcludes(t *testing.T) {
 	writeExcludeFixture(t, kiro, `{"mcpServers":{}}`)
 	assert.False(t, w.isExcluded(kiro), "an MCP config no user rule names stays admitted")
 }
+
+// An edited ignore file takes effect at once: the watcher drops the
+// folder's cached rules and rescans the folder.
+func TestWatcherForgetsEditedIgnoreFile(t *testing.T) {
+	root := t.TempDir()
+	ignore := filepath.Join(root, "sub", ".gortexignore")
+	writeExcludeFixture(t, ignore, "")
+	generated := filepath.Join(root, "sub", "generated", "x.go")
+	writeExcludeFixture(t, generated, "package generated\n")
+	idx := newAdmissionTestIndexer(t, root)
+	w, err := NewWatcher(idx, config.WatchConfig{Exclude: excludes.Builtin}, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { w.signalStopped(); require.NoError(t, w.Stop()) })
+	require.False(t, w.isExcluded(generated))
+
+	scans := make(chan map[string]struct{}, 1)
+	w.scanFn = func(dirs map[string]struct{}) { scans <- dirs }
+	writeExcludeFixture(t, ignore, "generated/\n")
+	w.handleEvent(fswatcher.WatchEvent{Path: ignore, Types: []fswatcher.EventType{fswatcher.EventMod}})
+	w.asyncWork.Wait()
+	assert.True(t, w.isExcluded(generated), "the new rule applies without a restart")
+	assert.True(t, idx.shouldExclude(generated, root, false), "the indexer shares the refreshed rules")
+	require.Len(t, scans, 1)
+	assert.Equal(t, map[string]struct{}{filepath.Join(root, "sub"): {}}, <-scans)
+
+	writeExcludeFixture(t, ignore, "")
+	w.handleEvent(fswatcher.WatchEvent{Path: ignore, Types: []fswatcher.EventType{fswatcher.EventMod}})
+	w.asyncWork.Wait()
+	assert.False(t, w.isExcluded(generated), "removing the rule re-includes the file")
+}

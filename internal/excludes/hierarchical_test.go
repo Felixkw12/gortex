@@ -220,3 +220,27 @@ func TestHierarchical_HasAnchoredNegatedDescendant(t *testing.T) {
 		t.Fatal("nil and empty matchers have no negated descendants")
 	}
 }
+
+func TestHierarchicalForgetRereadsIgnoreFile(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	ignore := filepath.Join(sub, ".gortexignore")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHierarchical(root, ".gortexignore")
+	target := filepath.Join(sub, "gen", "x.go")
+	if h.Match(target, false) {
+		t.Fatal("no ignore file yet")
+	}
+	if err := os.WriteFile(ignore, []byte("gen/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if h.Match(target, false) {
+		t.Fatal("the cached empty rules stay until Forget")
+	}
+	h.Forget(sub)
+	if !h.Match(target, false) {
+		t.Fatal("Forget must reread the folder's ignore file")
+	}
+}

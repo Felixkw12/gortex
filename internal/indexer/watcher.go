@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1643,6 +1644,12 @@ func (w *Watcher) handleEvent(event fswatcher.WatchEvent) {
 		return
 	}
 
+	// Before the exclusion check: an ignore file can sit in a folder whose
+	// own events are excluded, and its rules apply all the same.
+	if w.indexer.rootPath != "" {
+		w.forgetDirIgnores(path, event.Types)
+	}
+
 	// Skip events from excluded paths. A single matcher call covers
 	// what the old code split across inExcludedDir + isExcluded.
 	if w.isExcluded(path) {
@@ -2959,4 +2966,25 @@ func (w *Watcher) isExcluded(path string) bool {
 		return shouldPruneDir(path, root, w.excludes, perFolder, true)
 	}
 	return shouldExcludeRules(path, root, false, w.excludes, perFolder)
+}
+
+// forgetDirIgnores keeps the per-folder ignore cache current as the
+// watcher sees ignore files and folders change. An edited, created or
+// deleted ignore file drops its folder's cached rules and rescans the
+// folder, so files the change re-includes are indexed. A removed folder
+// drops its entry, which keeps short-lived build folders from piling up.
+func (w *Watcher) forgetDirIgnores(path string, types []fswatcher.EventType) {
+	perFolder := w.indexer.perFolderIgnores(w.indexer.rootPath)
+	if perFolder == nil {
+		return
+	}
+	if slices.Contains(dirIgnoreFiles, filepath.Base(path)) {
+		dir := filepath.Dir(path)
+		perFolder.Forget(dir)
+		w.enqueueDirScan(dir)
+		return
+	}
+	if hasEventType(types, fswatcher.EventRemove) || hasEventType(types, fswatcher.EventRename) {
+		perFolder.Forget(path)
+	}
 }

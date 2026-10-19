@@ -25,6 +25,9 @@ type Hierarchical struct {
 
 	mu    sync.RWMutex
 	cache map[string]*Matcher // abs dir -> compiled matcher; nil value = directory has no ignore files
+	// forgets counts Forget calls. A read that started before one does not
+	// store its result, which may predate the change Forget reports.
+	forgets uint64
 }
 
 // NewHierarchical builds a per-directory ignore matcher rooted at root.
@@ -40,6 +43,20 @@ func NewHierarchical(root string, filenames ...string) *Hierarchical {
 		filenames: filenames,
 		cache:     make(map[string]*Matcher),
 	}
+}
+
+// Forget drops the cached rules of one directory, so the next check reads
+// its ignore files again. Call it when an ignore file in absDir is created,
+// changed or deleted, or when absDir itself is removed. Each directory's
+// entry holds only its own files' rules, so no other entry goes stale.
+func (h *Hierarchical) Forget(absDir string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	delete(h.cache, filepath.Clean(absDir))
+	h.forgets++
+	h.mu.Unlock()
 }
 
 // Match reports whether an absolute path is excluded by an ignore file
@@ -161,6 +178,7 @@ func relUnder(dir, child string) string {
 func (h *Hierarchical) dirMatcher(dir string) *Matcher {
 	h.mu.RLock()
 	m, ok := h.cache[dir]
+	forgets := h.forgets
 	h.mu.RUnlock()
 	if ok {
 		return m
@@ -175,7 +193,9 @@ func (h *Hierarchical) dirMatcher(dir string) *Matcher {
 	}
 
 	h.mu.Lock()
-	h.cache[dir] = m
+	if h.forgets == forgets {
+		h.cache[dir] = m
+	}
 	h.mu.Unlock()
 	return m
 }
