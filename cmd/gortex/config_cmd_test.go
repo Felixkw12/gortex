@@ -337,3 +337,154 @@ func TestRunConfigExcludeList_Agreement(t *testing.T) {
 		})
 	}
 }
+
+// addViaWorkspaceTarget mirrors runConfigExcludeAdd's load → append → save
+// against the workspace target (without the daemon reload ping).
+func addViaWorkspaceTarget(t *testing.T, pattern string) {
+	t.Helper()
+	tgt, err := newWorkspaceTarget()
+	require.NoError(t, err)
+	existing, err := tgt.load()
+	require.NoError(t, err)
+	require.NoError(t, tgt.save(append(existing, pattern)))
+}
+
+// TestWorkspaceTarget_SavePreservesUnrelatedContent pins the lossless
+// write (#761): only the exclude list changes — comments, key order,
+// scalar quoting and keys config.Config drops on a round trip
+// (watch.enabled: false, unknown keys) all survive.
+func TestWorkspaceTarget_SavePreservesUnrelatedContent(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0755))
+	t.Chdir(root)
+
+	before := `# A comment that must survive.
+index:
+  languages:
+    - go
+  workers: 8 # trailing comment
+watch:
+  enabled: false
+# Excludes below.
+exclude:
+  - "vendor/**" # keep vendored code out
+  - 'node_modules/**'
+custom_key: value
+`
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gortex.yaml"), []byte(before), 0644))
+
+	addViaWorkspaceTarget(t, "a/")
+
+	got, err := os.ReadFile(filepath.Join(root, ".gortex.yaml"))
+	require.NoError(t, err)
+	want := `# A comment that must survive.
+index:
+  languages:
+    - go
+  workers: 8 # trailing comment
+watch:
+  enabled: false
+# Excludes below.
+exclude:
+  - "vendor/**" # keep vendored code out
+  - 'node_modules/**'
+  - 'a/'
+custom_key: value
+`
+	assert.Equal(t, want, string(got))
+}
+
+// TestWorkspaceTarget_LegacyMigrationKeepsSiblings is the issue's repro:
+// adding to a file that only has the legacy index.exclude / watch.exclude
+// migrates the list to top-level exclude: without dropping the comment,
+// the other index keys or watch.enabled.
+func TestWorkspaceTarget_LegacyMigrationKeepsSiblings(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0755))
+	t.Chdir(root)
+
+	before := `# A comment that must survive.
+index:
+  languages:
+    - go
+  exclude:
+    - "vendor/**"
+    - "node_modules/**"
+  workers: 8
+watch:
+  enabled: false
+  exclude:
+    - "tmp/"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gortex.yaml"), []byte(before), 0644))
+
+	addViaWorkspaceTarget(t, "a/")
+
+	got, err := os.ReadFile(filepath.Join(root, ".gortex.yaml"))
+	require.NoError(t, err)
+	want := `# A comment that must survive.
+index:
+  languages:
+    - go
+  workers: 8
+watch:
+  enabled: false
+exclude:
+  - "vendor/**"
+  - "node_modules/**"
+  - "tmp/"
+  - "a/"
+`
+	assert.Equal(t, want, string(got))
+}
+
+// TestWorkspaceTarget_SaveEdgeShapes covers files with no list to edit:
+// absent, empty, comment-only, and a null `exclude:` value.
+func TestWorkspaceTarget_SaveEdgeShapes(t *testing.T) {
+	cases := []struct {
+		name   string
+		before string // "-" means no file
+		want   string
+	}{
+		{"absent", "-", "exclude:\n  - a/\n"},
+		{"empty", "", "exclude:\n  - a/\n"},
+		{"comment only", "# just a note\n", "# just a note\nexclude:\n  - a/\n"},
+		{"null exclude", "# head\nexclude:\nworkers: 2\n", "# head\nexclude:\n  - a/\nworkers: 2\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0755))
+			t.Chdir(root)
+			path := filepath.Join(root, ".gortex.yaml")
+			if tc.before != "-" {
+				require.NoError(t, os.WriteFile(path, []byte(tc.before), 0644))
+			}
+
+			addViaWorkspaceTarget(t, "a/")
+
+			got, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, string(got))
+		})
+	}
+}
+
+// TestWorkspaceTarget_RemoveLastPatternDropsKey checks that emptying the
+// list removes the exclude key and leaves every other line alone.
+func TestWorkspaceTarget_RemoveLastPatternDropsKey(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0755))
+	t.Chdir(root)
+
+	before := "# header\nwatch:\n  enabled: false\nexclude:\n  - a/\n"
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gortex.yaml"), []byte(before), 0644))
+
+	tgt, err := newWorkspaceTarget()
+	require.NoError(t, err)
+	require.NoError(t, tgt.save(nil))
+
+	got, err := os.ReadFile(filepath.Join(root, ".gortex.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, "# header\nwatch:\n  enabled: false\n", string(got))
+}
