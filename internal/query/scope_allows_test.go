@@ -24,6 +24,42 @@ func TestQueryOptions_ScopeAllows(t *testing.T) {
 		want bool
 	}{
 		{
+			name: "repo qualified project in shared workspace",
+			opts: QueryOptions{RepoAllow: map[string]bool{"app": true}, ProjectID: "web"},
+			node: node("shared", "web", "app"),
+			want: true,
+		},
+		{
+			name: "repo qualified project excludes sibling project",
+			opts: QueryOptions{RepoAllow: map[string]bool{"app": true}, ProjectID: "web"},
+			node: node("shared", "worker", "app"),
+			want: false,
+		},
+		{
+			name: "repo qualified project excludes sibling repo",
+			opts: QueryOptions{RepoAllow: map[string]bool{"app": true}, ProjectID: "web"},
+			node: node("shared", "web", "sibling"),
+			want: false,
+		},
+		{
+			name: "repo qualified project keeps legacy project fallback",
+			opts: QueryOptions{RepoAllow: map[string]bool{"app": true}, ProjectID: "app"},
+			node: node("shared", "", "app"),
+			want: true,
+		},
+		{
+			name: "repo qualified project admits global external",
+			opts: QueryOptions{RepoAllow: map[string]bool{"app": true}, ProjectID: "web"},
+			node: &graph.Node{ID: "external::go:fmt::Errorf", Kind: graph.KindFunction, FilePath: "external::go:fmt"},
+			want: true,
+		},
+		{
+			name: "project only remains unqualified",
+			opts: QueryOptions{ProjectID: "web"},
+			node: node("shared", "worker", "app"),
+			want: true,
+		},
+		{
 			name: "empty scope allows everything",
 			opts: QueryOptions{},
 			node: node("vio", "", "rate_checkers_detector"),

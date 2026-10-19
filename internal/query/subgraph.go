@@ -149,9 +149,9 @@ type QueryOptions struct {
 	// don't care about the workspace boundary.
 	WorkspaceID string `json:"workspace_id,omitempty"`
 	// ProjectID applies the same scoping for the soft sub-boundary.
-	// Honoured only when WorkspaceID is also set; on its own it would
-	// be ambiguous (two workspaces could declare a project with the
-	// same name).
+	// Honoured when WorkspaceID or an explicit RepoAllow is also set;
+	// on its own it would be ambiguous (two workspaces could declare
+	// a project with the same name).
 	ProjectID string `json:"project_id,omitempty"`
 	// RepoAllow, when non-empty, restricts traversal to nodes whose
 	// RepoPrefix is present in the allow-set. Nil or empty preserves
@@ -336,14 +336,17 @@ func (o QueryOptions) ScopeAllows(n *graph.Node) bool {
 		if ws != o.WorkspaceID {
 			return false
 		}
-		if o.ProjectID != "" {
-			proj := n.ProjectID
-			if proj == "" {
-				proj = n.RepoPrefix
-			}
-			if proj != o.ProjectID {
-				return false
-			}
+	}
+	// A repository narrow disambiguates a project without pretending that
+	// the repository is its own workspace. Unqualified project-only options
+	// keep their existing behavior; synthetic global externals stay visible.
+	if o.ProjectID != "" && (o.WorkspaceID != "" || len(o.RepoAllow) > 0) && !isGlobalExternal(n) {
+		proj := n.ProjectID
+		if proj == "" {
+			proj = n.RepoPrefix
+		}
+		if proj != o.ProjectID {
+			return false
 		}
 	}
 	// A node with an empty RepoPrefix is not owned by any repository, so a
