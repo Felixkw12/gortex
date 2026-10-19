@@ -195,6 +195,10 @@ var _ graph.OverlayLayerReader = (*GenerationLayer)(nil)
 // handle states no ownership claims and would compose as a layer that
 // covers nothing, so it is refused rather than silently serving an empty
 // overlay.
+// ProjectionHandle borrows the exact physical input of this immutable layer.
+// The caller must already own the view/lease; it is not a new selection.
+func (l *GenerationLayer) ProjectionHandle() *store_sqlite.Store { return l.handle }
+
 func NewGenerationLayer(handle *store_sqlite.Store) (*GenerationLayer, error) {
 	return NewGenerationLayerContext(context.Background(), handle)
 }

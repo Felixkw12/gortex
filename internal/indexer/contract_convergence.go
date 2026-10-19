@@ -149,6 +149,13 @@ func contractJobOutcomeOf(err error) string {
 
 // contractUnit is one file's proven extraction.
 type contractUnit struct {
+	// These owned answers are tied to their exact accepted bytes and full handler
+	// node input. They contain no AST and do not discharge work or source proof.
+	providerSchemas     map[string]contractProviderSchemaAnswer
+	providerSchemaBytes int64
+	bodyBindingEligible bool
+	bodyBindingBytes    int64
+	bodyBindings        map[contractBodyBindingQuestion]contractBodyBindingAnswer
 	// Retained raw and router-fact size travels with its immutable unit; zero is unmeasured.
 	retainedRawBytes int64
 	path             string
@@ -1384,7 +1391,7 @@ func (c *contractConvergence) openEvidence() (*contractFollowupEvidence, *store_
 	for path := range c.excluded {
 		excluded[path] = true
 	}
-	evidence := &contractFollowupEvidence{Store: scratch, scratch: scratch, ctx: c.ctx, core: c.snap.Core, files: files, excluded: excluded, readCore: c.snap.ReadCoreFile, allowedRepos: c.repos, guard: c.guard}
+	evidence := &contractFollowupEvidence{Store: scratch, scratch: scratch, ctx: c.ctx, core: c.snap.Core, files: files, excluded: excluded, positiveCandidateValue: c.positiveCandidateValue, observedEndpointCandidates: c.observePositiveName, readCore: c.snap.ReadCoreFile, allowedRepos: c.repos, guard: c.guard}
 	if reader, ok := c.snap.Core.(graph.SemanticBindingTypeReader); ok {
 		evidence.semantic = reader
 	}
@@ -1477,7 +1484,7 @@ func (c *contractConvergence) indexers(evidence *contractFollowupEvidence, read 
 			cfg = override
 		}
 		root := filepath.Join(string(filepath.Separator), "contract-followup", repo)
-		idx := &Indexer{graph: evidence, rootPath: root, repoPrefix: repo, workspaceID: workspace, projectID: project, config: cfg, logger: c.logger, registry: c.req.Registry}
+		idx := &Indexer{contractProviderValue: c.ownedProviderSchema, contractProviderObserved: c.rememberProviderSchema, contractBindingValue: c.ownedBodyBinding, contractBindingObserved: c.rememberBodyBinding, graph: evidence, rootPath: root, repoPrefix: repo, workspaceID: workspace, projectID: project, config: cfg, logger: c.logger, registry: c.req.Registry}
 		opts := c.snap.RepoExtractionOptions[repo]
 		idx.extractionOptions.Store(&opts)
 		idx.contractAnalysisOnly = true
@@ -1502,7 +1509,7 @@ func (c *contractConvergence) indexers(evidence *contractFollowupEvidence, read 
 	// A certified empty own namespace still receives a complete empty snapshot.
 	if out[c.snap.Key.RepoPrefix] == nil {
 		cfg := c.req.Config
-		idx := &Indexer{graph: evidence, rootPath: "/contract-followup", repoPrefix: c.snap.Key.RepoPrefix, workspaceID: c.req.WorkspaceID, projectID: c.req.ProjectID, config: cfg, logger: c.logger, registry: c.req.Registry}
+		idx := &Indexer{contractProviderValue: c.ownedProviderSchema, contractProviderObserved: c.rememberProviderSchema, contractBindingValue: c.ownedBodyBinding, contractBindingObserved: c.rememberBodyBinding, graph: evidence, rootPath: "/contract-followup", repoPrefix: c.snap.Key.RepoPrefix, workspaceID: c.req.WorkspaceID, projectID: c.req.ProjectID, config: cfg, logger: c.logger, registry: c.req.Registry}
 		opts := c.snap.RepoExtractionOptions[c.snap.Key.RepoPrefix]
 		idx.extractionOptions.Store(&opts)
 		idx.contractAnalysisOnly = true
@@ -1550,7 +1557,22 @@ func (c *contractConvergence) extract(idx *Indexer, evidence *contractFollowupEv
 	} else {
 		tree = contracts.ParseTreeForLang(file.Language, src)
 	}
+	if !projected && tree != nil && tree.Lang() == "go" {
+		unit.bodyBindingEligible = true
+		if err := c.snapshotBodyBindings(unit, nodes, tree, src); err != nil {
+			tree.Release()
+			return nil, err
+		}
+	}
+	if err := c.snapshotProviderSchemas(unit, nodes, tree, src); err != nil {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil, err
+	}
+	evidence.projectionValues = true
 	found := idx.collectContractRecordsForFile(file.Path, src, nodes, edges, byLanguage[file.Language], tree, evidence)
+	evidence.projectionValues = false
 	if tree != nil {
 		tree.Release()
 	}
@@ -2196,9 +2218,9 @@ func (c *contractConvergence) revalidate(paths []string) (proven []*contractUnit
 				return nil, nil, nil, err
 			}
 			if p.forced {
-				p.equal, p.askErr = c.replayObserved(evidence, reads, asked, askedOwners, func(owner string) { p.newOwners = append(p.newOwners, owner) })
+				p.equal, p.askErr = c.replayObserved(evidence, reads, asked, askedOwners, func(owner string) { p.newOwners = append(p.newOwners, owner) }, true)
 			} else {
-				p.equal, p.askErr = c.replayObserved(evidence, reads, asked, askedOwners, nil)
+				p.equal, p.askErr = c.replayObserved(evidence, reads, asked, askedOwners, nil, false)
 			}
 			if ctxErr := c.ctx.Err(); ctxErr != nil {
 				return nil, nil, nil, ctxErr
@@ -2345,11 +2367,22 @@ func (c *contractConvergence) replay(evidence *contractFollowupEvidence, reads [
 	return c.replayObserved(evidence, reads, asked, nil, nil)
 }
 
-func (c *contractConvergence) replayObserved(evidence *contractFollowupEvidence, reads []contractRecordedRead, asked map[string]string, owners map[string][]string, observe func(string)) (bool, error) {
+func (c *contractConvergence) replayObserved(evidence *contractFollowupEvidence, reads []contractRecordedRead, asked map[string]string, owners map[string][]string, observe func(string), forced ...bool) (bool, error) {
 	ledger := evidence.ledger
 	evidence.ledger = newContractUnitLedger()
 	defer func() { evidence.ledger = ledger }()
 	for _, read := range reads {
+		if c.mayCarryPositiveName(read, forced...) {
+			// Exact current selected declaration projection is the new proof;
+			// this carries no value/full-node/edge or semantic answer. Do not
+			// seed the per-pass physical dedup map from an exclusion proof.
+			if observe != nil {
+				for _, owner := range read.owners {
+					observe(owner)
+				}
+			}
+			continue
+		}
 		// One pass asks each distinct read once: units of a pass that looked
 		// up the same names compare against the same answer.
 		key := read.kind + "\x00" + strings.Join(read.args, "\x00")

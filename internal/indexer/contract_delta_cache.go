@@ -47,6 +47,7 @@ func newContractDeltaReceipt(boundary string, produced map[string]string) contra
 // Clock and unit rounds are one coordinate system and must travel together.
 type contractDeltaCache struct {
 	continuation             *contractFillContinuation
+	names                    *contractPositiveNameProjection
 	identity                 contractDeltaIdentity
 	units                    map[string]*contractUnit
 	live, excluded, suspect  map[string]bool
@@ -268,6 +269,8 @@ func cloneContractUnitsMode(in map[string]*contractUnit, copyRaw bool, pool ...*
 			continue
 		}
 		v := *u
+		v.bodyBindings = cloneContractBodyBindings(u.bodyBindings)
+		v.providerSchemas = cloneContractProviderSchemas(u.providerSchemas)
 		v.path = contractProofString(u.path, pool...)
 		v.rawDigest = contractProofString(u.rawDigest, pool...)
 		v.stamp = cloneContractDeltaStamp(u.stamp, pool...)

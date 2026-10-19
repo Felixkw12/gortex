@@ -77,11 +77,15 @@ func (s *Store) PublishContractAttachmentWithInputsContext(ctx context.Context, 
 // ContractAttachmentPublishTarget binds a captured input to its selected core
 // handle. Every handle in a batch must share the receiver's store core.
 type ContractAttachmentPublishTarget struct {
-	Store      *Store
-	Expected   graph.ContractInputState
-	Witnesses  []graph.ContractInputWitness
-	Attachment graph.ContractAttachment
-	Work       []graph.ContractWork
+	// ProjectionWitness is job-local proof of every selected physical input.
+	// Incremental consumers must capture it before their checked reads; it is
+	// never stored in an actor checkpoint or substituted for receipt/work CAS.
+	ProjectionWitness *PayloadInputWitness
+	Store             *Store
+	Expected          graph.ContractInputState
+	Witnesses         []graph.ContractInputWitness
+	Attachment        graph.ContractAttachment
+	Work              []graph.ContractWork
 }
 
 // ContractAttachmentPublication reports the immutable winning payload and the
@@ -136,6 +140,16 @@ func (s *Store) publishContractAttachments(ctx context.Context, targets []Contra
 		return nil, err
 	}
 	defer release()
+	// Validate all carried/recomputed projection inputs before opening the
+	// transaction. validateLocked uses this already-held gate and never
+	// reacquires it; a late selected metadata write refuses the whole cohort.
+	for _, target := range targets {
+		if witness := target.ProjectionWitness; witness != nil {
+			if err := witness.validateContractSelectionLocked(target.Store, ctx, target.Witnesses); err != nil {
+				return nil, err
+			}
+		}
+	}
 	tx, err := s.AtGeneration(0).beginWriteContext(ctx)
 	if err != nil {
 		return nil, err

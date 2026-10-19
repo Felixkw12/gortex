@@ -74,10 +74,11 @@ func (s *Store) EnableContractProjectionHistory(ctx context.Context, budgetBytes
 		}
 		return nil
 	}
-	instance := contractProjectionInstances.Add(1)
+	instance := s.contractProjectionIdentityLocked()
 	if instance == 0 {
 		return fmt.Errorf("%w: contract proof instance exhausted", ErrCatalogInvalidValue)
 	}
+
 	// Ring storage is charged before allocation; the rest is for owned domains.
 	count := min(256, int(budgetBytes/4/int64(unsafe.Sizeof(contractProjectionEvent{}))))
 	base := uint64(unsafe.Sizeof(contractProjectionHistory{})) + uint64(count)*uint64(unsafe.Sizeof(contractProjectionEvent{}))
@@ -122,7 +123,7 @@ func (s *Store) CaptureContractProjectionCursor(ctx context.Context) (ContractPr
 }
 
 func (s *Store) contractProjectionCursorLocked() ContractProjectionCursor {
-	return ContractProjectionCursor{instance: s.contractProjectionHistory.instance, generation: s.viewGen,
+	return ContractProjectionCursor{instance: s.contractProjectionInstance, generation: s.viewGen,
 		analysis: s.analysisViewCounter(s.viewGen).Load(), input: s.constantInputCounter(s.viewGen).Load(), bindings: s.semanticBindingInputCounter(s.viewGen).Load(), admin: s.payloadInputAdminRevision.Load()}
 }
 
@@ -271,4 +272,27 @@ func contractProjectionDomainValid(d ContractProjectionDomain) bool {
 		return true
 	}
 	return false
+}
+
+// CaptureContractProjectionClock is an equality-only, owned scalar observation.
+// It allocates no history and grants no domain exclusion, selected-view proof
+// or publication authority. A changed tuple always requires fresh evidence.
+func (s *Store) CaptureContractProjectionClock(ctx context.Context) (ContractProjectionCursor, error) {
+	if ctx == nil || s == nil || s.coreless() {
+		return ContractProjectionCursor{}, ErrCatalogInvalidValue
+	}
+	if err := s.writeMu.LockContext(ctx); err != nil {
+		return ContractProjectionCursor{}, err
+	}
+	defer s.writeMu.Unlock()
+	if s.contractProjectionIdentityLocked() == 0 {
+		return ContractProjectionCursor{}, ErrCatalogInvalidValue
+	}
+	return s.contractProjectionCursorLocked(), nil
+}
+func (s *Store) contractProjectionIdentityLocked() uint64 {
+	if s.contractProjectionInstance == 0 {
+		s.contractProjectionInstance = contractProjectionInstances.Add(1)
+	}
+	return s.contractProjectionInstance
 }

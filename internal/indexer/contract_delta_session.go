@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/viewmetrics"
 	"go.uber.org/zap"
@@ -17,6 +18,9 @@ import (
 // A session owns the actor's values exclusively while its LRU reservation
 // remains charged. Fresh evidence, postpasses and seeds belong only to the job.
 type contractDeltaSession struct {
+	currentNames                                                 *contractPositiveNameProjection
+	bodyQuestions                                                map[string][]contractBodyBindingQuestion
+	providerQuestions                                            map[string][]contracts.Contract
 	continued                                                    bool
 	adopted                                                      bool
 	cache                                                        *contractDeltaCache
@@ -104,6 +108,27 @@ func (s *contractDeltaSession) adopt(c *contractConvergence) {
 	if s.disabled || p == nil || p.identity != s.identity || p.deltas+1 >= contractDeltaRefresh {
 		return
 	}
+	// Preserve question identities before exclusive map adoption: removing a
+	// stale unit deliberately removes it from p.units too. Values are re-asked
+	// on the new accepted tree; this list carries no answer or authority.
+	s.providerQuestions = make(map[string][]contracts.Contract)
+	for path, unit := range p.units {
+		if unit != nil {
+			for _, answer := range unit.providerSchemas {
+				s.providerQuestions[path] = append(s.providerQuestions[path], answer.input)
+			}
+		}
+	}
+	s.bodyQuestions = make(map[string][]contractBodyBindingQuestion)
+	for path, unit := range p.units {
+		if unit != nil && unit.bodyBindingEligible && len(unit.bodyBindings) > 0 {
+			questions := make([]contractBodyBindingQuestion, 0, len(unit.bodyBindings))
+			for question := range unit.bodyBindings {
+				questions = append(questions, question)
+			}
+			s.bodyQuestions[path] = questions
+		}
+	}
 	c.units, c.live, c.excluded, c.suspect = p.units, p.live, p.excluded, p.suspect
 	c.retryOwners, c.declarers = p.retryOwners, p.declarers
 	c.clock, c.contentAt, c.maxContent, c.contents = p.clock, p.contentAt, p.maxContent, p.contents
@@ -171,6 +196,9 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 			p.deltas++
 		}
 	}
+	if complete {
+		p.names = s.completeNameProjection(c)
+	}
 	p.indexReaders()
 	// Immutable selected ancestry retains its original namespace debt after
 	// publication. Keep the same guarded continuation proof after a complete
@@ -184,11 +212,13 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 		}
 	}
 	// Charge proof structures without traversing unchanged raw metadata again.
+	optionalBytes := contractOptionalCheckpointSize(p)
 	proofUnits := make(map[string]*contractUnit, len(p.units))
 	for path, unit := range p.units {
 		v := *unit
 		v.raw = nil
 		v.router = nil
+		v.bodyBindings, v.providerSchemas = nil, nil
 		if v.ledgerAliases {
 			v.owners, v.keys = nil, nil
 		}
@@ -197,16 +227,18 @@ func (s *contractDeltaSession) finish(c *contractConvergence, complete bool) {
 	withoutUnits := *p
 	withoutUnits.units = nil
 	withoutUnits.continuation = nil
+	withoutUnits.names = nil
 	p.proofStringCount, p.proofStringBytes = pool.seal()
 	pooledBacking := p.proofStringBytes
-	p.retainedBytes = contractRetainedSizeMode(reflect.ValueOf(&withoutUnits), false) + contractRetainedSizeMode(reflect.ValueOf(proofUnits), false) + pooledBacking
+	p.retainedBytes = contractRetainedSizeMode(reflect.ValueOf(&withoutUnits), false) + contractRetainedSizeMode(reflect.ValueOf(proofUnits), false) + pooledBacking + optionalBytes
 	p.retainedBytes += p.continuation.metadataSize()
-	proofBytes := p.retainedBytes
 	rawBytes := int64(0)
 	for _, unit := range p.units {
 		p.retainedBytes += unit.retainedRawBytes
 		rawBytes += unit.retainedRawBytes
 	}
+	trimContractOptionalCheckpoint(p, contractDeltaCacheBudget)
+	proofBytes := p.retainedBytes - rawBytes
 	c.logger.Info("contract cache checkpoint", zap.String("reason", "prepared"), zap.Bool("cache_present", true), zap.Bool("complete", p.complete), zap.Int("units", len(p.units)), zap.Int64("retained_bytes", p.retainedBytes), zap.Int64("raw_bytes", rawBytes), zap.Int64("proof_bytes", proofBytes), zap.Int("receipts", len(p.receipts)), zap.Int("deltas", p.deltas), zap.Int("pooled_strings", p.proofStringCount), zap.Int64("pooled_backing_bytes", pooledBacking), zap.Int("declarer_queries", len(p.declarers.queries)), zap.Int("normalized_raw_units", s.normalizedRaw))
 	s.cache = p
 }

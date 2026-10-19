@@ -32,6 +32,14 @@ func (e *contractFollowupEvidence) endpointConstantCandidates(name, repoPrefix s
 	if e.err != nil {
 		return nil, e.err
 	}
+	if e.projectionValues && e.positiveCandidateValue != nil {
+		if out, ok := e.positiveCandidateValue(name, repoPrefix); ok {
+			if e.observedEndpointCandidates != nil {
+				e.observedEndpointCandidates(name, repoPrefix, out)
+			}
+			return out, nil
+		}
+	}
 	var out []contracts.EndpointConstantCandidate
 	count := 0
 	limited := false
@@ -72,6 +80,9 @@ func (e *contractFollowupEvidence) endpointConstantCandidates(name, repoPrefix s
 	}
 	if err != nil {
 		return nil, err
+	}
+	if e.err == nil && e.observedEndpointCandidates != nil {
+		e.observedEndpointCandidates(name, repoPrefix, out)
 	}
 	return out, e.err
 }

@@ -244,7 +244,8 @@ type storeCore struct {
 	payloadInputAdminRevision atomic.Uint64
 	// Contract proof history is dormant until a caller reserves a bounded
 	// portion of its existing cache budget. It owns data only, under writeMu.
-	contractProjectionHistory *contractProjectionHistory
+	contractProjectionHistory  *contractProjectionHistory
+	contractProjectionInstance uint64 // scalar process identity, guarded by writeMu
 	// analysisLatchRemaining is what the last scoped durable invalidation
 	// left for the latch: whether any view still holds a pointer or a
 	// building analysis. Guarded by writeMu.

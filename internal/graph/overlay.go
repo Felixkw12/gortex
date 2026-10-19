@@ -349,6 +349,10 @@ func NewOverlaidViewWithLayer(base Reader, layer OverlayLayerReader) *OverlaidVi
 // delta induced by the overlay.
 func (v *OverlaidView) Base() Reader { return v.base }
 
+// LayerReader borrows the immutable physical overlay used by checked
+// composition proofs. It grants no ownership or lifetime beyond this view.
+func (v *OverlaidView) LayerReader() OverlayLayerReader { return v.layer }
+
 // Layer exposes the per-session in-memory overlay layer, nil when the
 // view composes none (or composes a different layer implementation).
 // Diagnostic / debug tools use it to introspect what the overlay

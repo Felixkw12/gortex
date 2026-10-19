@@ -85,6 +85,9 @@ func logContractJob(logger *zap.Logger, mode, outcome string, elapsed time.Durat
 		zap.Int("pp_runs", cohort.EnrichRuns), zap.Int("pp_reruns", cohort.EnrichReruns), zap.Int("revalidated", cohort.Revalidated),
 		zap.Int("pp_rechecks", cohort.EnrichRechecks), zap.Int("pp_recheck_reads", cohort.EnrichRecheckReads),
 		zap.Int("content_kept", cohort.ContentKept),
+		zap.Int("owned_binding_hits", cohort.BodyBindingHits), zap.Int("owned_binding_snapshots", cohort.BodyBindingSnapshots),
+		zap.Int("owned_provider_hits", cohort.ProviderSchemaHits), zap.Int("owned_provider_snapshots", cohort.ProviderSchemaSnapshots),
+		zap.Int("name_projection_carries", cohort.NameProjectionCarries), zap.Int("name_projection_value_hits", cohort.NameProjectionValueHits),
 		// What the iterations after the first needed of a writer's quiet
 		// gap, and the gaps the writer left on the paths they waited on.
 		zap.Duration("w_need_sum", cohort.NeedSum), zap.Int("w_iterations", cohort.NeedIterations),

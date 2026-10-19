@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -293,6 +294,7 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 	// No raw-source pin fences the capture or its job: a job proves each read
 	// by the receipt stamps of the files it read (contract_stamp_scan.go), so
 	// a save to a file it never read cannot fail it.
+	inventoryProjection := newContractInventoryProjection(readers, handlesByRepo)
 	metaByPath := make(map[string]graph.FileMetaRow)
 	sources := make(map[string]source.ContentSource)
 	configs := make(map[string]config.IndexConfig)
@@ -344,7 +346,7 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 		if readers[repo] == nil || len(handlesByRepo[repo]) == 0 {
 			return ContractFollowupSnapshot{}, graph.ErrContractInputVector
 		}
-		selected, e := captureAcceptedContractInventory(ctx, readers[repo], handlesByRepo[repo], repo)
+		selected, e := inventoryProjection.read(ctx, repo)
 		if e != nil {
 			return ContractFollowupSnapshot{}, e
 		}
@@ -582,7 +584,7 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 		census := func(ctx context.Context) (map[string]bool, error) {
 			live := make(map[string]bool)
 			for _, repo := range repos {
-				rows, e := captureAcceptedContractInventory(ctx, readers[repo], handlesByRepo[repo], repo)
+				rows, e := inventoryProjection.read(ctx, repo)
 				if e != nil {
 					return nil, e
 				}
@@ -699,6 +701,58 @@ func captureAcceptedContractFiles(ctx context.Context, options ContractFollowupC
 		snapshot.Seeds = func(ctx context.Context, repo string) ([]*graph.Node, []*graph.Edge, bool, error) {
 			return readContractFollowupSeeds(ctx, readers[repo], handlesByRepo[repo], repo)
 		}
+	}
+	// Include every selected physical input, including absent-header ancestors.
+	// The existing immutable witness vector is also checked at publication, so
+	// this is projection/metadata authority in addition to receipt and work CAS.
+	projectionIDs := make([]int64, 0, len(handles))
+	selectedProjection := make(map[int64]bool)
+	// The outer handoff assigns snapshot.Inputs AFTER this helper returns.
+	// Use its already-captured leased vector, not the still-empty result field.
+	if options.selectedInputs != nil {
+		for _, input := range options.selectedInputs.Witnesses {
+			if !selectedProjection[input.GenerationID] {
+				selectedProjection[input.GenerationID] = true
+				projectionIDs = append(projectionIDs, input.GenerationID)
+			}
+		}
+	} else {
+		for _, repoHandles := range handlesByRepo {
+			for _, handle := range repoHandles {
+				if !selectedProjection[handle.ViewGeneration()] {
+					selectedProjection[handle.ViewGeneration()] = true
+					projectionIDs = append(projectionIDs, handle.ViewGeneration())
+				}
+			}
+		}
+	}
+	for _, repoHandles := range handlesByRepo {
+		for _, handle := range repoHandles {
+			if !selectedProjection[handle.ViewGeneration()] {
+				return snapshot, graph.ErrContractInputVector
+			}
+		}
+	}
+	sort.Slice(projectionIDs, func(i, j int) bool { return projectionIDs[i] < projectionIDs[j] })
+	snapshot.CaptureProjectionWitness = func(ctx context.Context) (*store_sqlite.PayloadInputWitness, error) {
+		return options.Store.CapturePayloadInputWitness(ctx, projectionIDs)
+	}
+	snapshot.positiveNameCapture = func(ctx context.Context, budget int64) (*contractPositiveNameProjection, error) {
+		return capturePositiveNames(ctx, readers, handlesByRepo, budget)
+	}
+	snapshot.positiveNameComplete = func(ctx context.Context, p *contractPositiveNameProjection, old *contractDeltaCache) bool {
+		var prior *contractPositiveNameProjection
+		if old != nil {
+			prior = old.names
+		}
+		return completePositivePrefixNames(ctx, readers, p, prior)
+	}
+	snapshot.positiveNameCurrent = func(ctx context.Context, p *contractPositiveNameProjection) bool {
+		if p == nil {
+			return false
+		}
+		clocks, err := positiveNameClocks(ctx, readers)
+		return err == nil && slices.Equal(clocks, p.clocks)
 	}
 	snapshot.ReadAccepted = read
 	snapshot.ReadCoreFile = func(ctx context.Context, file ContractFollowupFile) (ContractFollowupCoreFile, error) {

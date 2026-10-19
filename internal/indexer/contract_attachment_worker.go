@@ -49,11 +49,22 @@ type ContractFollowupCoreFile struct {
 // extractor bytes with their exact source/policy proof; it never falls back to current
 // filesystem bytes. The runner owns Release on every exit.
 type ContractFollowupSnapshot struct {
-	Key    graph.ContractAttachmentKey
-	Core   graph.Reader
-	Inputs []graph.ContractInputWitness
-	Work   []graph.ContractWork
-	Files  []ContractFollowupFile
+	// CaptureProjectionWitness captures exact selected physical inputs immediately
+	// before this job reads them. This callback and its job-local witness never
+	// enter the owned actor checkpoint; frozen/custom snapshots may omit it.
+	CaptureProjectionWitness func(context.Context) (*store_sqlite.PayloadInputWitness, error)
+	// projectionProofRequired is enabled only by a carried-value consumer. The
+	// original physical convergence path must not be pinned to one job-start
+	// generation revision: it can legitimately re-prove moving reads in R0/R1.
+	positiveNameCapture     func(context.Context, int64) (*contractPositiveNameProjection, error)
+	positiveNameCurrent     func(context.Context, *contractPositiveNameProjection) bool
+	positiveNameComplete    func(context.Context, *contractPositiveNameProjection, *contractDeltaCache) bool
+	projectionProofRequired bool
+	Key                     graph.ContractAttachmentKey
+	Core                    graph.Reader
+	Inputs                  []graph.ContractInputWitness
+	Work                    []graph.ContractWork
+	Files                   []ContractFollowupFile
 	// Excluded names the census paths whose accepted receipt is a failure
 	// envelope: they are not live, so no file of the job reads them.
 	Excluded []string
@@ -158,6 +169,10 @@ type ContractFollowupRequest struct {
 }
 
 type ContractFollowupReport struct {
+	NameProjectionCarries, NameProjectionValueHits             int
+	BodyBindingHits, BodyBindingObserved, BodyBindingSnapshots int
+	ProviderSchemaHits, ProviderSchemaSnapshots                int
+
 	Mode, CacheReason                                string
 	ChangedFiles                                     []string
 	Files, Records, Nodes, Edges, Shapes             int
@@ -242,15 +257,16 @@ type ContractFollowupBatchReport struct {
 }
 
 type contractFollowupPrepared struct {
-	publications []store_sqlite.ContractAttachmentPublishTarget
-	proof        *ContractPublishedCohort
-	coverage     contractCoveredWork
-	work         []graph.ContractWork
-	registry     *contracts.Registry
-	evidence     *contractFollowupEvidence
-	report       ContractFollowupReport
-	scratch      *store_sqlite.Store
-	scratchDir   string
+	projectionWitness *store_sqlite.PayloadInputWitness
+	publications      []store_sqlite.ContractAttachmentPublishTarget
+	proof             *ContractPublishedCohort
+	coverage          contractCoveredWork
+	work              []graph.ContractWork
+	registry          *contracts.Registry
+	evidence          *contractFollowupEvidence
+	report            ContractFollowupReport
+	scratch           *store_sqlite.Store
+	scratchDir        string
 }
 
 // RunContractFollowupBatch extracts and enriches the captured cohort once.
@@ -314,7 +330,7 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 	started := time.Now()
 	results, publishErr := prepared.publications[0].Store.PublishContractAttachmentsWithInputsContext(ctx, prepared.publications, started.Unix())
 	if publishErr != nil {
-		return fail(publishErr)
+		return fail(contractProjectionPublicationError(publishErr))
 	}
 	elapsed := time.Since(started)
 	for i, result := range results {
@@ -359,7 +375,7 @@ func runContractFollowupPrepared(ctx context.Context, req ContractFollowupReques
 	started := time.Now()
 	results, err := req.Catalog.PublishContractAttachmentsWithInputsContext(ctx, candidates, started.Unix())
 	if err != nil {
-		return report, err
+		return report, contractProjectionPublicationError(err)
 	}
 	acceptContractPublication(&report, results[0], time.Since(started))
 	return report, nil
@@ -407,6 +423,18 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 	}
 	registry, evidence := prepared.registry, prepared.evidence
 	if registry == nil {
+		if snap.projectionProofRequired {
+			if snap.CaptureProjectionWitness == nil {
+				return report, graph.ErrContractProjectionStale
+			}
+			prepared.projectionWitness, err = snap.CaptureProjectionWitness(ctx)
+			if err != nil {
+				return report, err
+			}
+			if prepared.projectionWitness == nil {
+				return report, graph.ErrContractProjectionStale
+			}
+		}
 		fileByPath := make(map[string]ContractFollowupFile, len(snap.Files))
 		repos := make(map[string]bool)
 		for _, w := range snap.Inputs {
@@ -434,6 +462,26 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 			scopes[file.RepoPrefix] = [2]string{file.WorkspaceID, file.ProjectID}
 		}
 		prepareStart := time.Now()
+		var nameWitness *store_sqlite.PayloadInputWitness
+		if req.delta != nil && snap.positiveNameCapture != nil && snap.CaptureProjectionWitness != nil {
+			budget := int64(1 << 20)
+			if req.delta.cache != nil {
+				budget = min(budget, contractDeltaCacheBudget-req.delta.cache.retainedBytes)
+			}
+			if budget >= 4096 {
+				nameWitness, err = snap.CaptureProjectionWitness(ctx)
+				if err == nil {
+					req.delta.currentNames, err = snap.positiveNameCapture(ctx, budget)
+				}
+				if ctx.Err() != nil {
+					return report, ctx.Err()
+				}
+				if err != nil {
+					req.delta.currentNames = nil
+				}
+			}
+		}
+
 		req.coverageWork = prepared.work
 		if req.coverageWork == nil {
 			req.coverageWork = snap.Work
@@ -448,6 +496,12 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 			// engine; keep it for the batch failure's mode and work metrics.
 			prepared.report = report
 			return report, runErr
+		}
+		if report.NameProjectionCarries > 0 || report.NameProjectionValueHits > 0 {
+			if nameWitness == nil {
+				return report, graph.ErrContractProjectionStale
+			}
+			prepared.projectionWitness = nameWitness
 		}
 		prepared.coverage = engine.coverage.sealed
 		prepared.proof = contractPublishedProof(snap.Inputs, engine.clock, snap.Key.CheckoutID)
@@ -625,7 +679,7 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 	attachment := graph.ContractAttachment{RepoPrefix: snap.Key.RepoPrefix, CheckoutID: snap.Key.CheckoutID, InputVersion: snap.Key.InputVersion, InputFingerprint: snap.Key.InputFingerprint, PayloadGeneration: generation, CompletedTokens: tokens}
 	report.PayloadDuration = time.Since(payloadStart)
 	prepared.publications = append(prepared.publications, store_sqlite.ContractAttachmentPublishTarget{
-		Store: req.Catalog, Expected: logical, Witnesses: snap.Inputs, Attachment: attachment, Work: covered,
+		Store: req.Catalog, Expected: logical, Witnesses: snap.Inputs, Attachment: attachment, Work: covered, ProjectionWitness: prepared.projectionWitness,
 	})
 	return report, nil
 }
@@ -634,6 +688,9 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 // a later target's report.
 func contractPreparedReport(report, prepared ContractFollowupReport) ContractFollowupReport {
 	report.Mode, report.CacheReason, report.ChangedFiles, report.RebuildReason = prepared.Mode, prepared.CacheReason, prepared.ChangedFiles, prepared.RebuildReason
+	report.BodyBindingHits, report.BodyBindingObserved, report.BodyBindingSnapshots = prepared.BodyBindingHits, prepared.BodyBindingObserved, prepared.BodyBindingSnapshots
+	report.NameProjectionCarries, report.NameProjectionValueHits = prepared.NameProjectionCarries, prepared.NameProjectionValueHits
+	report.ProviderSchemaHits, report.ProviderSchemaSnapshots = prepared.ProviderSchemaHits, prepared.ProviderSchemaSnapshots
 	report.Files = prepared.Files
 	report.SourceReads = prepared.SourceReads
 	report.SourceBytes = prepared.SourceBytes
@@ -988,12 +1045,15 @@ type contractFollowupEvidence struct {
 	// guard brackets every read the facade answers from the core.
 	guard *contractReadGuard
 	// semantic answers binding-type lookups from the selected core.
-	semantic         graph.SemanticBindingTypeReader
-	readCore         func(context.Context, ContractFollowupFile) (ContractFollowupCoreFile, error)
-	allowedRepos     map[string]bool
-	loaded           map[string]bool
-	loadedExtraction map[string]bool
-	loadedFileNodes  map[string]bool
+	semantic                   graph.SemanticBindingTypeReader
+	readCore                   func(context.Context, ContractFollowupFile) (ContractFollowupCoreFile, error)
+	allowedRepos               map[string]bool
+	observedEndpointCandidates func(string, string, []contracts.EndpointConstantCandidate)
+	positiveCandidateValue     func(string, string) ([]contracts.EndpointConstantCandidate, bool)
+	projectionValues           bool
+	loaded                     map[string]bool
+	loadedExtraction           map[string]bool
+	loadedFileNodes            map[string]bool
 	// Completed names belong to this private, single-worker captured evidence.
 	// Keep raw row counts so cached names still consume the request's budget;
 	// scratch results and final accepted-source fences remain live.
@@ -1724,4 +1784,13 @@ func (e *contractFollowupEvidence) constantValues(ids []string) (map[string]stri
 		}
 	}
 	return out, files, err
+}
+
+// Selected row movement is the existing stale/supersession path, not a new
+// failure/retirement policy. Keep the store cause available to diagnostics.
+func contractProjectionPublicationError(err error) error {
+	if errors.Is(err, store_sqlite.ErrPayloadInputChanged) {
+		return fmt.Errorf("%w: %w", graph.ErrContractProjectionStale, err)
+	}
+	return err
 }

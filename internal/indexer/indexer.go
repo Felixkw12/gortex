@@ -342,6 +342,12 @@ type Indexer struct {
 
 	// contractRegistry holds detected API contracts (HTTP routes, gRPC, etc.).
 	contractRegistry *contracts.Registry
+	// Job-local owned binding projections are supplied only by the contract
+	// convergence worker. Legacy/ordinary indexing keeps these hooks nil.
+	contractProviderValue    func(contracts.Contract, []*graph.Node) (map[string]any, bool)
+	contractProviderObserved func(contracts.Contract, []*graph.Node, map[string]any)
+	contractBindingValue     func(*graph.Node, string) (contracts.Binding, bool)
+	contractBindingObserved  func(*graph.Node, string, contracts.Binding)
 	// contractRegistrySeed defers immutable-stack hydration until an edit
 	// actually needs the complete repository registry.
 	contractRegistrySeed           func()
@@ -7887,23 +7893,7 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 	for _, item := range resolvedTodo {
 		p := item.pending
 		handlerNode := item.handler
-		src, ok := fileSrc[handlerNode.FilePath]
-		if !ok {
-			// Cache misses too (nil) — one read attempt per file.
-			src = idx.contractFileSrc(handlerNode.FilePath)
-			fileSrc[handlerNode.FilePath] = src
-		}
-		if src == nil {
-			continue
-		}
 		nodes := handlerFileNodes[handlerNode.FilePath]
-
-		lang := detectLangFromPath(handlerNode.FilePath)
-		tree, treeReady := fileTrees[handlerNode.FilePath]
-		if !treeReady {
-			tree = contracts.ParseTreeForLang(lang, src)
-			fileTrees[handlerNode.FilePath] = tree
-		}
 
 		// Re-run enrichment. EnrichHTTPContractWithTree reads the
 		// contract's SymbolID to locate the handler body range — swap
@@ -7938,8 +7928,35 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 			// Drop prior path_params so the enricher's fresh pass
 			// repopulates consistently (path hasn't changed, but we
 			// want the call-path to be identical to Stage 1).
-			lines := splitLines(src)
-			contracts.EnrichHTTPContractWithTree(&patched, lines, nodes, lang, tree)
+			var owned bool
+			if idx.contractProviderValue != nil {
+				if meta, ok := idx.contractProviderValue(patched, nodes); ok {
+					patched.Meta, owned = meta, true
+				}
+			}
+			if !owned {
+				src, ok := fileSrc[handlerNode.FilePath]
+				if !ok {
+					src = idx.contractFileSrc(handlerNode.FilePath)
+					fileSrc[handlerNode.FilePath] = src
+				}
+				if src == nil {
+					continue
+				}
+				lang := detectLangFromPath(handlerNode.FilePath)
+				tree, ready := fileTrees[handlerNode.FilePath]
+				if !ready {
+					tree = contracts.ParseTreeForLang(lang, src)
+					fileTrees[handlerNode.FilePath] = tree
+				}
+				before := cloneContractRecords([]contracts.Contract{patched})[0]
+				contracts.EnrichHTTPContractWithTree(&patched, splitLines(src), nodes, lang, tree)
+				if idx.contractProviderObserved != nil && contracts.NativeGoBodyFactsFactory() && tree != nil && tree.Lang() == "go" {
+					if _, native := contracts.OwnedGoVarBinding(contracts.MakeBodyFacts(tree, handlerNode), ""); native {
+						idx.contractProviderObserved(before, nodes, patched.Meta)
+					}
+				}
+			}
 			patched.FilePath = registrationFile
 			delete(patched.Meta, "handler_ident")
 			delete(patched.Meta, "handler_trail")
@@ -8491,7 +8508,6 @@ func (idx *Indexer) prepareContractTypeResolution(
 			continue
 		}
 		handlerNode := handlers[c.SymbolID]
-		bf := bfCache.For(handlerNode)
 		// binding.Line comes from the handler's body, and the compiler
 		// bindings this site is looked up against are stored under the
 		// handler's own source file. c.FilePath names the registration site,
@@ -8507,7 +8523,19 @@ func (idx *Indexer) prepareContractTypeResolution(
 			if _, exists := resolution.bindings[key]; exists {
 				continue
 			}
-			binding := bf.VarBinding(name)
+			binding, owned := contracts.Binding{}, false
+			if idx.contractBindingValue != nil {
+				binding, owned = idx.contractBindingValue(handlerNode, name)
+			}
+			if !owned {
+				bf := bfCache.For(handlerNode)
+				binding = bf.VarBinding(name)
+				if idx.contractBindingObserved != nil {
+					if value, native := contracts.OwnedGoVarBinding(bf, name); native {
+						idx.contractBindingObserved(handlerNode, name, value)
+					}
+				}
+			}
 			resolution.bindings[key] = binding
 			if binding.Line <= 0 {
 				continue
