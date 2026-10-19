@@ -894,6 +894,14 @@ func (idx *Indexer) coordinateRepositoryReindex(
 // source gate is taken after batch admission and the repository lane, which is
 // the order graphview's raw mutation API requires.
 func (idx *Indexer) coordinateRepositoryMutation(ctx context.Context, entry OutputMutationEntry, fn func() error) error {
+	// External primary watcher patches carry no checkout refresh ticket. Keep
+	// their upcoming writes visible through lane admission and the read/resolve
+	// gaps between transactions, so background work cannot mistake them for an
+	// idle store. Cold indexing and other mutation entries retain their policy.
+	if entry == OutputEntryWatcherPatchGraph && fn != nil && idx.primaryWatcherWriteIntent != nil {
+		release := idx.primaryWatcherWriteIntent()
+		defer release()
+	}
 	return idx.repositoryMutations().runExclusive(ctx, func() error {
 		return idx.withOutputGeneration(ctx, entry, fn)
 	})

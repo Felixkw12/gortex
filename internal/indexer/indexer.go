@@ -194,6 +194,10 @@ type Indexer struct {
 	deferredAttempt      *deferredPassAttempt
 
 	graph graph.Store
+	// primaryWatcherWriteIntent is captured from the original durable store at
+	// construction. Reading graph before repository-lane admission would race
+	// a cold index temporarily replacing it with an in-memory shadow.
+	primaryWatcherWriteIntent func() func()
 	// Contract followups use accepted selected-view evidence exclusively. These
 	// fields are installed only on the private analysis Indexer, never the core
 	// publisher; a missing source callback is an incomplete analysis input.
@@ -732,6 +736,9 @@ func New(g graph.Store, reg *parser.Registry, cfg config.IndexConfig, logger *za
 		fileMtimes:    make(map[string]int64),
 		contractCache: make(map[string]*contractCacheEntry),
 		cloneIndex:    newIncrementalCloneIndex(),
+	}
+	if store, ok := g.(*store_sqlite.Store); ok {
+		idx.primaryWatcherWriteIntent = store.AnnounceWrite
 	}
 	// Resolve JS/TS imports declared through an npm alias against the
 	// local index. The index is built lazily on first use — the repo
