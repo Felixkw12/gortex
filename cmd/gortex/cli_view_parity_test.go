@@ -293,7 +293,14 @@ func (f *parityFixture) cliView(t *testing.T, path string) *daemon.ProbeView {
 // resolveRequestView.
 func (f *parityFixture) mcpRider(t *testing.T, cwd string) map[string]any {
 	t.Helper()
-	sess := &daemon.Session{ID: "sess-parity-" + filepath.Base(cwd), CWD: cwd}
+	// This fixture deliberately calls a legacy tool. Forward the same policy
+	// as the CLI; an unconfigured MCP connection gets the compact surface.
+	sess := &daemon.Session{
+		ID:       "sess-parity-" + filepath.Base(cwd),
+		CWD:      cwd,
+		ToolSpec: cliLegacyToolSurface,
+		ToolMode: cliLegacyToolMode,
+	}
 	frame := []byte(`{"jsonrpc":"2.0","id":31,"method":"tools/call",` +
 		`"params":{"name":"graph_stats","arguments":{"format":"json"}}}`)
 	reply, err := f.dispatcher.Dispatch(context.Background(), sess, frame)
