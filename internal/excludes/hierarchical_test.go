@@ -244,3 +244,58 @@ func TestHierarchicalForgetRereadsIgnoreFile(t *testing.T) {
 		t.Fatal("Forget must reread the folder's ignore file")
 	}
 }
+
+// A folder moved away and replaced by another tree must not keep the old
+// tree's rules at any depth.
+func TestHierarchicalForgetDropsDescendants(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	mkIgnore(t, filepath.Join(sub, "nested", ".gortexignore"), "gen/\n")
+	h := NewHierarchical(root, ".gortexignore")
+	target := filepath.Join(sub, "nested", "gen", "x.go")
+	if !h.Match(target, false) {
+		t.Fatal("nested rule applies")
+	}
+	if err := os.RemoveAll(sub); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sub, "nested", "gen"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.Forget(sub)
+	if h.Match(target, false) {
+		t.Fatal("Forget(sub) must drop the cached rules of sub/nested")
+	}
+	// Forget on a path that is not cached, such as a removed file, leaves
+	// the other entries alone.
+	h.Forget(filepath.Join(root, "other.go"))
+	h.mu.RLock()
+	n := len(h.cache)
+	h.mu.RUnlock()
+	if n != 4 {
+		t.Fatalf("cache entries = %d, want root, sub, sub/nested and sub/nested/gen", n)
+	}
+}
+
+// A folder is cached only after its parent, which lets Forget skip the
+// scan for a folder that is not cached.
+func TestHierarchicalCachesFolderOnlyAfterParent(t *testing.T) {
+	root := t.TempDir()
+	h := NewHierarchical(root, ".gortexignore")
+	sub := filepath.Join(root, "sub")
+	h.dirMatcher(sub)
+	h.mu.RLock()
+	_, ok := h.cache[sub]
+	h.mu.RUnlock()
+	if ok {
+		t.Fatal("sub cached before root")
+	}
+	h.dirMatcher(root)
+	h.dirMatcher(sub)
+	h.mu.RLock()
+	_, ok = h.cache[sub]
+	h.mu.RUnlock()
+	if !ok {
+		t.Fatal("sub not cached after root")
+	}
+}

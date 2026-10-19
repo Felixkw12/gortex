@@ -483,6 +483,51 @@ func TestWatcherAgentConfigUserExcludes(t *testing.T) {
 	kiro := filepath.Join(root, ".kiro", "mcp.json")
 	writeExcludeFixture(t, kiro, `{"mcpServers":{}}`)
 	assert.False(t, w.isExcluded(kiro), "an MCP config no user rule names stays admitted")
+
+	// A user exclude spelled exactly like the Builtin line still applies.
+	userCopy := append(append([]string{}, excludes.Builtin...), ".kiro/")
+	idx = newAdmissionTestIndexer(t, root, ".kiro/")
+	w, err = NewWatcher(idx, config.WatchConfig{Exclude: userCopy}, zap.NewNop())
+	require.NoError(t, err)
+	assert.True(t, idx.shouldExclude(kiro, root, false))
+	assert.True(t, w.isExcluded(kiro))
+}
+
+// Ignore-file events pass the backend filter even when the user excludes
+// the ignore file, so removing a rule still re-includes its files. An
+// ignore file in a pruned folder updates the cache but starts no scan.
+func TestWatcherIgnoreFileEventsPassBackendFilter(t *testing.T) {
+	root := t.TempDir()
+	ignore := filepath.Join(root, ".gortexignore")
+	writeExcludeFixture(t, ignore, "generated/\n")
+	generated := filepath.Join(root, "generated", "x.go")
+	writeExcludeFixture(t, generated, "package generated\n")
+	patterns := append(append([]string{}, excludes.Builtin...), ".gortexignore")
+	idx := newAdmissionTestIndexer(t, root, ".gortexignore")
+	w, err := NewWatcher(idx, config.WatchConfig{Exclude: patterns}, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { w.signalStopped(); require.NoError(t, w.Stop()) })
+	require.True(t, w.isExcluded(generated))
+
+	filter := &watcherExcludeFilter{w: w}
+	assert.True(t, filter.ShouldInclude(ignore))
+	assert.True(t, w.isExcluded(ignore), "the ignore file itself stays out of the index")
+
+	scans := make(chan map[string]struct{}, 2)
+	w.scanFn = func(dirs map[string]struct{}) { scans <- dirs }
+	writeExcludeFixture(t, ignore, "")
+	w.handleEvent(fswatcher.WatchEvent{Path: ignore, Types: []fswatcher.EventType{fswatcher.EventMod}})
+	w.asyncWork.Wait()
+	assert.False(t, w.isExcluded(generated), "removing the rule re-includes the file")
+	require.Len(t, scans, 1)
+	<-scans
+
+	pruned := filepath.Join(root, "node_modules", "pkg", ".gortexignore")
+	writeExcludeFixture(t, pruned, "*.js\n")
+	assert.True(t, filter.ShouldInclude(pruned))
+	w.handleEvent(fswatcher.WatchEvent{Path: pruned, Types: []fswatcher.EventType{fswatcher.EventCreate}})
+	w.asyncWork.Wait()
+	assert.Empty(t, scans, "a folder the rules prune is not rescanned")
 }
 
 // An edited ignore file takes effect at once: the watcher drops the

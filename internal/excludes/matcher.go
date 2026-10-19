@@ -18,8 +18,10 @@ type Matcher struct {
 	// patterns with uncertain syntax retain their original compiled matcher.
 	requiredLiterals []string
 	unfiltered       *ignore.GitIgnore
-	// Positive patterns proven to cover a matched directory and all its children.
-	// Blank entries preserve line numbers in patterns.
+	// Positive patterns proven to cover a matched directory and all its
+	// children, from the lines after the first usable negation; earlier
+	// excludes cannot override it. Blank entries preserve line numbers in
+	// patterns. Nil when no such exclude exists.
 	subtreeExcludes *ignore.GitIgnore
 	negations       []parsedNegation
 	// Whether any anchored negation exists, so the watcher check can return
@@ -146,6 +148,14 @@ func (m *Matcher) Patterns() []string {
 	out := make([]string, len(m.patterns))
 	copy(out, m.patterns)
 	return out
+}
+
+// patternCount reports how often pattern occurs in the cleaned list.
+func (m *Matcher) patternCount(pattern string) int {
+	if m == nil {
+		return 0
+	}
+	return countOf(m.patterns, pattern)
 }
 
 // MatchRel reports whether a repo-root-relative path is excluded.

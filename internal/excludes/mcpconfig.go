@@ -3,6 +3,7 @@ package excludes
 import (
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -61,16 +62,26 @@ func IsAgentConfigMCPFile(relPath string) bool {
 	return IsMCPConfigFile(rel) && IsAgentConfigMCPDir(path.Dir(rel))
 }
 
-// IsAgentConfigRootPattern reports whether pattern is the Builtin line that
-// excludes an agent-config root wholesale. The MCP config exception lifts
-// only these lines, so a user's own exclude still applies.
-func IsAgentConfigRootPattern(pattern string) bool {
-	for _, root := range agentConfigRoots {
-		if pattern == root+"/" {
-			return true
+// IsBuiltinAgentConfigRule reports whether pattern, a rule m matched, is
+// only the Builtin line that excludes an agent-config root wholesale. The
+// MCP config exception lifts only that line, so a user's own exclude still
+// applies, even one spelled like the Builtin line: an exclude list that
+// holds the line more often than Builtin does carries a user copy of it.
+func IsBuiltinAgentConfigRule(m *Matcher, pattern string) bool {
+	if !slices.ContainsFunc(agentConfigRoots, func(root string) bool { return pattern == root+"/" }) {
+		return false
+	}
+	return m.patternCount(pattern) <= countOf(Builtin, pattern)
+}
+
+func countOf(patterns []string, pattern string) int {
+	n := 0
+	for _, p := range patterns {
+		if p == pattern {
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 // IsMCPConfigFile reports whether a path's basename is a recognised MCP

@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/zzet/gortex/internal/excludes"
@@ -37,6 +38,12 @@ func (f *watcherExcludeFilter) ShouldInclude(path string) bool {
 	root := f.w.indexer.rootPath
 	if root == "" {
 		return !f.w.excludes.MatchRel(path)
+	}
+	// An ignore file's events keep the per-folder rule cache current, even
+	// when the file itself is excluded; the full check still keeps it out
+	// of the index.
+	if slices.Contains(dirIgnoreFiles, filepath.Base(path)) {
+		return true
 	}
 	rel, err := filepath.Rel(root, path)
 	// Defer MCP config paths and potentially re-included subtrees to the

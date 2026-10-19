@@ -45,18 +45,36 @@ func NewHierarchical(root string, filenames ...string) *Hierarchical {
 	}
 }
 
-// Forget drops the cached rules of one directory, so the next check reads
-// its ignore files again. Call it when an ignore file in absDir is created,
-// changed or deleted, or when absDir itself is removed. Each directory's
-// entry holds only its own files' rules, so no other entry goes stale.
+// Forget drops the cached rules of absDir and of every folder beneath it,
+// so the next check reads their ignore files again. Call it when an ignore
+// file in absDir is created, changed or deleted, or when absDir is removed
+// or renamed: a folder moved away and replaced by another tree may bring
+// different ignore files at any depth.
+//
+// A folder is cached only after its parent (see dirMatcher), so when absDir
+// is not cached nothing beneath it is either, and Forget costs one map
+// lookup. That keeps file removals, which also call Forget, cheap.
 func (h *Hierarchical) Forget(absDir string) {
 	if h == nil {
 		return
 	}
+	dir := filepath.Clean(absDir)
 	h.mu.Lock()
-	delete(h.cache, filepath.Clean(absDir))
+	defer h.mu.Unlock()
 	h.forgets++
-	h.mu.Unlock()
+	if _, ok := h.cache[dir]; !ok {
+		return
+	}
+	prefix := dir + string(filepath.Separator)
+	if dir == h.root {
+		clear(h.cache)
+		return
+	}
+	for key := range h.cache {
+		if key == dir || strings.HasPrefix(key, prefix) {
+			delete(h.cache, key)
+		}
+	}
 }
 
 // Match reports whether an absolute path is excluded by an ignore file
@@ -193,11 +211,20 @@ func (h *Hierarchical) dirMatcher(dir string) *Matcher {
 	}
 
 	h.mu.Lock()
-	if h.forgets == forgets {
+	// Store only when no Forget ran since the read and the parent is
+	// cached, so a cached folder always has cached ancestors and Forget
+	// can skip folders that are not cached.
+	if h.forgets == forgets && (dir == h.root || h.cached(filepath.Dir(dir))) {
 		h.cache[dir] = m
 	}
 	h.mu.Unlock()
 	return m
+}
+
+// cached reports whether dir has an entry. The caller holds h.mu.
+func (h *Hierarchical) cached(dir string) bool {
+	_, ok := h.cache[dir]
+	return ok
 }
 
 // readIgnoreFile reads one ignore file and returns its non-blank,

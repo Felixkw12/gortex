@@ -2971,8 +2971,10 @@ func (w *Watcher) isExcluded(path string) bool {
 // forgetDirIgnores keeps the per-folder ignore cache current as the
 // watcher sees ignore files and folders change. An edited, created or
 // deleted ignore file drops its folder's cached rules and rescans the
-// folder, so files the change re-includes are indexed. A removed folder
-// drops its entry, which keeps short-lived build folders from piling up.
+// folder, so files the change re-includes are indexed. A removed or
+// renamed folder drops its entry and those beneath it, so a tree moved
+// into its place gets its own rules and short-lived build folders do not
+// pile up.
 func (w *Watcher) forgetDirIgnores(path string, types []fswatcher.EventType) {
 	perFolder := w.indexer.perFolderIgnores(w.indexer.rootPath)
 	if perFolder == nil {
@@ -2981,7 +2983,10 @@ func (w *Watcher) forgetDirIgnores(path string, types []fswatcher.EventType) {
 	if slices.Contains(dirIgnoreFiles, filepath.Base(path)) {
 		dir := filepath.Dir(path)
 		perFolder.Forget(dir)
-		w.enqueueDirScan(dir)
+		// A folder the rules prune is not rescanned: its files stay out.
+		if !w.isExcluded(dir) {
+			w.enqueueDirScan(dir)
+		}
 		return
 	}
 	if hasEventType(types, fswatcher.EventRemove) || hasEventType(types, fswatcher.EventRename) {
