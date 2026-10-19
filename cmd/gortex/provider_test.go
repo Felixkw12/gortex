@@ -143,3 +143,22 @@ func TestProviderListShow_Presets(t *testing.T) {
 		t.Errorf("show <preset> output:\n%s", out)
 	}
 }
+
+// TestProviderAdd_PresetNameOverrides pins that a preset name is not
+// reserved: `provider add requesty` registers a user entry, which list
+// and show report as replacing the preset.
+func TestProviderAdd_PresetNameOverrides(t *testing.T) {
+	isolateProviders(t)
+	if _, err := runProviderAddWith(t, "requesty", map[string]string{
+		"preset": "requesty", "base-url": "https://proxy.internal/v1",
+	}); err != nil {
+		t.Fatalf("a preset name must be registrable: %v", err)
+	}
+	if out := runProviderListOut(t); !strings.Contains(out, "requesty (overridden)") {
+		t.Errorf("list should mark the overridden preset:\n%s", out)
+	}
+	out := runProviderShowOut(t, "requesty")
+	if !strings.Contains(out, "replaces the gateway preset") || !strings.Contains(out, "https://proxy.internal/v1") {
+		t.Errorf("show should report the user entry:\n%s", out)
+	}
+}

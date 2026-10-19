@@ -43,6 +43,32 @@ func Preset(name string) (CustomProvider, bool) {
 	return cp, true
 }
 
+// withLegacyPresetBlock overlays a preset's pre-preset config block —
+// `llm.requesty:` from when requesty was a built-in — on the preset
+// defaults, so existing configs resolve to exactly the endpoint, model,
+// key and effort they did before. Set fields win over the preset.
+func (c Config) withLegacyPresetBlock(name string, cp CustomProvider) CustomProvider {
+	if name != "requesty" {
+		return cp
+	}
+	r := c.Requesty
+	if v := strings.TrimSpace(r.Model); v != "" {
+		cp.Model = v
+	}
+	if v := strings.TrimSpace(r.APIKeyEnv); v != "" {
+		cp.APIKeyEnv = v
+	}
+	if v := strings.TrimSpace(r.BaseURL); v != "" {
+		// The built-in accepted the router URL with or without its "/v1"
+		// segment and always called "<host>/v1/chat/completions".
+		cp.BaseURL = strings.TrimSuffix(strings.TrimRight(v, "/"), "/v1") + "/v1"
+	}
+	if v := strings.TrimSpace(r.Effort); v != "" {
+		cp.ReasoningEffort = v
+	}
+	return cp
+}
+
 // PresetNames returns the gateway preset names, sorted.
 func PresetNames() []string {
 	names := make([]string, 0, len(gatewayPresets))

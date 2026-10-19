@@ -10,7 +10,6 @@ func TestProfileForProvider(t *testing.T) {
 		"gemini":    ProfileFrontier,
 		"bedrock":   ProfileFrontier,
 		"deepseek":  ProfileFrontier,
-		"requesty":  ProfileFrontier,
 		"local":     ProfileSmall,
 		"ollama":    ProfileSmall,
 		"":          ProfileSmall,
@@ -107,6 +106,7 @@ func TestProfileFor_CustomProviderPromptProfile(t *testing.T) {
 		"custom invalid is small": {custom("huge"), ProfileSmall},
 		"builtin anthropic":       {Config{Provider: "anthropic"}, ProfileFrontier},
 		"builtin local":           {Config{}, ProfileSmall},
+		"requesty preset":         {Config{Provider: "requesty"}, ProfileFrontier},
 		"unregistered name":       {Config{Provider: "nope"}, ProfileSmall},
 	}
 	for name, tc := range cases {

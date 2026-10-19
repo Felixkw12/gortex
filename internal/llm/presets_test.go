@@ -85,3 +85,57 @@ func TestConfig_ActiveCustom_PresetResolution(t *testing.T) {
 		t.Error("built-in provider must not resolve to a preset")
 	}
 }
+
+// TestConfig_RequestyLegacyBlockEquivalence pins that configs written
+// for the former requesty built-in resolve to the same endpoint, model,
+// key env, effort, schema mode and prompt tier through the preset.
+func TestConfig_RequestyLegacyBlockEquivalence(t *testing.T) {
+	cases := []struct {
+		name   string
+		block  RemoteConfig
+		url    string // base_url + "/chat/completions", as the built-in called it
+		model  string
+		keyEnv string
+		effort string
+	}{
+		{"defaults", RemoteConfig{}, "https://router.requesty.ai/v1/chat/completions", "openai/gpt-4o-mini", "REQUESTY_API_KEY", ""},
+		{"model and effort", RemoteConfig{Model: "anthropic/claude-sonnet-4-5", Effort: "high"}, "https://router.requesty.ai/v1/chat/completions", "anthropic/claude-sonnet-4-5", "REQUESTY_API_KEY", "high"},
+		{"key env", RemoteConfig{APIKeyEnv: "MY_REQUESTY_KEY"}, "https://router.requesty.ai/v1/chat/completions", "openai/gpt-4o-mini", "MY_REQUESTY_KEY", ""},
+		{"eu base with v1", RemoteConfig{BaseURL: "https://router.eu.requesty.ai/v1"}, "https://router.eu.requesty.ai/v1/chat/completions", "openai/gpt-4o-mini", "REQUESTY_API_KEY", ""},
+		{"base without v1", RemoteConfig{BaseURL: "https://router.requesty.ai"}, "https://router.requesty.ai/v1/chat/completions", "openai/gpt-4o-mini", "REQUESTY_API_KEY", ""},
+		{"base with v1 slash", RemoteConfig{BaseURL: "https://router.requesty.ai/v1/"}, "https://router.requesty.ai/v1/chat/completions", "openai/gpt-4o-mini", "REQUESTY_API_KEY", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Config{Provider: "requesty", Requesty: tc.block}.ApplyDefaults()
+			cp, ok := c.ActiveCustom()
+			if !ok {
+				t.Fatal("requesty did not resolve")
+			}
+			if got := cp.BaseURL + "/chat/completions"; got != tc.url {
+				t.Errorf("url=%q want %q", got, tc.url)
+			}
+			if cp.Model != tc.model || cp.APIKeyEnv != tc.keyEnv || cp.ReasoningEffort != tc.effort {
+				t.Errorf("model=%q key=%q effort=%q, want %q %q %q", cp.Model, cp.APIKeyEnv, cp.ReasoningEffort, tc.model, tc.keyEnv, tc.effort)
+			}
+			if cp.SchemaMode != "json_schema" || ProfileFor(c) != ProfileFrontier || !c.IsEnabled() {
+				t.Errorf("schema=%q profile=%v enabled=%v", cp.SchemaMode, ProfileFor(c), c.IsEnabled())
+			}
+		})
+	}
+}
+
+// TestConfig_RequestyUserCustomWins pins the safety property: a user
+// custom provider named requesty replaces both the preset and the legacy
+// block.
+func TestConfig_RequestyUserCustomWins(t *testing.T) {
+	c := Config{
+		Provider: "requesty",
+		Requesty: RemoteConfig{Model: "legacy-model", BaseURL: "https://legacy.example"},
+		Custom:   map[string]CustomProvider{"requesty": {BaseURL: "https://mine.example/v1", Model: "my-model"}},
+	}
+	cp, ok := c.ActiveCustom()
+	if !ok || cp.BaseURL != "https://mine.example/v1" || cp.Model != "my-model" || cp.APIKeyEnv != "" {
+		t.Errorf("user entry must win over preset and legacy block: %+v", cp)
+	}
+}

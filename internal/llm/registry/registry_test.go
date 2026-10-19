@@ -207,3 +207,18 @@ func TestAdd_PromptProfile(t *testing.T) {
 		t.Errorf("Get gw: %+v ok=%v err=%v, want prompt_profile frontier", cp, ok, err)
 	}
 }
+
+// TestAdd_PresetNameAllowedAndWins pins that a preset name is not
+// reserved: the user may register "requesty", and the merged entry
+// replaces the gateway preset.
+func TestAdd_PresetNameAllowedAndWins(t *testing.T) {
+	isolate(t)
+	if err := Add("requesty", llm.CustomProvider{BaseURL: "https://proxy.internal/v1", Model: "my-model"}); err != nil {
+		t.Fatalf("a preset name must be registrable: %v", err)
+	}
+	cfg, _ := Augment(llm.Config{Provider: "requesty"}.MergeEnv())
+	cp, ok := cfg.ActiveCustom()
+	if !ok || cp.BaseURL != "https://proxy.internal/v1" || cp.Model != "my-model" {
+		t.Errorf("providers.json entry must win over the preset: %+v ok=%v", cp, ok)
+	}
+}

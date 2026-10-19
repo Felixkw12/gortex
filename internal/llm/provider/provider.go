@@ -31,7 +31,6 @@ import (
 	"github.com/zzet/gortex/internal/llm/provider/openai"
 	"github.com/zzet/gortex/internal/llm/provider/openaicompat"
 	"github.com/zzet/gortex/internal/llm/provider/opencode"
-	"github.com/zzet/gortex/internal/llm/provider/requesty"
 )
 
 // New builds the llm.Provider selected by cfg.Provider. cfg should
@@ -73,8 +72,6 @@ func New(cfg llm.Config) (llm.Provider, error) {
 		return bedrock.New(cfg.Bedrock)
 	case "deepseek":
 		return deepseek.New(cfg.DeepSeek)
-	case "requesty":
-		return requesty.New(cfg.Requesty)
 	default:
 		if cp, ok := cfg.ActiveCustom(); ok {
 			name := cfg.ProviderName()
@@ -84,7 +81,7 @@ func New(cfg llm.Config) (llm.Provider, error) {
 			}
 			return newCustom(name, id, cp)
 		}
-		return nil, fmt.Errorf("llm: unknown provider %q (want local|anthropic|openai|azure|ollama|claudecli|codex|copilot|cursor|opencode|gemini|bedrock|deepseek|requesty, or a registered custom provider)", cfg.ProviderName())
+		return nil, fmt.Errorf("llm: unknown provider %q (want local|anthropic|openai|azure|ollama|claudecli|codex|copilot|cursor|opencode|gemini|bedrock|deepseek, a gateway preset (%s), or a registered custom provider)", cfg.ProviderName(), strings.Join(llm.PresetNames(), "|"))
 	}
 }
 
