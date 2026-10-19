@@ -118,7 +118,22 @@ type GenerationCopyCounts = store_sqlite.GenerationCopyCounts
 // BuildClaimedDedicatedBase consumes the positive reserved generation rather
 // than allocating a second one. It is an initial-full-snapshot primitive, not
 // the later incremental committed-base advancement path.
-func (b *SparseGenerationBuilder) BuildClaimedDedicatedBase(ctx context.Context, request ClaimedDedicatedBaseRequest) (builtGeneration int64, builtReport BuildReport, buildErr error) {
+func (b *SparseGenerationBuilder) BuildClaimedDedicatedBase(ctx context.Context, request ClaimedDedicatedBaseRequest) (int64, BuildReport, error) {
+	generation, report, err := b.buildClaimedDedicatedBase(ctx, request, true)
+	if !errors.Is(err, store_sqlite.ErrGenerationCopyYielded) {
+		return generation, report, err
+	}
+	if err := ctx.Err(); err != nil {
+		return generation, report, err
+	}
+	b.Logger.Info("initial committed base copy yielded; reparse in cooperative batches", zap.Int64("generation", request.Claim.GenerationID))
+	// The first attempt has synchronously rolled back and closed its bulk
+	// window. Re-enter all claim/source guards, retaining the same reservation.
+	// Exactly one reparse avoids starvation from repeatedly restarting a copy.
+	return b.buildClaimedDedicatedBase(ctx, request, false)
+}
+
+func (b *SparseGenerationBuilder) buildClaimedDedicatedBase(ctx context.Context, request ClaimedDedicatedBaseRequest, allowCopy bool) (builtGeneration int64, builtReport BuildReport, buildErr error) {
 	started := time.Now()
 	claim := request.Claim
 	if ctx == nil || b == nil || b.Store == nil || b.Registry == nil || b.Logger == nil {
@@ -217,7 +232,7 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedBase(ctx context.Context,
 		adopted = false
 	} else {
 		takeCopy, zeroState, why = b.claimedBaseCopyPlan(ctx, handle, request.RootPath, req.RepoPrefix,
-			identity.TreeOID, identity.ExtractorVersions, hasCopier)
+			identity.TreeOID, identity.ExtractorVersions, hasCopier && allowCopy)
 	}
 	if takeCopy {
 		route = b.prepareCopiedDedicatedBase(copier, req.RepoPrefix, claim.GenerationID, handle, zeroState)
@@ -251,6 +266,11 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedBase(ctx context.Context,
 		zap.String("reason", why))
 	// A shutdown inside this build keeps the reservation for the next start
 	// (builder_dedicated_claimed_resume.go).
+	// Cancel only this attempt after an internally yielded copy, preserving its
+	// empty Building reservation. The wrapper retries with the live parent.
+	attemptCtx, cancelAttempt := context.WithCancelCause(ctx)
+	defer cancelAttempt(nil)
+	ctx = attemptCtx
 	ctx = withKeepReservationOnCancel(ctx)
 	ctx = withInitialDrainCooperation(ctx, b.Store.WriteWanted)
 
@@ -282,6 +302,12 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedBase(ctx context.Context,
 		if closeErr == nil {
 			return
 		}
+		if errors.Is(buildErr, store_sqlite.ErrGenerationCopyYielded) {
+			// A failed close must not be hidden by the retry sentinel: the next
+			// attempt must never run beside an unreleased bulk owner.
+			buildErr = fmt.Errorf("copy yielded (%v), but bulk close failed: %w", buildErr, closeErr)
+			return
+		}
 		if buildErr != nil {
 			// The build already failed; the close failure is recorded beside
 			// it rather than substituted for it.
@@ -295,7 +321,16 @@ func (b *SparseGenerationBuilder) BuildClaimedDedicatedBase(ctx context.Context,
 		if err := window.openContext(ctx); err != nil {
 			return nil, buildPlan{}, BuildReport{}, err
 		}
-		return route(ctx)
+		target, plan, report, err := route(ctx)
+		if errors.Is(err, store_sqlite.ErrGenerationCopyYielded) {
+			cancelAttempt(store_sqlite.ErrGenerationCopyYielded)
+			// Close before the build flight wakes followers: every retry must
+			// observe the released bulk owner, not merely the rolled-back tx.
+			if closeErr := window.close(); closeErr != nil {
+				return target, plan, report, fmt.Errorf("copy yielded (%v), but bulk close failed: %w", err, closeErr)
+			}
+		}
+		return target, plan, report, err
 	}
 	callerPrePublish := request.PrePublish
 	req.PrePublish = func(ctx context.Context, generationID int64) error {
@@ -821,7 +856,13 @@ func (b *SparseGenerationBuilder) prepareCopiedDedicatedBase(
 	zeroState graph.RepoIndexState,
 ) generationPayloadPreparation {
 	return func(ctx context.Context) (source.ContentSource, buildPlan, BuildReport, error) {
-		counts, err := copier.CopyPayloadGeneration(ctx, generationZero, generationID, repoPrefix)
+		var counts GenerationCopyCounts
+		var err error
+		if native, ok := copier.(*store_sqlite.Store); ok {
+			counts, err = native.CopyPayloadGenerationCooperatively(ctx, generationZero, generationID, repoPrefix)
+		} else {
+			counts, err = copier.CopyPayloadGeneration(ctx, generationZero, generationID, repoPrefix)
+		}
 		if err != nil {
 			return nil, buildPlan{}, BuildReport{}, fmt.Errorf("indexer: copy generation %d into claimed base %d: %w",
 				generationZero, generationID, err)

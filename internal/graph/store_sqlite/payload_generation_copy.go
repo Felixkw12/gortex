@@ -110,6 +110,17 @@ const generationCopyFTSChunk = 100
 // write gate is held for the length of a payload the caller has already
 // decided to write in one piece.
 func (s *Store) CopyPayloadGeneration(ctx context.Context, from, to int64, repoPrefix string) (GenerationCopyCounts, error) {
+	return s.copyPayloadGeneration(ctx, from, to, repoPrefix, false)
+}
+
+// CopyPayloadGenerationCooperatively preserves the atomic copy, but rolls it
+// back if another writer queues. Initial-base callers may then reparse through
+// bounded write batches; retrying an entire copy indefinitely could starve it.
+func (s *Store) CopyPayloadGenerationCooperatively(ctx context.Context, from, to int64, repoPrefix string) (GenerationCopyCounts, error) {
+	return s.copyPayloadGeneration(ctx, from, to, repoPrefix, true)
+}
+
+func (s *Store) copyPayloadGeneration(ctx context.Context, from, to int64, repoPrefix string, cooperative bool) (GenerationCopyCounts, error) {
 	var counts GenerationCopyCounts
 	if ctx == nil {
 		return counts, fmt.Errorf("%w: nil context", ErrCatalogInvalidValue)
@@ -145,6 +156,23 @@ func (s *Store) CopyPayloadGeneration(ctx context.Context, from, to int64, repoP
 		return counts, err
 	}
 
+	if cooperative {
+		err := s.withInitialCopyTx(ctx, destination, func(step context.Context, tx *sql.Tx) error {
+			empty, err := generationPayloadEmptyTx(step, tx, to)
+			if err != nil {
+				return err
+			}
+			if !empty {
+				return fmt.Errorf("%w: generation %d", ErrGenerationBulkLoadPopulated, to)
+			}
+			counts, err = copyGenerationPayloadTx(step, tx, from, to, repoPrefix)
+			return err
+		})
+		if err != nil {
+			return GenerationCopyCounts{}, err
+		}
+		return counts, nil
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	tx, err := destination.beginWriteContext(ctx)
