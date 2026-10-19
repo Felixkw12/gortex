@@ -5638,19 +5638,25 @@ func (idx *Indexer) shouldExclude(path, root string, isDir bool) bool {
 // shouldExcludeRules applies the lexical and per-directory ignore rules.
 // Callers must first establish that a file is not an escaping symlink.
 func (idx *Indexer) shouldExcludeRules(path, root string, isDir bool) bool {
-	// Per-directory ignore files are a working-tree fact: the
-	// hierarchical matcher reads them off disk, while a snapshot
-	// source serves a revision whose ignore files may differ from the
-	// checkout's — or not be on disk at all. A snapshot is therefore
-	// admitted by the layered config excludes alone, and an index
-	// built from one should declare that omission in its producer
-	// state rather than claim per-directory ignore coverage it never
-	// had.
-	var perFolder *excludes.Hierarchical
-	if idx.contentSource() == nil {
-		perFolder = idx.dirIgnoreMatcher(root)
+	return shouldExcludeRules(path, root, isDir, idx.excludeMatcher(), idx.perFolderIgnores(root))
+}
+
+// perFolderIgnores returns the per-directory ignore matcher the exclusion
+// rules apply, or nil when the index reads a content source.
+//
+// Per-directory ignore files are a working-tree fact: the hierarchical
+// matcher reads them off disk, while a snapshot source serves a revision
+// whose ignore files may differ from the checkout's — or not be on disk at
+// all. A snapshot is therefore admitted by the layered config excludes
+// alone, and an index built from one should declare that omission in its
+// producer state rather than claim per-directory ignore coverage it never
+// had. The watcher uses the same matcher, so both read and cache each
+// ignore file once and agree on when per-directory rules apply.
+func (idx *Indexer) perFolderIgnores(root string) *excludes.Hierarchical {
+	if idx.contentSource() != nil {
+		return nil
 	}
-	return shouldExcludeRules(path, root, isDir, idx.excludeMatcher(), perFolder)
+	return idx.dirIgnoreMatcher(root)
 }
 
 func shouldExcludeRules(path, root string, isDir bool, flat *excludes.Matcher, perFolder *excludes.Hierarchical) bool {
@@ -5790,13 +5796,7 @@ func (idx *Indexer) warnIfWalkAdmittedNothing(absRoot string, admitted int) {
 // reaches the child. Mirroring git, we keep descending such a directory
 // and let the per-file shouldExclude check filter its contents.
 func (idx *Indexer) shouldPruneDir(path, root string) bool {
-	// Same snapshot bypass as shouldExcludeRules: do not build a matcher
-	// for working-tree ignore files when indexing a content source.
-	var perFolder *excludes.Hierarchical
-	if idx.contentSource() == nil {
-		perFolder = idx.dirIgnoreMatcher(root)
-	}
-	return shouldPruneDir(path, root, idx.excludeMatcher(), perFolder, false)
+	return shouldPruneDir(path, root, idx.excludeMatcher(), idx.perFolderIgnores(root), false)
 }
 
 func shouldPruneDir(path, root string, flat *excludes.Matcher, perFolder *excludes.Hierarchical, anchoredOnly bool) bool {

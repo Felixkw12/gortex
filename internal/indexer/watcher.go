@@ -100,8 +100,6 @@ type Watcher struct {
 	// backend, relying on the adaptive poller + git hooks instead.
 	degradedNoFsnotify bool
 	excludes           *excludes.Matcher
-	dirIgnoreOnce      sync.Once
-	dirIgnore          *excludes.Hierarchical
 	events             chan GraphChangeEvent
 	history            []GraphChangeEvent
 	historyMu          sync.Mutex
@@ -2945,20 +2943,20 @@ func pickKind(types []fswatcher.EventType) ChangeKind {
 // mutations) funnels through here, so one check covers them all.
 func (w *Watcher) isExcluded(path string) bool {
 	root := w.indexer.rootPath
-	if pathguard.SymlinkEscapes(path, root) {
+	// One Lstat serves both the symlink check and the folder check; only a
+	// symlink pays for resolving its target.
+	info, err := os.Lstat(path)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 && pathguard.SymlinkEscapes(path, root) {
 		return true
 	}
 	if root == "" {
 		return w.excludes.MatchRel(filepath.Base(path))
 	}
-	info, err := os.Lstat(path)
-	isDir := err == nil && info.IsDir()
-	// Keep watcher reads separate from the indexer's per-directory cache.
-	w.dirIgnoreOnce.Do(func() {
-		w.dirIgnore = excludes.NewHierarchical(root, dirIgnoreFiles...)
-	})
-	if isDir {
-		return shouldPruneDir(path, root, w.excludes, w.dirIgnore, true)
+	// The watcher shares the indexer's per-folder matcher: one read and one
+	// cache per ignore file, and the same content-source condition.
+	perFolder := w.indexer.perFolderIgnores(root)
+	if err == nil && info.IsDir() {
+		return shouldPruneDir(path, root, w.excludes, perFolder, true)
 	}
-	return shouldExcludeRules(path, root, false, w.excludes, w.dirIgnore)
+	return shouldExcludeRules(path, root, false, w.excludes, perFolder)
 }

@@ -399,14 +399,19 @@ func TestWatcherAgentConfigSnapshotGuard(t *testing.T) {
 				writeExcludeFixture(t, path, "package draft\n")
 			}
 			idx := &Indexer{rootPath: root}
+			w, err := NewWatcher(idx, config.WatchConfig{}, zap.NewNop())
+			require.NoError(t, err)
 			require.True(t, idx.shouldExclude(path, root, isDir))
 			require.True(t, idx.shouldPruneDir(path, root))
+			require.True(t, w.isExcluded(path))
 			fsSource, err := source.NewFilesystemSource(root)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, fsSource.Close()) })
 			idx.SetContentSource(fsSource)
 			require.False(t, idx.shouldExclude(path, root, isDir))
 			require.False(t, idx.shouldPruneDir(path, root))
+			// The watcher follows the indexer: no per-folder rules under a snapshot.
+			require.False(t, w.isExcluded(path))
 		})
 	}
 }
