@@ -45,3 +45,10 @@ func (s *Store) noteContractSemanticBindingsLocked(repo string, files []string, 
 	}
 	s.noteContractProjectionBindingMutationLocked(s.viewGen, revision, change)
 }
+
+// Eviction can delete binding rows across repository prefixes. Until the
+// removed prefixes are captured, no literal repository domain is complete.
+func (s *Store) noteContractUnknownSemanticBindingsLocked() {
+	revision := s.semanticBindingInputCounter(s.viewGen).Add(1)
+	s.noteContractProjectionBindingMutationLocked(s.viewGen, revision, contractProjectionMutation{})
+}

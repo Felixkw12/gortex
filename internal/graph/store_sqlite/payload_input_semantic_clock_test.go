@@ -72,20 +72,35 @@ func TestSemanticBindingProofIsScopedWithoutInvalidatingNodeProjection(t *testin
 
 func TestSemanticBindingOnlyEvictionInvalidatesWitness(t *testing.T) {
 	s := openPayloadStore(t)
-	site := graph.SemanticBindingSite{RepoPrefix: "repo", FilePath: "repo/orphan.go", Line: 3, Name: "x"}
-	require.NoError(t, s.ReplaceSemanticBindingTypes("repo", []graph.SemanticBindingType{{Site: site, TypeName: "Before"}}))
+	sites := []graph.SemanticBindingSite{
+		{RepoPrefix: "", FilePath: "shared/orphan.go", Line: 3, Name: "x"},
+		{RepoPrefix: "other", FilePath: "shared/orphan.go", Line: 3, Name: "x"},
+	}
+	for _, site := range sites {
+		require.NoError(t, s.ReplaceSemanticBindingTypes(site.RepoPrefix, []graph.SemanticBindingType{{Site: site, TypeName: "Before"}}))
+	}
+	current, err := s.SemanticBindingTypes(sites)
+	require.NoError(t, err)
+	require.Len(t, current, 2, "same physical path can have binding rows in different repositories")
+	require.NoError(t, s.EnableContractProjectionHistory(t.Context(), 4096))
+	before, err := s.CaptureContractProjectionCursor(t.Context())
+	require.NoError(t, err)
 	witness, err := s.CapturePayloadInputWitness(t.Context(), []int64{0})
 	require.NoError(t, err)
-	nodes, edges := s.EvictFile(site.FilePath)
+	nodes, edges := s.EvictFile(sites[0].FilePath)
 	require.Zero(t, nodes)
 	require.Zero(t, edges)
-	current, err := s.SemanticBindingTypes([]graph.SemanticBindingSite{site})
+	current, err = s.SemanticBindingTypes(sites)
 	require.NoError(t, err)
-	require.Empty(t, current)
+	require.Empty(t, current, "eviction removes all repository bindings for the path")
 	s.writeMu.Lock()
 	err = witness.validateLocked(s, t.Context())
 	s.writeMu.Unlock()
 	require.ErrorIs(t, err, ErrPayloadInputChanged, "no-node early return must still announce changed sidecars")
+	delta, err := s.ContractProjectionChanges(t.Context(), before)
+	require.NoError(t, err)
+	require.False(t, delta.Complete, "unobserved removed repository scopes require physical proof")
+	require.Nil(t, delta.Domains, "empty repository is literal, not a wildcard for all repositories")
 }
 
 func TestSemanticBindingRollbackAndEmptyDeleteDoNotAdvanceProof(t *testing.T) {

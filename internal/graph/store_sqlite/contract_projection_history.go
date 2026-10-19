@@ -11,6 +11,7 @@ import (
 // ContractProjectionDomain names potential query results, including absence.
 // It is not a receipt, an answer, or permission to acknowledge contract work.
 // A consumer must define its complete dependency domains before using exclusion.
+// Scope is literal, including the empty string; it never implies all scopes.
 type ContractProjectionDomain struct {
 	Kind, Scope, Key string
 }

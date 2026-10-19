@@ -143,7 +143,7 @@ func (s *Store) evictByPredicateResult(predicate string, arg any, scope evictSco
 			if scope == evictAllGenerations {
 				s.payloadInputAdminRevision.Add(1)
 			} else {
-				s.noteContractSemanticBindingsLocked("", nil, nil, true)
+				s.noteContractUnknownSemanticBindingsLocked()
 			}
 		}
 		return 0, 0, nil
@@ -260,7 +260,7 @@ func (s *Store) evictByPredicateResult(predicate string, arg any, scope evictSco
 	if (changed || bindingsChanged) && scope == evictAllGenerations {
 		s.payloadInputAdminRevision.Add(1)
 	} else if bindingsChanged {
-		s.noteContractSemanticBindingsLocked("", nil, nil, true)
+		s.noteContractUnknownSemanticBindingsLocked()
 	}
 	if changed {
 		if receiptDelta != nil && scalarChanges == 0 {
