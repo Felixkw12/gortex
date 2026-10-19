@@ -3,6 +3,8 @@ package profiles
 import (
 	"fmt"
 	"strings"
+
+	"github.com/zzet/gortex/internal/toolref"
 )
 
 // The instruction bodies are composed from the shared sections below —
@@ -55,9 +57,9 @@ var sectionCompactWorkflow = bt(`For every coding task:
 
 Common calls: §search(operation:"symbols", query:"<name>")§ · §read(target:{symbol:"<id>"})§ · §relations(operation:"usages", target:{symbol:"<id>"})§.
 
-If the Gortex server is configured but these tools are missing from the callable MCP tools, report a Gortex MCP integration failure and stop. Do not start a daemon or switch to a CLI/shell fallback.
+If these tools are missing from the callable MCP tools, report a Gortex MCP integration failure and stop. Do not start a daemon or switch to a CLI/shell fallback. `) + toolref.MCPMissingToolsException + `
 
-`)
+`
 
 var sectionCompactMemory = bt(`Use §recall§ before revisiting prior work. Call §remember§ immediately for a durable decision, invariant, constraint, or gotcha.
 
@@ -102,9 +104,9 @@ var sectionFullRuleTable = bt(`| Instead of...                       | Use...   
 
 // sectionMCPRequired keeps the legacy/full MCP profile from silently changing
 // transports when a host bridge fails to expose a configured tool.
-var sectionMCPRequired = bt(`**Native MCP required:** if a configured Gortex tool is missing from the callable MCP tools, report a Gortex MCP integration failure and stop. Do not start a daemon or use a CLI/shell fallback.
+var sectionMCPRequired = bt(`**Native MCP required:** if a configured Gortex tool is missing from the callable MCP tools, report a Gortex MCP integration failure and stop. Do not start a daemon or use a CLI/shell fallback. `) + toolref.MCPMissingToolsException + `
 
-`)
+`
 
 // sectionReadDiscipline is the scope-vs-fidelity paragraph.
 var sectionReadDiscipline = bt(`Graph queries *narrow scope*; they do not replace reading the implementation. For the symbol you are about to change or depend on — especially behavior-critical code (migrations, retry / fallback / error-recovery paths, concurrency, compatibility shims) — read the real body with §get_symbol_source§ and do NOT pass §compress_bodies:true§, which elides the branches that carry the risk. §format:"gcx"§ (compact wire, ~27% fewer tokens) and §compress_bodies:true§ (body-eliding) exist on the read / list tools; the parameter legend is in the MCP server instructions.
@@ -145,7 +147,7 @@ func sectionDiscovery(active, surfaceLine string) string {
 	return bt(`## Reference and discovery
 
 - **§gortex://guide§ resource** (or the §gortex guide [topic]§ CLI) is the full reference: LLM-provider matrix, capabilities catalog, analyze / search_ast catalogs, token-economy detail, MCP resources, session-start checklist. Read it on demand — it is not pre-paid here.
-- `) + surfaceLine + bt(`- MCP startup manages daemon availability. If the configured server or its tools are unavailable, report a Gortex MCP integration failure; do not start a daemon manually. "cwd is not covered by any tracked repo" means graph tools are unavailable there.
+- `) + surfaceLine + bt(`- MCP startup manages daemon availability; do not start a daemon manually. "cwd is not covered by any tracked repo" means graph tools are unavailable there: use native tools.
 `) + switchBullet(active, false)
 }
 
