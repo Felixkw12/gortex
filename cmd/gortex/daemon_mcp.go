@@ -100,6 +100,10 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	// a client session must wait until admission has succeeded.
 	ctx = gortexmcp.WithSessionID(ctx, sess.ID)
 	ctx = gortexmcp.WithSessionCWD(ctx, sess.CWD)
+	// Every frame here comes from an MCP client (socket or Streamable HTTP),
+	// so the default tool surface must not hinge on whether its initialize
+	// carried a clientInfo.name.
+	ctx = gortexmcp.WithClientConnection(ctx)
 	reachable, admissionErr := d.cwdReachableChecked(ctx, sess.CWD)
 	untracked := sess.CWD != "" && !reachable && admissionErr == nil
 	if admissionErr != nil && !checkoutAdmissionMetadataMethod(peekFrameMethod(frame)) {

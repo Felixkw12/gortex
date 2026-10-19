@@ -224,8 +224,10 @@ func TestIdentifiedClientsShareDefaultSurface(t *testing.T) {
 	require.Equal(t, "", srv.resolveSessionFormat(unknownCtx),
 		"unknown clients keep the JSON-safe wire format")
 
-	// Until initialize provides a non-empty clientInfo.name, preserve the
-	// server's global compatibility policy and instructions.
+	// A bare session id with no client connection behind it is an internal
+	// caller and keeps the server's global policy and instructions. An
+	// unnamed client connection gets the facade surface (see
+	// TestUnnamedClientGetsNamedClientSurface, #661).
 	anonymousTools := listToolNamesForSession(t, srv, "anonymous_client")
 	require.True(t, anonymousTools["read_file"])
 	require.False(t, anonymousTools["read"])

@@ -226,9 +226,13 @@ func TestDaemon_EndToEnd_WorkspaceRootCWDServed(t *testing.T) {
 	socket, trackedRoot := spinUpDaemon(t)
 	wsRoot := filepath.Dir(trackedRoot)
 
+	// The test drives legacy tool names, so it pins the legacy surface the
+	// way the CLI and hooks do: an MCP client connection otherwise gets the
+	// compact facade surface (#661).
 	client, err := daemon.DialTo(socket, daemon.Handshake{
-		Mode: daemon.ModeMCP,
-		CWD:  wsRoot,
+		Mode:  daemon.ModeMCP,
+		CWD:   wsRoot,
+		Tools: "core",
 	})
 	require.NoError(t, err)
 	defer client.Close()
