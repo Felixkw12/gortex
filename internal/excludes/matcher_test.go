@@ -1,7 +1,6 @@
 package excludes
 
 import (
-	"fmt"
 	"path"
 	"testing"
 )
@@ -238,26 +237,11 @@ func TestMatcher_EscapedNegationsAgreeWithMatchRel(t *testing.T) {
 	}
 }
 
-// The watcher classifies negation segments on every excluded event, so a
-// bracket expression must not compile a regexp after its first check.
-func TestIsBracketExprCachesItsResult(t *testing.T) {
+func TestIsBracketExpr(t *testing.T) {
 	for s, want := range map[string]bool{"[ab]": true, "[ab]c": true, "[abc": false, "[z-a]": false} {
 		if got := isBracketExpr(s); got != want {
 			t.Fatalf("isBracketExpr(%q) = %v, want %v", s, got, want)
 		}
-		if allocs := testing.AllocsPerRun(100, func() { isBracketExpr(s) }); allocs != 0 {
-			t.Fatalf("isBracketExpr(%q) allocates %v times after its first call, want 0", s, allocs)
-		}
-	}
-	// Patterns from earlier policies must not keep the cache growing.
-	for i := 0; i < 3*maxBracketExprs; i++ {
-		isBracketExpr(fmt.Sprintf("[ab]rev%d", i))
-	}
-	bracketExprs.RLock()
-	n := len(bracketExprs.m)
-	bracketExprs.RUnlock()
-	if n > maxBracketExprs {
-		t.Fatalf("bracket cache holds %d entries, want at most %d", n, maxBracketExprs)
 	}
 }
 
@@ -301,5 +285,76 @@ func TestMatcher_HasAnchoredNegatedDescendant(t *testing.T) {
 	var m *Matcher
 	if m.HasAnchoredNegatedDescendant("gen") || New(nil).HasAnchoredNegatedDescendant("gen") {
 		t.Fatal("nil and empty matchers have no negated descendants")
+	}
+}
+
+// Expected classifications were captured from isAnchoredNegation before
+// negation parsing moved into New.
+func TestMatcher_ParsedNegationClassification(t *testing.T) {
+	for _, tc := range []struct {
+		pattern  string
+		anchored bool
+		atRoot   bool
+	}{
+		{"!", false, false},
+		{"!/", false, false},
+		{"!//", false, false},
+		{"!.gitkeep", false, false},
+		{"!keep/", false, false},
+		{"!/AGENTS.md", true, true},
+		{"!/gen/", true, true},
+		{"!gen/keep.go", true, true},
+		{"!/gen/keep.go", true, true},
+		{"!**/keep", false, false},
+		{"!/**/keep", false, false},
+		{"!*/keep", false, false},
+		{"!/*.md", false, false},
+		{"!?foo/keep", false, false},
+		{"![ab]c/keep", false, false},
+		{"![abc/keep", true, true},
+		{"!/[abc", true, true},
+		{"![z-a]/keep", true, true},
+		{"!foo\\*/keep", true, true},
+		{"!foo\\+/keep", true, true},
+		{"!foo\\?/keep", true, true},
+		{"!foo\\/keep", true, true},
+		{"!foo\\a/keep", true, true},
+		{"!/foo\\?", true, true},
+		{"!foo\\*", false, false},
+		{"!foo\\\\/keep", true, true},
+		// Preserve the old empty-first-segment classification and match result.
+		{"!//*/keep", true, false},
+		{"!//foo/keep", true, true},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			m := New([]string{tc.pattern})
+			if m.hasAnchoredNegation != tc.anchored {
+				t.Errorf("anchored classification = %v, want %v", m.hasAnchoredNegation, tc.anchored)
+			}
+			if got := m.HasAnchoredNegatedDescendant("."); got != tc.atRoot {
+				t.Errorf("anchored descendant at root = %v, want %v", got, tc.atRoot)
+			}
+			for _, dir := range []string{"", ".", "./gen/", "gen", "gen/sub", "other", "foo*", "foo+", "[abc", "node_modules/pkg"} {
+				if m.HasAnchoredNegatedDescendant(dir) && !m.HasNegatedDescendant(dir) {
+					t.Errorf("anchored descendant under %q was not counted by the walk", dir)
+				}
+			}
+		})
+	}
+}
+
+func TestMatcher_NegatedDescendantAllocs(t *testing.T) {
+	for _, pattern := range []string{"!gen/keep.go", `!foo\*/keep.go`, "!gen/[ab]/keep.go", "!**/keep.go", "!long-directory-name-that-exceeds-the-stack-buffer/keep.go"} {
+		t.Run(pattern, func(t *testing.T) {
+			m := New([]string{"gen/", pattern})
+			for _, dir := range []string{"gen", "other", "long-directory-name-that-exceeds-the-stack-buffer"} {
+				if allocs := testing.AllocsPerRun(100, func() { m.HasNegatedDescendant(dir) }); allocs != 0 {
+					t.Errorf("HasNegatedDescendant(%q) allocates %v times, want 0", dir, allocs)
+				}
+				if allocs := testing.AllocsPerRun(100, func() { m.HasAnchoredNegatedDescendant(dir) }); allocs != 0 {
+					t.Errorf("HasAnchoredNegatedDescendant(%q) allocates %v times, want 0", dir, allocs)
+				}
+			}
+		})
 	}
 }

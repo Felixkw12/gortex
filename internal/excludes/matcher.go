@@ -3,7 +3,6 @@ package excludes
 import (
 	"path/filepath"
 	"strings"
-	"sync"
 
 	ignore "github.com/sabhiram/go-gitignore"
 
@@ -22,9 +21,9 @@ type Matcher struct {
 	// Positive patterns proven to cover a matched directory and all its children.
 	// Blank entries preserve line numbers in patterns.
 	subtreeExcludes *ignore.GitIgnore
-	// Whether any negation, and any anchored negation, exists, so the
-	// descendant checks can return before matching when none can apply.
-	hasNegation         bool
+	negations       []parsedNegation
+	// Whether any anchored negation exists, so the watcher check can return
+	// before matching when none can apply.
 	hasAnchoredNegation bool
 }
 
@@ -61,15 +60,20 @@ func New(patterns []string) *Matcher {
 	}
 	var unfiltered []string
 	subtreePatterns := make([]string, len(compiled))
+	hasSubtreeExclude := false
 	seen := make(map[string]bool)
 	for i, p := range cleaned {
 		if strings.HasPrefix(p, "!") {
-			m.hasNegation = true
-			m.hasAnchoredNegation = m.hasAnchoredNegation || isAnchoredNegation(p)
+			if negation, ok := parseNegation(p, i+1); ok {
+				m.negations = append(m.negations, negation)
+				m.hasAnchoredNegation = m.hasAnchoredNegation || negation.anchored
+			}
 			continue
 		}
-		if coversSubtree(p) {
+		// An exclude can only override negations that precede it.
+		if len(m.negations) > 0 && coversSubtree(p) {
 			subtreePatterns[i] = compiled[i]
+			hasSubtreeExclude = true
 		}
 		literal := requiredLiteral(p)
 		if literal == "" {
@@ -79,7 +83,9 @@ func New(patterns []string) *Matcher {
 			m.requiredLiterals = append(m.requiredLiterals, literal)
 		}
 	}
-	m.subtreeExcludes = ignore.CompileIgnoreLines(subtreePatterns...)
+	if hasSubtreeExclude {
+		m.subtreeExcludes = ignore.CompileIgnoreLines(subtreePatterns...)
+	}
 	if len(m.requiredLiterals) > 0 && len(unfiltered) > 0 {
 		m.unfiltered = ignore.CompileIgnoreLines(unfiltered...)
 	}
@@ -263,7 +269,7 @@ func (m *Matcher) HasAnchoredNegatedDescendant(relDir string) bool {
 }
 
 func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
-	if m == nil || !m.hasNegation || anchoredOnly && !m.hasAnchoredNegation {
+	if m == nil || len(m.negations) == 0 || anchoredOnly && !m.hasAnchoredNegation {
 		return false
 	}
 	relDir = pathkey.Normalize(filepath.ToSlash(relDir))
@@ -272,88 +278,72 @@ func (m *Matcher) hasNegatedDescendant(relDir string, anchoredOnly bool) bool {
 	if relDir == "." {
 		relDir = ""
 	}
-	patterns := m.patterns
+	lastExclude := 0
 	if relDir != "" && m.subtreeExcludes != nil {
 		// Only negations after the last covering exclude can resurrect a
 		// descendant. Other positive patterns cannot prove subtree coverage.
 		if matched, p := m.subtreeExcludes.MatchesPathHow(relDir + "/"); matched {
-			patterns = patterns[p.LineNo:]
+			lastExclude = p.LineNo
 		}
 	}
-	for _, p := range patterns {
-		if !strings.HasPrefix(p, "!") {
+	for _, p := range m.negations {
+		if p.lineNo <= lastExclude || anchoredOnly && (!p.anchored || p.unanchored) {
 			continue
 		}
-		np := strings.TrimSpace(p[1:])
-		rooted := strings.HasPrefix(np, "/")
-		np = strings.TrimPrefix(np, "/")
-		np = strings.TrimSuffix(np, "/")
-		if np == "" {
-			continue
-		}
-		if !strings.Contains(np, "/") {
-			// A leading slash anchors the negation at the root, so it can
-			// only re-include a root entry and what lies under it.
-			lit, kind := literalSegment(np)
-			if rooted && kind == segLiteral {
-				if relDir == "" || relDir == lit || strings.HasPrefix(relDir, lit+"/") {
-					return true
-				}
-				continue
-			}
-			// A negation with no internal slash is unanchored: gitignore
-			// matches it at any depth, so it can re-include something under
-			// any directory. Keep descending for the index walk only. A
-			// rooted segment with an unsure escape stays open in both modes.
-			if anchoredOnly && (!rooted || kind != segUnsure) {
-				continue
-			}
-			return true
-		}
-		first, _, _ := strings.Cut(np, "/")
-		if _, kind := literalSegment(first); kind == segUnsure {
-			// The compiled matcher may read this escape differently, so
-			// the anchor is unknown. Stay conservative in both modes.
-			return true
-		}
-		anchor := literalAnchor(np)
-		if anchor == "" {
-			// First segment is itself a wildcard ("*/...", "**/..."): it
-			// can match at varying depths, so stay conservative for walks.
-			if anchoredOnly {
-				continue
-			}
-			return true
-		}
-		// At the root, every anchored negation lives somewhere beneath us.
-		if relDir == "" {
+		// An unknown anchor stays conservative in both modes; unanchored
+		// and wildcard-leading negations stay conservative for walks only.
+		if p.anchor == "" || relDir == "" {
 			return true
 		}
 		// The negation's match-set intersects relDir's subtree when its
 		// literal anchor sits at or under relDir, or relDir sits under the
 		// anchor (a wildcard tail can then still reach into relDir).
-		if anchor == relDir ||
-			strings.HasPrefix(anchor, relDir+"/") ||
-			strings.HasPrefix(relDir, anchor+"/") {
+		if p.anchor == relDir || hasDirPrefix(p.anchor, relDir) || hasDirPrefix(relDir, p.anchor) {
 			return true
 		}
 	}
 	return false
 }
 
-// isAnchoredNegation reports whether the "!" pattern p is one that
-// hasNegatedDescendant counts in anchored mode: a rooted single segment,
-// or an internal slash, whose first segment is not a wildcard.
-func isAnchoredNegation(p string) bool {
-	np := strings.TrimSpace(p[1:])
+func hasDirPrefix(path, dir string) bool {
+	return len(path) > len(dir) && path[len(dir)] == '/' && strings.HasPrefix(path, dir)
+}
+
+// parsedNegation holds the classification shared by the walk and watcher.
+// lineNo is 1-based into patterns, just like go-gitignore's LineNo.
+type parsedNegation struct {
+	lineNo   int
+	anchor   string
+	anchored bool
+	// No fixed anchor: only the walk counts these. An unsure escape also
+	// has no anchor, but remains conservative in both modes instead.
+	unanchored bool
+}
+
+func parseNegation(pattern string, lineNo int) (parsedNegation, bool) {
+	np := strings.TrimSpace(pattern[1:])
 	rooted := strings.HasPrefix(np, "/")
 	np = strings.TrimSuffix(strings.TrimPrefix(np, "/"), "/")
 	if np == "" {
-		return false
+		return parsedNegation{}, false
 	}
 	first, _, slash := strings.Cut(np, "/")
-	_, kind := literalSegment(first)
-	return (rooted || slash) && kind != segWildcard
+	literal, kind := literalSegment(first)
+	p := parsedNegation{
+		lineNo:   lineNo,
+		anchored: (rooted || slash) && kind != segWildcard,
+	}
+	if !slash {
+		if rooted && kind == segLiteral {
+			p.anchor = literal
+		} else {
+			p.unanchored = !rooted || kind != segUnsure
+		}
+	} else if kind != segUnsure {
+		p.anchor = literalAnchor(np)
+		p.unanchored = p.anchor == ""
+	}
+	return p, true
 }
 
 // literalAnchor returns the leading path segments of a slash-bearing
@@ -427,33 +417,9 @@ func literalSegment(s string) (string, segKind) {
 	return b.String(), segLiteral
 }
 
-// bracketExprs caches isBracketExpr results. scanBracketExpr compiles a
-// regexp, and the watcher's backend filter classifies negation segments
-// on every excluded event. Keys are substrings of configured patterns.
-// A policy refresh can bring new patterns, so the cache is cleared when
-// it reaches maxBracketExprs entries.
-const maxBracketExprs = 1024
-
-var bracketExprs = struct {
-	sync.RWMutex
-	m map[string]bool
-}{m: map[string]bool{}}
-
 // isBracketExpr reports whether s starts with a bracket expression that
 // the compiled matcher reads as a character class.
 func isBracketExpr(s string) bool {
-	bracketExprs.RLock()
-	ok, hit := bracketExprs.m[s]
-	bracketExprs.RUnlock()
-	if hit {
-		return ok
-	}
-	_, _, ok = scanBracketExpr(s)
-	bracketExprs.Lock()
-	if len(bracketExprs.m) >= maxBracketExprs {
-		clear(bracketExprs.m)
-	}
-	bracketExprs.m[s] = ok
-	bracketExprs.Unlock()
+	_, _, ok := scanBracketExpr(s)
 	return ok
 }
