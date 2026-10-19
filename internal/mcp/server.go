@@ -3285,6 +3285,13 @@ func (s *Server) prepareTool(tool *mcp.Tool, handler server.ToolHandlerFunc) ser
 	if guarded && tool.RawInputSchema == nil && tool.InputSchema.AdditionalProperties == nil {
 		tool.InputSchema.AdditionalProperties = false
 	}
+	// #883: mcp.NewTool defaults every tool to readOnlyHint:false /
+	// destructiveHint:true, so clients that gate on the hints (Claude Code
+	// plan mode) prompted on every pure read. Derive them from the canonical
+	// effect registry instead. Facades carry their own facadeAnnotation.
+	if guarded {
+		applyEffectAnnotation(tool)
+	}
 	// Capture the finished schema plus the unwrapped legacy implementation
 	// before lazy routing. Reused facade names receive a compatibility wrapper
 	// that keeps their old call shape outside facade-v1 sessions.
