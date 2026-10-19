@@ -39,6 +39,17 @@ func newTestRegistry() *parser.Registry {
 	return reg
 }
 
+var errInjectedCensusPanic = errors.New("injected census panic")
+
+// panickingTransform panics when the census asks it to re-type a file whose
+// extension no extractor claims.
+type panickingTransform struct{}
+
+func (panickingTransform) name() string                               { return "panicking" }
+func (panickingTransform) matches(string) bool                        { return true }
+func (panickingTransform) apply(_ string, src []byte) ([]byte, error) { return src, nil }
+func (panickingTransform) asLanguage() string                         { panic(errInjectedCensusPanic) }
+
 func TestReconcilePhaseTimingOutcomes(t *testing.T) {
 	for _, outcome := range []string{"complete", "error", "aborted"} {
 		t.Run(outcome, func(t *testing.T) {
@@ -96,12 +107,13 @@ func TestReconcileCensusTiming(t *testing.T) {
 				dir = filepath.Join(dir, "missing")
 			}
 			if mode == "panic" {
-				// Inject a parser lookup panic; the telemetry must not claim a
+				// Inject a language lookup panic; the telemetry must not claim a
 				// successful no-op merely because the named error is still nil.
-				registry := idx.registry
-				idx.registry = nil
-				defer func() { idx.registry = registry }()
-				require.Panics(t, func() { _, _, _, _ = idx.changedSinceMtimesCensus(dir) })
+				// The panic is an ordinary one: a recovered nil dereference can
+				// corrupt the Go heap on some Windows runners (golang/go#81238).
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "census.unknownext"), []byte("x"), 0o644))
+				idx.transforms.transforms = append(idx.transforms.transforms, panickingTransform{})
+				require.PanicsWithValue(t, errInjectedCensusPanic, func() { _, _, _, _ = idx.changedSinceMtimesCensus(dir) })
 				entries := logs.FilterMessage("indexer: reconcile phase complete").All()
 				require.Len(t, entries, 1)
 				fields := entries[0].ContextMap()
