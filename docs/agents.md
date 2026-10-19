@@ -294,8 +294,8 @@ The primary integration, split across the two commands.
 - `.claude/skills/generated/<DirName>/SKILL.md` — one per detected
   community, regenerated each run so the content tracks the graph
 
-Hooks installed today: **PreToolUse**, **PostToolUse**, **PreCompact**,
-**Stop**, **SessionStart**, **UserPromptSubmit**, **SubagentStart**,
+Hooks installed today: **PreToolUse**, **PostToolUse**, **Stop**,
+**SessionStart**, **UserPromptSubmit**, **SubagentStart**,
 **SubagentStop**.
 
 SessionStart carries the orientation block. It is registered with no
@@ -306,8 +306,11 @@ rebuilds a compacted window from the summary, the most recent exchanges,
 and up to five recently-read files that it re-reads and re-injects as
 `system-reminder` blocks, and SessionStart is the only compaction-adjacent
 event that can inject context to say so. PreCompact cannot — its output
-contract is `decision: "block"` only — so gortex's PreCompact handler
-records telemetry and deliberately emits nothing.
+contract is `decision: "block"` only — so gortex no longer installs a
+PreCompact hook, and re-running `gortex init` / `gortex install` removes
+the one older releases wrote (PreCompact hooks of your own are kept). The
+`gortex hook` handler still accepts the event from an install that has not
+been refreshed; it records telemetry and deliberately emits nothing.
 
 > **Daemon outage = per-call enforcement stands down.** Every per-call
 > surface (PreToolUse denies and graph advisories, PostToolUse follow-ups,
