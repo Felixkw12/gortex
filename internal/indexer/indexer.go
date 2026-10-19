@@ -2623,7 +2623,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				}
 				return nil
 			}
-			if adm.lang == "" && idx.isIncrementalContractManifest(path) && !idx.shouldExclude(path, absRoot, false) {
+			if adm.manifest {
 				idx.captureColdManifest(&coldManifests, ctx, path, nil)
 			}
 			if !adm.admit {
@@ -9056,10 +9056,9 @@ func (idx *Indexer) HasChangesSinceMtimes(root string) bool {
 		if d.IsDir() {
 			return nil
 		}
-		// Same file set as the census: admitted source plus the root
-		// go.mod / go.work, which no extractor claims.
+		// Same file set as the census, root go.mod and go.work included.
 		adm := idx.admitWalkFileKnownType(absRoot, path, -1, d.Type())
-		if adm.excluded || (!adm.admit && !idx.isIncrementalContractManifest(path)) {
+		if !adm.admit && !adm.manifest {
 			return nil
 		}
 		rel := idx.relKey(path)
@@ -9202,13 +9201,10 @@ func (idx *Indexer) changedSinceMtimesCensus(root string) (
 			return nil
 		}
 		adm := idx.admitWalkFileKnownType(absRoot, path, -1, d.Type())
-		if adm.excluded {
+		if !adm.admit && !adm.manifest {
 			return nil
 		}
 		lang, supported := adm.lang, adm.admit
-		if !supported && !idx.isIncrementalContractManifest(path) {
-			return nil
-		}
 		rel := idx.relKey(path)
 		diskFiles[rel] = true
 		if filepath.Base(filepath.FromSlash(rel)) == "parser.c" {
