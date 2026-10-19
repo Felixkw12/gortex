@@ -15,6 +15,7 @@ import (
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/localizationauth"
 	"github.com/zzet/gortex/internal/telemetry"
@@ -71,6 +72,15 @@ func facadeAnnotation(name string) mcpgo.ToolAnnotation {
 		DestructiveHint: boolPointer(destructive),
 		OpenWorldHint:   boolPointer(openWorld),
 	}
+}
+
+// applyEffectAnnotation sets a legacy tool's readOnlyHint and destructiveHint
+// from the daemon effect registry, the single source of truth shared with the
+// planning-mode and federation write gates. Idempotent and open-world hints
+// keep their existing (conservative) values.
+func applyEffectAnnotation(tool *mcpgo.Tool) {
+	tool.Annotations.ReadOnlyHint = boolPointer(!daemon.IsEffectful(tool.Name))
+	tool.Annotations.DestructiveHint = boolPointer(daemon.IsDestructive(tool.Name))
 }
 
 func facadeTargetProperties() map[string]any {
