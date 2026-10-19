@@ -1366,6 +1366,16 @@ func enrichBash(toolInput map[string]any, cwd string) enrichResult {
 		// the write pre-pass instead of returning silence.
 		c = classifyBashReadCommand(cmd)
 	}
+	// A grep whose every target lies outside every tracked repo gets the
+	// silence `cat` of the same file and Grep with `path:` already get (#893):
+	// the graph the redirect names has nothing for it. Pass over it rather than
+	// stopping, so a source read chained after it is still answered.
+	outsideGraph := func(next BashClassification) bool {
+		return next.Action == BashActionGrepLike && bashSearchOutsideTrackedRepos(next.Paths, cwd)
+	}
+	if outsideGraph(c) {
+		c = classifyBashReadCommandSkipping(cmd, outsideGraph)
+	}
 	switch c.Action {
 	case BashActionGrepLike:
 		return probeSymbolPattern("Bash", c.Pattern, cwd, defaultGrepGuidance())
