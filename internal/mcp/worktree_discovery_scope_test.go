@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 
 	"github.com/zzet/gortex/internal/config"
@@ -44,11 +46,25 @@ func TestWorktreeDiscoveryDeniesForeignSelectorBeforeCatalogSideEffects(t *testi
 	primaryBefore := before.Families[0].Checkouts[0]
 	require.True(t, pathkey.EqualPaths(primaryBefore.RootPath, foreignPrimary))
 
-	result := f.edit(t, f.primary, map[string]any{
-		"path": "foreign.go", "old_string": "Foreign", "new_string": "Changed", "dry_run": true,
-		"view": map[string]any{"kind": "worktree", "path": foreignWorktree},
-	})
-	require.True(t, result.IsError, "a selector in another workspace must be denied")
+	// Authorization needs the Git-proven primary of the selected checkout, and
+	// a request waits only 250ms for that proof while the shared discovery job
+	// keeps running. Slow Git (Windows CI) legitimately answers "pending;
+	// retry" first. Retry like an agent would: every attempt must refuse, and
+	// once discovery completes the refusal must be the scope denial.
+	var result *mcplib.CallToolResult
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		result = f.edit(t, f.primary, map[string]any{
+			"path": "foreign.go", "old_string": "Foreign", "new_string": "Changed", "dry_run": true,
+			"view": map[string]any{"kind": "worktree", "path": foreignWorktree},
+		})
+		require.True(t, result.IsError, "a selector in another workspace must be denied")
+		text := viewResultText(t, result)
+		if !strings.Contains(text, indexer.ErrCheckoutMutationBusy.Error()) {
+			break
+		}
+		require.True(t, time.Now().Before(deadline), "checkout discovery did not finish: %s", text)
+	}
 	require.Contains(t, fmt.Sprint(result.Content), "selector_out_of_scope", "deny authorization, not merely unavailable graph readiness")
 
 	after, err := f.srv.lifecycle.FamiliesOverview(ctx, registered.FamilyID)
