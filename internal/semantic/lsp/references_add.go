@@ -72,7 +72,13 @@ func (p *Provider) referencesAddPass(ctx context.Context, g graph.Store, view *l
 				continue
 			}
 			siteLine := loc.Range.Start.Line + 1
-			enclosing := view.matchCallableByFileLine(scopedPath(repoPrefix, sitePath), siteLine)
+			// The reference's column picks the owner when several members
+			// share the site line; an owner it cannot pin mints nothing.
+			enclosing := view.matchCallableAt(scopedPath(repoPrefix, sitePath), lspSite{
+				line: siteLine,
+				col:  loc.Range.Start.Character,
+				src:  func() []byte { return siteFileContent(siteSrc, absRoot, sitePath) },
+			})
 			if enclosing == nil || enclosing.ID == n.ID {
 				continue
 			}
