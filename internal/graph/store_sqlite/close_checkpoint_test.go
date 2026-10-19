@@ -163,3 +163,30 @@ func TestCloseCheckpointRetainsContentionRetryBudget(t *testing.T) {
 	}
 	assertCloseCheckpointPoolsClosed(t, s, reader, writer)
 }
+
+// The standalone bulk window's final TRUNCATE syncs every frame written at
+// synchronous=OFF. It is a durability boundary like Close, so slow but
+// successful I/O must not be cut off by the interactive deadline.
+func TestBulkCheckpointDoesNotUseInteractiveDeadline(t *testing.T) {
+	s, reader, writer := newCloseCheckpointFixture(t, nil, 0)
+	if err := s.checkpointBulkWAL(); err != nil {
+		t.Fatal(err)
+	}
+	if writer.queries.Load() != 1 || reader.queries.Load() != 0 {
+		t.Fatalf("checkpoint queries: writer=%d reader=%d", writer.queries.Load(), reader.queries.Load())
+	}
+	if writer.deadline.Load() {
+		t.Error("bulk durability checkpoint imposed the interactive checkpoint deadline on successful I/O")
+	}
+}
+
+func TestBulkCheckpointRetainsContentionRetryBudget(t *testing.T) {
+	s, _, writer := newCloseCheckpointFixture(t, nil, 1)
+	s.busyRetryTimeout = time.Nanosecond
+	if err := s.checkpointBulkWAL(); !errors.Is(err, errSQLiteBusyRetryExhausted) {
+		t.Fatalf("bulk checkpoint error = %v, want bounded contention exhaustion", err)
+	}
+	if writer.queries.Load() == 0 {
+		t.Fatal("contention prerequisite: the checkpoint driver was not called")
+	}
+}
