@@ -678,11 +678,15 @@ func wrapBulkRestoreError(pragma string, err error) error {
 	return fmt.Errorf("store_sqlite: restore bulk PRAGMA %s: %w", pragma, err)
 }
 
+// checkpointBulkWAL is the durability boundary for a standalone bulk window:
+// every frame the pinned writer committed at synchronous=OFF is synced here.
+// Like Close's ordinary checkpoint it carries no interactive deadline — a
+// successful back-fill and fsync can exceed walCheckpointTimeout on a busy
+// disk, and interrupting it fails the whole load for slow but healthy I/O.
+// busy_timeout and withSQLiteBusyRetry still bound reader contention.
 func (s *Store) checkpointBulkWAL() error {
-	ctx, cancel := context.WithTimeout(context.Background(), walCheckpointTimeout)
-	defer cancel()
 	started := time.Now()
-	result, err := s.checkpointWALWithContextResult(ctx)
+	result, err := s.checkpointWALWithContextResult(context.Background())
 	s.emitBulkFinalizeEvent(bulkFinalizeEvent{
 		Stage: "checkpoint", Name: "wal_truncate", Elapsed: time.Since(started),
 		Busy: result.Busy, WALFrames: result.WALFrames,
