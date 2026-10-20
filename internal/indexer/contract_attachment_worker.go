@@ -49,6 +49,10 @@ type ContractFollowupCoreFile struct {
 // extractor bytes with their exact source/policy proof; it never falls back to current
 // filesystem bytes. The runner owns Release on every exit.
 type ContractFollowupSnapshot struct {
+	// cohortWork is the complete admitted selected work universe, independent
+	// of which exact attachments still need payloads. Nil preserves legacy
+	// target-union capture; a non-nil empty slice certifies an empty capture.
+	cohortWork []graph.ContractWork
 	// inputsCurrent retains the capture's exact selected-input fence. Frozen
 	// snapshots omit it; it never substitutes for publication's transaction CAS.
 	inputsCurrent func(context.Context) error
@@ -303,14 +307,16 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 		lease := req.Leases.Acquire(target.Payload.ViewGeneration())
 		defer lease.Release()
 	}
-	if req.delta != nil {
+	prepared := &contractFollowupPrepared{}
+	if req.Snapshot.cohortWork != nil {
+		prepared.work = append([]graph.ContractWork{}, req.Snapshot.cohortWork...)
+	} else {
 		for _, target := range req.Targets {
-			req.delta.membershipUnknown = req.delta.membershipUnknown || contractDeltaMembershipUnknown(target.Work)
+			prepared.work = append(prepared.work, target.Work...)
 		}
 	}
-	prepared := &contractFollowupPrepared{}
-	for _, target := range req.Targets {
-		prepared.work = append(prepared.work, target.Work...)
+	if req.delta != nil {
+		req.delta.membershipUnknown = req.delta.membershipUnknown || contractDeltaMembershipUnknown(prepared.work)
 	}
 	defer func() {
 		if cleanupErr := prepared.close(); err == nil {

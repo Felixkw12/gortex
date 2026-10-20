@@ -173,6 +173,7 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 		}()
 		snapshot.Inputs = append([]graph.ContractInputWitness(nil), inputs.Witnesses...)
 		snapshot.Key = graph.ContractAttachmentKey{RepoPrefix: repo, CheckoutID: checkout, InputVersion: inputs.State.InputVersion, InputFingerprint: inputs.State.InputFingerprint}
+		snapshot.cohortWork = make([]graph.ContractWork, 0)
 		for _, name := range names {
 			state, e := graph.ComposeContractInputState(name, checkout, snapshot.Inputs)
 			if e != nil || !state.Accepted {
@@ -185,9 +186,6 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 			existing, e := receiver.GetContractAttachmentContext(ctx, key)
 			if e != nil {
 				return ContractFollowupSnapshot{}, nil, e
-			}
-			if existing != nil {
-				continue
 			}
 			var work []graph.ContractWork
 			tokens := make(map[string]bool)
@@ -205,6 +203,13 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 						work = append(work, row)
 					}
 				}
+			}
+			// Publication acknowledges only missing targets' exact Work below.
+			// Convergence still sees every admitted namespace: an early durable
+			// target must not erase its immutable census barrier on recapture.
+			snapshot.cohortWork = append(snapshot.cohortWork, work...)
+			if existing != nil {
+				continue
 			}
 			targets = append(targets, ContractFollowupTarget{Key: key, Work: work, Catalog: publicationSources[name]})
 		}
