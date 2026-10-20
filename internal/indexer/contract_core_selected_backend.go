@@ -12,8 +12,36 @@ import (
 // It never substitutes an actor's latest head or folds mutable0 into the
 // cumulative positive identity.
 func newSelectedContractCoreStorageBackend(ctx context.Context, target *store_sqlite.Store, base graph.Reader, repo, checkout string) (*contractCoreStorageBackend, error) {
+	return selectedContractCoreStorageBackend(ctx, target, base, repo, checkout, false)
+}
+
+func selectedContractCoreStorageBackend(ctx context.Context, target *store_sqlite.Store, base graph.Reader, repo, checkout string, fullRoot bool) (*contractCoreStorageBackend, error) {
 	if target == nil || target.ViewGeneration() <= 0 {
 		return nil, fmt.Errorf("contract core: positive target required")
+	}
+	var resumed *graph.ContractInputState
+	if fullRoot {
+		row, found, err := target.Catalog().GetViewGeneration(ctx, target.ViewGeneration())
+		if err != nil {
+			return nil, err
+		}
+		if base != nil || !found || row.State != store_sqlite.ViewGenerationBuilding ||
+			row.OwnerKind != "dedicated_graph" || row.GenerationKind != "dedicated" ||
+			row.CheckoutID != checkout || row.BaseGenerationID != 0 || row.LayerID != "" || row.LowerViewFingerprint != "" {
+			return nil, store_sqlite.ErrCatalogStaleGuard
+		}
+		// Only this owned physical root can contain an interrupted census. Do
+		// not substitute a selected ancestor or another actor's latest header.
+		state, found, err := target.ContractInputStateContext(ctx, repo, checkout)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			if !state.Accepted || state.InputVersion != contractCoreInputVersion {
+				return nil, store_sqlite.ErrCatalogStaleGuard
+			}
+			resumed = &state
+		}
 	}
 	var sources []graphview.GenerationSource
 	switch selected := base.(type) {
@@ -64,6 +92,9 @@ func newSelectedContractCoreStorageBackend(ctx context.Context, target *store_sq
 	if cumulative == nil {
 		cumulative = &graph.ContractInputState{RepoPrefix: repo, CheckoutID: checkout, InputVersion: contractCoreInputVersion,
 			InputFingerprint: contractInputHash([]byte(contractCoreInputVersion + ":empty-positive:" + repo)), Accepted: true}
+	}
+	if resumed != nil {
+		cumulative = resumed
 	}
 	capture := contractCoreStorageCapture{
 		Prior: func(ctx context.Context, path string) (*graph.ContractBoundaryReceipt, *graph.ContractBoundaryReceiptSource, bool, error) {
@@ -124,6 +155,14 @@ func newSelectedContractCoreStorageBackend(ctx context.Context, target *store_sq
 	if e != nil {
 		return nil, e
 	}
+	if resumed != nil {
+		// beginFullCoreNamespace will CAS this exact input and restart its
+		// receipts atomically before any reset, parse, or graph write.
+		backend.expected = resumed
+		backend.stateInstalled = true
+		backend.resumeFullRoot = true
+		return backend, nil
+	}
 	carried := *cumulative
 	carried.CheckoutID = checkout
 	carried.Accepted = true
@@ -165,7 +204,7 @@ func (b *SparseGenerationBuilder) installSelectedContractCoreInputs(ctx context.
 	if req.contractFullCensus {
 		base = nil // The claimed source census is a new complete positive root.
 	}
-	backend, e := newSelectedContractCoreStorageBackend(ctx, handle, base, req.RepoPrefix, req.Identity.CheckoutID)
+	backend, e := selectedContractCoreStorageBackend(ctx, handle, base, req.RepoPrefix, req.Identity.CheckoutID, req.contractFullCensus)
 	if e != nil {
 		return e
 	}

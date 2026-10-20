@@ -42,6 +42,7 @@ type contractCoreStorageBackend struct {
 	staged         map[string]graph.ContractBoundaryReceipt
 	sources        map[string]graph.ContractBoundaryReceiptSource
 	fullNamespace  bool
+	resumeFullRoot bool
 	coldSemantic   map[string]string
 	cold           bool
 	coldRows       []graph.ContractBoundaryReceipt
@@ -475,7 +476,11 @@ func (b *contractCoreStorageBackend) beginFullCoreNamespace(ctx context.Context)
 		b.headerPending = true
 	} else {
 		next.Accepted = true
-		e = b.store.SetContractInputStateWithWorkContext(ctx, b.expected, next, work)
+		if b.resumeFullRoot {
+			e = b.store.RestartContractFullRootCensusContext(ctx, *b.expected, next, work)
+		} else {
+			e = b.store.SetContractInputStateWithWorkContext(ctx, b.expected, next, work)
+		}
 	}
 	if e != nil {
 		return e
