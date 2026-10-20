@@ -13,12 +13,23 @@ const contractOwnerGenerationIndexDDL = `CREATE INDEX IF NOT EXISTS edges_contra
 
 var _ graph.ContractRepoProjectionReader = (*Store)(nil)
 var _ graph.OverlayLayerContractRepoProjectionReader = (*Store)(nil)
+var _ graph.OverlayLayerContractRepoOwnerProjectionReader = (*Store)(nil)
 
 func (s *Store) LoadContractRepoProjectionContext(ctx context.Context, repo string) (graph.ContractFileProjection, error) {
 	return graph.CompleteContractRepoProjection(ctx, s, repo)
 }
 
+func (s *Store) ContractRepoOwnerProjectionSource() any { return s }
+
+func (s *Store) LayerContractRepoOwnerProjectionContext(ctx context.Context, repo string) (graph.ContractFileProjection, error) {
+	return s.layerContractRepoProjectionContext(ctx, repo, false)
+}
+
 func (s *Store) LayerContractRepoProjectionContext(ctx context.Context, repo string) (graph.ContractFileProjection, error) {
+	return s.layerContractRepoProjectionContext(ctx, repo, true)
+}
+
+func (s *Store) layerContractRepoProjectionContext(ctx context.Context, repo string, scalars bool) (graph.ContractFileProjection, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -35,14 +46,26 @@ func (s *Store) LayerContractRepoProjectionContext(ctx context.Context, repo str
 	defer func() { _ = tx.Rollback() }()
 	p := graph.ContractFileProjection{Targets: make(map[string]*graph.Node), SourceNodes: make(map[string]*graph.Node), FileNodes: make(map[string][]*graph.Node)}
 	budget := graph.ContractProjectionRowLimit
-	query := `SELECT ` + lookupNodeCols + ` FROM nodes WHERE repo_prefix=? AND kind='contract' AND view_gen=? LIMIT ?`
-	p.ScalarNodes, err = s.contractProjectionNodes(ctx, tx, query, []any{repo, s.viewGen, budget + 1}, &budget)
-	if err != nil {
-		return graph.ContractFileProjection{}, err
+	if scalars {
+		query := `SELECT ` + lookupNodeCols + ` FROM nodes WHERE repo_prefix=? AND kind='contract' AND view_gen=? LIMIT ?`
+		p.ScalarNodes, err = s.contractProjectionNodes(ctx, tx, query, []any{repo, s.viewGen, budget + 1}, &budget)
+		if err != nil {
+			return graph.ContractFileProjection{}, err
+		}
+	} else {
+		// Keep every scalar completion key and its mask path. A selected node
+		// replacement can reattribute a lower off-file owner edge into this repo.
+		// The kind/generation seek avoids scanning historical repo payloads;
+		// canonical completion still checks the complete selected ID groups.
+		query := `SELECT id,file_path FROM nodes WHERE +repo_prefix=? AND kind='contract' AND view_gen=? LIMIT ?`
+		p.ScalarNodes, err = s.contractProjectionScalarIdentities(ctx, tx, query, []any{repo, s.viewGen, budget + 1}, repo, &budget)
+		if err != nil {
+			return graph.ContractFileProjection{}, err
+		}
 	}
 	// Sparse kind-first ownership projection also retains edge-only physical
 	// generations whose source node is supplied by a lower selected layer.
-	query = contractRepoOwnerRowsQuery()
+	query := contractRepoOwnerRowsQuery()
 	p.OwnerRows, err = s.contractProjectionEdges(ctx, tx, query, []any{s.viewGen, repo, budget + 1}, &budget)
 	if err != nil {
 		return graph.ContractFileProjection{}, err
@@ -78,4 +101,33 @@ func contractRepoOwnerRowsQuery() string {
  FROM edges AS e INDEXED BY ` + contractOwnerGenerationIndexName + ` LEFT JOIN nodes AS n ON n.id=e.from_id AND n.view_gen=e.view_gen
  WHERE e.kind IN ` + contractOwnerKindsSQL + ` AND e.view_gen=?
  AND (n.repo_prefix=? OR n.id IS NULL) LIMIT ?`
+}
+
+// These rows are completion keys, never hydrated answers. Keep the same bounded
+// read transaction and failure semantics as the full scalar projection.
+func (s *Store) contractProjectionScalarIdentities(ctx context.Context, tx *sql.Tx, query string, args []any, repo string, budget *int) ([]*graph.Node, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*graph.Node
+	for rows.Next() {
+		var id, path string
+		if err := rows.Scan(&id, &path); err != nil {
+			return nil, err
+		}
+		if *budget == 0 {
+			return nil, graph.ErrContractProjectionLimit
+		}
+		*budget--
+		out = append(out, &graph.Node{ID: id, Kind: graph.KindContract, FilePath: path, RepoPrefix: repo})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
