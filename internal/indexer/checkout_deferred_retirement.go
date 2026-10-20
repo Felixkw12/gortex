@@ -82,8 +82,18 @@ func (l *CheckoutLifecycle) SweepDeferredRetirements(ctx context.Context) (retir
 		return 0, true, nil
 	}
 
+	// A restarted coordinator has no in-memory retirement backlog. With the
+	// shared build lane, old Ready layers of a served checkout are still safe
+	// candidate hints: the burst takes this same gate before checking live
+	// coordinator pins and transactional references. That also excludes a new
+	// publication's gap before the coordinator retains or routes it.
+	// Ungated callers retain the conservative served-checkout exclusion.
+	discoveryServed := served
+	if gate != nil {
+		discoveryServed = nil
+	}
 	discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, deferredRetirementDiscoveryTimeout)
-	discovered, discoveryErr := l.discoverDeferredRetirements(discoveryCtx, served, owed)
+	discovered, discoveryErr := l.discoverDeferredRetirements(discoveryCtx, discoveryServed, owed)
 	cancelDiscovery()
 
 	// Record every partial discovery result before observing cancellation. A
