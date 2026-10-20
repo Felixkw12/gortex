@@ -324,6 +324,7 @@ func contractCoreUnprobedCapabilities() []contractCoreCapName {
 		{"ContractExtractionEdgeReader", capOf[graph.ContractExtractionEdgeReader]},
 		{"OutgoingMetadataReader", capOf[graph.OutgoingMetadataReader]},
 		{"OverlayLayerContractProjectionReader", capOf[graph.OverlayLayerContractProjectionReader]},
+		{"OverlayLayerContractRepoOwnerProjectionReader", capOf[graph.OverlayLayerContractRepoOwnerProjectionReader]},
 		{"OverlayLayerContractRepoProjectionReader", capOf[graph.OverlayLayerContractRepoProjectionReader]},
 		{"OverrideDispatchCallBatchScanner", capOf[graph.OverrideDispatchCallBatchScanner]},
 		{"PathlessNodeBatchEvicter", capOf[graph.PathlessNodeBatchEvicter]},
