@@ -49,6 +49,9 @@ type ContractFollowupCoreFile struct {
 // extractor bytes with their exact source/policy proof; it never falls back to current
 // filesystem bytes. The runner owns Release on every exit.
 type ContractFollowupSnapshot struct {
+	// inputsCurrent retains the capture's exact selected-input fence. Frozen
+	// snapshots omit it; it never substitutes for publication's transaction CAS.
+	inputsCurrent func(context.Context) error
 	// CaptureProjectionWitness captures exact selected physical inputs immediately
 	// before this job reads them. This callback and its job-local witness never
 	// enter the owned actor checkpoint; frozen/custom snapshots may omit it.
@@ -240,8 +243,16 @@ type ContractFollowupBatchRequest struct {
 	PublishedEpoch         func() uint64
 	WaitPublished          func(context.Context, uint64, time.Time) bool
 	OtherActorWaiting      func() bool
-	convergenceHooks       *contractConvergenceHooks
-	delta                  *contractDeltaSession
+	// PriorityRepos opts into independently committing these targets before
+	// companion assembly. Nil preserves the original all-target atomic batch.
+	PriorityRepos []string
+	// TargetPublished runs after a real commit, outside the Store write gate.
+	// It is a wake-up hint; consumers must reopen their exact checked key.
+	TargetPublished func(ContractFollowupTargetResult)
+	// BackgroundCurrent refuses obsolete companion work after an early commit.
+	BackgroundCurrent func(context.Context) error
+	convergenceHooks  *contractConvergenceHooks
+	delta             *contractDeltaSession
 }
 
 type ContractFollowupTargetResult struct {
@@ -272,7 +283,8 @@ type contractFollowupPrepared struct {
 
 // RunContractFollowupBatch extracts and enriches the captured cohort once.
 // Each target keeps its own payload and immutable work; publication commits
-// every target together after all payloads and coverage candidates are ready.
+// every target together by default. PriorityRepos may commit selected targets
+// first; final full-vector validation alone supplies the complete cohort proof.
 func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequest) (batch ContractFollowupBatchReport, err error) {
 	if req.Snapshot.Release != nil {
 		defer req.Snapshot.Release()
@@ -310,34 +322,102 @@ func RunContractFollowupBatch(ctx context.Context, req ContractFollowupBatchRequ
 	}
 	fail := func(cause error) (ContractFollowupBatchReport, error) {
 		for i := range batch.Targets {
-			batch.Targets[i].Err = cause
+			if !batch.Targets[i].Report.Published {
+				batch.Targets[i].Err = cause
+			}
 		}
 		batch.Cohort = prepared.report
 		return batch, cause
 	}
+	priority := make(map[string]bool, len(req.PriorityRepos))
+	var order []int
+	for _, repo := range req.PriorityRepos {
+		if priority[repo] {
+			continue
+		}
+		priority[repo] = true
+		for i, target := range req.Targets {
+			if target.Key.RepoPrefix == repo {
+				order = append(order, i)
+			}
+		}
+	}
 	for i, target := range req.Targets {
+		if !priority[target.Key.RepoPrefix] {
+			order = append(order, i)
+		}
+	}
+	publishedEarly := false
+	for _, i := range order {
+		target := req.Targets[i]
+		if publishedEarly && req.BackgroundCurrent != nil {
+			if err := req.BackgroundCurrent(ctx); err != nil {
+				return fail(err)
+			}
+		}
 		snap := req.Snapshot
 		snap.Key, snap.Work, snap.Release = target.Key, target.Work, func() {}
-		single := ContractFollowupRequest{Snapshot: snap, RebuildReason: req.RebuildReason, Payload: target.Payload, Catalog: target.Catalog, Registry: req.Registry, Config: req.Config, Logger: req.Logger, Leases: req.Leases, WorkspaceID: req.WorkspaceID, ProjectID: req.ProjectID, RepoConfigs: req.RepoConfigs, ScratchParent: req.ScratchParent, Yield: req.Yield,
+		yield := req.Yield
+		if publishedEarly && req.BackgroundCurrent != nil {
+			yield = func(ctx context.Context) error {
+				if err := req.BackgroundCurrent(ctx); err != nil {
+					return err
+				}
+				if req.Yield != nil {
+					return req.Yield(ctx)
+				}
+				return ctx.Err()
+			}
+		}
+		single := ContractFollowupRequest{Snapshot: snap, RebuildReason: req.RebuildReason, Payload: target.Payload, Catalog: target.Catalog, Registry: req.Registry, Config: req.Config, Logger: req.Logger, Leases: req.Leases, WorkspaceID: req.WorkspaceID, ProjectID: req.ProjectID, RepoConfigs: req.RepoConfigs, ScratchParent: req.ScratchParent, Yield: yield,
 			PublishedEpoch: req.PublishedEpoch, WaitPublished: req.WaitPublished, OtherActorWaiting: req.OtherActorWaiting, convergenceHooks: req.convergenceHooks, delta: req.delta}
 		report, targetErr := buildContractFollowupPrepared(ctx, single, prepared)
 		batch.Targets[i].Report = report
 		if targetErr != nil {
 			return fail(targetErr)
 		}
+		if priority[target.Key.RepoPrefix] {
+			candidate := prepared.publications[len(prepared.publications)-1]
+			started := time.Now()
+			results, publishErr := candidate.Store.PublishContractAttachmentsWithInputsContext(ctx, []store_sqlite.ContractAttachmentPublishTarget{candidate}, started.Unix())
+			if publishErr != nil {
+				return fail(contractProjectionPublicationError(publishErr))
+			}
+			elapsed := time.Since(started)
+			acceptContractPublication(&batch.Targets[i].Report, results[0], elapsed)
+			prepared.report.PublishDuration += elapsed
+			publishedEarly = true
+			if req.TargetPublished != nil {
+				req.TargetPublished(batch.Targets[i])
+			}
+		}
 	}
-	// Every payload and exact covered-work candidate is ready before the
-	// store acquires its write gate. A refusal publishes no target.
+	// Every candidate is validated together, including immutable acknowledgments
+	// for any exact key already committed above. This is the complete cohort's
+	// coherent validation point, not a claim all targets first became ready here.
 	started := time.Now()
 	results, publishErr := prepared.publications[0].Store.PublishContractAttachmentsWithInputsContext(ctx, prepared.publications, started.Unix())
 	if publishErr != nil {
 		return fail(contractProjectionPublicationError(publishErr))
 	}
 	elapsed := time.Since(started)
-	for i, result := range results {
-		acceptContractPublication(&batch.Targets[i].Report, result, elapsed)
+	byKey := make(map[graph.ContractAttachmentKey]int, len(batch.Targets))
+	for i, target := range batch.Targets {
+		byKey[target.Key] = i
 	}
-	prepared.report.PublishDuration, prepared.report.Published = elapsed, true
+	for i, result := range results {
+		attachment := prepared.publications[i].Attachment
+		key := graph.ContractAttachmentKey{RepoPrefix: attachment.RepoPrefix, CheckoutID: attachment.CheckoutID, InputVersion: attachment.InputVersion, InputFingerprint: attachment.InputFingerprint}
+		target := &batch.Targets[byKey[key]]
+		if !target.Report.Published {
+			acceptContractPublication(&target.Report, result, elapsed)
+			if req.TargetPublished != nil {
+				req.TargetPublished(*target)
+			}
+		}
+	}
+	prepared.report.PublishDuration += elapsed
+	prepared.report.Published = true
 	batch.Publication = contractPublishedResults(prepared.proof, prepared.publications, results)
 
 	batch.Cohort = prepared.report

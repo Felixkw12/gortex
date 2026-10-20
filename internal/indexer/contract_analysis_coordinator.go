@@ -76,6 +76,9 @@ type contractAnalysisJob struct {
 	queuedAt          time.Time
 	capture           time.Duration
 	otherActorWaiting func() bool
+	priorityRepos     []string
+	targetPublished   func(ContractFollowupTargetResult)
+	backgroundCurrent func(context.Context) error
 }
 
 // contractJobTriggerInterest queues a job for a request's interest in its key.
@@ -324,7 +327,16 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 		zap.String("trigger", job.trigger), zap.Float64("since_trigger_ms", contractMillis(dispatch)),
 		zap.Float64("since_accept_ms", sinceAccept), zap.Float64("capture_ms", contractMillis(job.capture)))
 	report, err := RunContractFollowupBatch(c.ctx, ContractFollowupBatchRequest{Snapshot: job.snapshot, Targets: targets, RebuildReason: ContractFollowupUnknownInterval, Registry: c.options.Registry, Config: c.options.Config, RepoConfigs: job.snapshot.RepoConfigs, Logger: c.options.Logger, Leases: c.options.Leases, ScratchParent: c.options.ScratchParent, Yield: c.options.Yield,
-		PublishedEpoch: c.publishedEpoch, WaitPublished: c.waitPublished, OtherActorWaiting: job.otherActorWaiting, delta: job.delta})
+		PublishedEpoch: c.publishedEpoch, WaitPublished: c.waitPublished, OtherActorWaiting: job.otherActorWaiting, delta: job.delta,
+		PriorityRepos: job.priorityRepos, BackgroundCurrent: job.backgroundCurrent,
+		TargetPublished: func(result ContractFollowupTargetResult) {
+			// Record custody before an external wake-up can panic. A later
+			// companion failure must never retire an already committed winner.
+			published[result.Report.PayloadGeneration] = true
+			if job.targetPublished != nil {
+				job.targetPublished(result)
+			}
+		}})
 	if err != nil && !errors.As(err, new(*ContractFillContinued)) {
 		c.options.Logger.Warn("contract cohort analysis failed", zap.Error(err))
 	}
@@ -343,7 +355,8 @@ func (c *ContractAnalysisCoordinator) execute(job *contractAnalysisJob) string {
 	if err == nil {
 		err = targetErr
 	}
-	// Only the plural transaction's complete target vector proves this cohort.
+	// Only the final plural validation's complete vector proves this cohort.
+	// A priority target may have committed earlier under the same full inputs.
 	// Previously attached targets skipped above have their own historical proof;
 	// never invent it from this job's current source witnesses or stamps.
 	if err == nil && len(targets) == len(job.targets) && contractPublishedCohortComplete(report.Publication) {

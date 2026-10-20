@@ -211,6 +211,7 @@ func NewContractFollowupSourceCapture(options ContractFollowupCaptureOptions) Co
 		if err = inputs.Validate(ctx); err != nil {
 			return ContractFollowupSnapshot{}, nil, err
 		}
+		snapshot.inputsCurrent = inputs.Validate
 		owned = false
 		return snapshot, targets, nil
 	}
