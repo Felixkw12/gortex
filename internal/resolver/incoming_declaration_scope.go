@@ -212,10 +212,10 @@ func (r *Resolver) SetPriorDeclarations(prior map[string]DeclarationSurface) {
 // evidence-scoping choice is inherited with it.
 func (r *Resolver) InheritIncrementalEvidence(from *Resolver) {
 	if from == nil {
-		r.priorDeclarations, r.incrementalSkip = nil, nil
+		r.priorDeclarations, r.incrementalSkip, r.incrementalTerminals = nil, nil, nil
 		return
 	}
-	r.priorDeclarations, r.incrementalSkip = from.priorDeclarations, from.incrementalSkip
+	r.priorDeclarations, r.incrementalSkip, r.incrementalTerminals = from.priorDeclarations, from.incrementalSkip, from.incrementalTerminals
 	r.evidenceScopingOff = from.evidenceScopingOff
 }
 

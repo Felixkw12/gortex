@@ -217,9 +217,20 @@ func TestEvidenceScopingIsOnByDefault(t *testing.T) {
 	// evidence.
 	from := New(graph.New())
 	from.SetEvidenceScoping(false)
+	old := &graph.Edge{From: "caller.go::Run", To: "unresolved::Missing", Kind: graph.EdgeCalls, FilePath: "caller.go", Line: 4}
+	setEdgeTerminal(old, terminalReasonNoDefinition)
+	from.SetIncrementalSkip([]*graph.Edge{old})
 	master := New(graph.New())
 	master.InheritIncrementalEvidence(from)
 	assert.False(t, master.EvidenceScoping())
+	key := graph.EdgeIdentityFor(old)
+	assert.Same(t, from.incrementalTerminals[key], master.incrementalTerminals[key], "the master shares the immutable captured proof")
+	from.SetIncrementalSkip(nil)
+	assert.NotNil(t, master.incrementalTerminals[key], "clearing the source resets its pointer without mutating inherited evidence")
+	master.InheritIncrementalEvidence(nil)
+	assert.Nil(t, master.priorDeclarations)
+	assert.Nil(t, master.incrementalSkip)
+	assert.Nil(t, master.incrementalTerminals, "no proof may survive the catch-up that owned it")
 
 	// An unconfigured resolver engages the carry.
 	g, parked := declarationFixture(t, nil)
