@@ -24,7 +24,9 @@ func scheduleAndWait(t *testing.T, ctx context.Context, c *ContractAnalysisCoord
 	scheduled, err := c.Schedule(ctx, ContractScheduleRequest{Actor: NewContractActor("", repos), Key: key, Inputs: inputs, Epoch: c.InputEpoch()})
 	require.NoError(t, err)
 	status, err := c.WaitActor(ctx, scheduled.Actor, scheduled.ArrivalSeq)
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("WaitActor seq=%d: %v; returned status: %+v; current status: %+v", scheduled.ArrivalSeq, err, status, c.Status(scheduled.Actor))
+	}
 	return scheduled, status
 }
 

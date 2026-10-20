@@ -19,7 +19,19 @@ import (
 )
 
 func TestContractProjectedConsumerPublishesTheMixedAcceptedAttachment(t *testing.T) {
-	setupCtx, cancelSetup := context.WithTimeout(t.Context(), 5*time.Second)
+	testContractProjectedConsumerPublishesMixedAcceptedAttachment(t, time.Minute, true)
+}
+
+// The ordinary test proves repair/publication correctness with fresh hang bounds
+// for baseline repair and accepted analysis. The opt-in performance caller keeps
+// the original shared five-second consumer budget across both operations.
+func testContractProjectedConsumerPublishesMixedAcceptedAttachment(t *testing.T, budget time.Duration, perOperation bool) {
+	t.Helper()
+	setupBudget := 5 * time.Second
+	if perOperation {
+		setupBudget = budget
+	}
+	setupCtx, cancelSetup := context.WithTimeout(t.Context(), setupBudget)
 	defer cancelSetup()
 	idx, store := newSQLiteIndexer(t)
 	idx.SetRepoPrefix("fixture")
@@ -48,15 +60,20 @@ func TestContractProjectedConsumerPublishesTheMixedAcceptedAttachment(t *testing
 	require.NoError(t, err)
 	mi.SetOutputGenerationAuthority(NewOutputGenerationAuthority(leases))
 	materializer := &graphview.Materializer{Store: store, Catalog: store.Catalog(), Leases: leases}
-	// Setup/indexing is separate from the bounded consumer operation. A
-	// coordinator completion notification also joins scratch-store cleanup.
-	// Keep its original five-second budget intact after the fixture is ready.
+	// Keep asynchronous baseline ownership independent of an ordinary phase's
+	// context; cancel it before coordinator/job cleanup even on assertion failure.
 	cancelSetup()
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	runtimeCtx, cancelRuntime := context.WithCancel(t.Context())
+	if !perOperation {
+		cancelRuntime()
+		runtimeCtx, cancelRuntime = context.WithTimeout(t.Context(), budget)
+	}
+	defer cancelRuntime()
+	ctx, cancel := context.WithTimeout(runtimeCtx, budget)
 	defer cancel()
 	var admission sync.Mutex
 	var jobs sync.WaitGroup
-	options := ContractFollowupCaptureOptions{Context: ctx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }, BaselineAdmissionMu: &admission, BaselineJobs: &jobs}
+	options := ContractFollowupCaptureOptions{Context: runtimeCtx, Store: store, Materializer: materializer, MultiIndexer: mi, Registry: idx.registry, Config: idx.config, Logger: zap.NewNop(), Yield: func(ctx context.Context) error { return ctx.Err() }, BaselineAdmissionMu: &admission, BaselineJobs: &jobs}
 	coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: store, Leases: leases, Registry: idx.registry, Config: idx.config, Capture: NewContractFollowupSourceCapture(options), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, coordinator.Close()); jobs.Wait() })
@@ -67,7 +84,13 @@ func TestContractProjectedConsumerPublishesTheMixedAcceptedAttachment(t *testing
 	scheduled, status := scheduleAndWait(t, ctx, coordinator, []string{"fixture"}, "fixture", pending)
 	require.Equal(t, ContractDeferred, scheduled.Result)
 	require.Equal(t, ContractActorInputsStale, status.Result, "the baseline's Published resolves the pending promise")
-	jobs.Wait()
+	baselineDone := make(chan struct{})
+	go func() { jobs.Wait(); close(baselineDone) }()
+	select {
+	case <-baselineDone:
+	case <-ctx.Done():
+		t.Fatalf("baseline repair join: %v; actor status: %+v", ctx.Err(), coordinator.Status(scheduled.Actor))
+	}
 	accepted, err := materializer.CaptureContractInputs(ctx, nil, "fixture", "")
 	require.NoError(t, err)
 	require.True(t, accepted.State.Accepted)
@@ -82,6 +105,13 @@ func TestContractProjectedConsumerPublishesTheMixedAcceptedAttachment(t *testing
 	require.NotEmpty(t, receipt.ProducedInputs[contractBoundaryLookupKey("fixture", "symbol_name", "tree_sitter_demo")])
 	require.Equal(t, true, store.GetNode("fixture/src/parser.c").Meta[generatedParserProjectionMetaKey], "repair must retain the actual accepted core projection")
 
+	// The accepted analysis has its own correctness hang bound in ordinary CI.
+	// Performance mode deliberately retains the original shared consumer deadline.
+	if perOperation {
+		cancel()
+		ctx, cancel = context.WithTimeout(runtimeCtx, budget)
+		defer cancel()
+	}
 	// The capture must recognize the actual accepted projected receipt
 	// policy: the job publishes.
 	_, status = scheduleAndWait(t, ctx, coordinator, []string{"fixture"}, "fixture", accepted)
