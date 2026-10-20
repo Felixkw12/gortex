@@ -1485,8 +1485,8 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	}
 	job := &contractAnalysisJob{id: id, snapshot: snapshot, targets: targets, trigger: trigger, queuedAt: triggeredAt, capture: captureDuration}
 	c.mu.Lock()
-	// Persistent debt is not an edit sequence. Prefer the most recently
-	// announced cohort repository, then the explicitly selected target.
+	// An explicit response target must not wait behind an older publication
+	// hint. Without one, retain the most recently announced cohort repository.
 	var latestRepo string
 	var latest uint64
 	checkedAccepted := make(map[string]uint64, len(a.repos))
@@ -1497,11 +1497,11 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 			latestRepo, latest = repo, epoch
 		}
 	}
-	if latest != 0 {
-		job.priorityRepos = append(job.priorityRepos, latestRepo)
-	}
-	if want.priorityRepo != "" && (latest == 0 || want.priorityRepo != latestRepo) {
+	if want.priorityRepo != "" {
 		job.priorityRepos = append(job.priorityRepos, want.priorityRepo)
+	}
+	if latest != 0 && latestRepo != want.priorityRepo {
+		job.priorityRepos = append(job.priorityRepos, latestRepo)
 	}
 	job.targetPublished = func(result ContractFollowupTargetResult) {
 		c.mu.Lock()

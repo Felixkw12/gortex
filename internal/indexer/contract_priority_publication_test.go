@@ -231,6 +231,80 @@ func TestContractCoordinatorWaitTargetReopensBeforeWholeActorCompletes(t *testin
 	require.True(t, contractPublishedCohortComplete(cohort))
 }
 
+func TestContractCoordinatorExplicitTargetPublishesBeforeOlderRepositoryHint(t *testing.T) {
+	f := newContractWorkerFixture(t)
+	_, a, b := priorityBatchRequest(t, f)
+	capture := func(context.Context, *ContractCaptureSource, *graphview.SelectedContractInputs, string, string) (ContractFollowupSnapshot, []ContractFollowupTarget, error) {
+		snapshot := a.Snapshot
+		snapshot.ReadAccepted = func(ctx context.Context, file ContractFollowupFile) (ContractAcceptedSource, error) {
+			return ContractAcceptedSource{Bytes: append([]byte(nil), f.sources[file.Path]...), SourceFingerprint: file.SourceFingerprint, Policy: file.Policy}, ctx.Err()
+		}
+		return snapshot, []ContractFollowupTarget{
+			{Key: b.Snapshot.Key, Work: b.Snapshot.Work, Catalog: b.Catalog},
+			{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Catalog: a.Catalog},
+		}, nil
+	}
+	c, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: f.store, Leases: f.leases, Registry: f.registry, Config: f.cfg, Capture: capture, Yield: a.Yield})
+	require.NoError(t, err)
+	first := make(chan ContractFollowupTargetResult, 2)
+	resume := make(chan struct{})
+	var once sync.Once
+	defer func() { once.Do(func() { close(resume) }); require.NoError(t, c.Close()) }()
+	execute := c.execute
+	c.run = func(job *contractAnalysisJob) string {
+		notify := job.targetPublished
+		job.targetPublished = func(result ContractFollowupTargetResult) {
+			notify(result)
+			first <- result
+			select {
+			case <-resume:
+			case <-c.ctx.Done():
+			}
+		}
+		return execute(job)
+	}
+	// The last notification belongs to the companion. It remains a useful
+	// fallback hint, but must not precede this explicitly requested target.
+	c.Published(t.Context(), "repo-b", "")
+	actor := NewContractActor("", []string{"repo-a", "repo-b"})
+	scheduled, err := c.Schedule(t.Context(), ContractScheduleRequest{Actor: actor, Key: a.Snapshot.Key, Inputs: &graphview.SelectedContractInputs{State: graph.ContractInputState{Accepted: true}}, Epoch: c.InputEpoch(), PriorityTarget: true})
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	select {
+	case target := <-first:
+		require.Equal(t, a.Snapshot.Key, target.Key)
+		require.True(t, target.Report.Published)
+		require.NoError(t, target.Err)
+	case <-ctx.Done():
+		t.Fatal("requested target never committed")
+	}
+	header, err := f.store.GetContractAttachmentContext(ctx, a.Snapshot.Key)
+	require.NoError(t, err)
+	require.NotNil(t, header, "first notification follows a real durable target publication")
+	absent, err := f.store.GetContractAttachmentContext(ctx, b.Snapshot.Key)
+	require.NoError(t, err)
+	require.Nil(t, absent, "the older companion hint remains behind the publication barrier")
+	status, err := c.WaitTarget(ctx, actor, scheduled.ArrivalSeq, a.Snapshot.Key)
+	require.NoError(t, err)
+	require.Equal(t, ContractActorPublished, status.Result)
+	stopped, stop := context.WithCancel(ctx)
+	stop()
+	_, err = c.WaitActor(stopped, actor, scheduled.ArrivalSeq)
+	require.ErrorIs(t, err, context.Canceled, "local readiness does not claim whole-cohort completion")
+	once.Do(func() { close(resume) })
+	status, err = c.WaitActor(ctx, actor, scheduled.ArrivalSeq)
+	require.NoError(t, err)
+	require.Equal(t, ContractActorPublished, status.Result)
+	cohort, release, err := c.AcquireLastPublishedCohort(ctx, actor)
+	require.NoError(t, err)
+	defer release()
+	require.True(t, contractPublishedCohortComplete(cohort), "all companion obligations remain in the final proof")
+	header, err = f.store.GetContractAttachmentContext(ctx, b.Snapshot.Key)
+	require.NoError(t, err)
+	require.NotNil(t, header)
+}
+
 func TestContractSchedulerNewerRequestSupersedesWithoutStalling(t *testing.T) {
 	p := newSchedulerProbe(t, nil)
 	p.hold("repo-a/@first")
@@ -445,7 +519,7 @@ func TestContractSchedulerPriorityHintsAndRelevantInputFences(t *testing.T) {
 			case "edited-global":
 				require.Equal(t, []string{"repo-a"}, job.priorityRepos)
 			case "edited-and-explicit":
-				require.Equal(t, []string{"repo-a", "repo-b"}, job.priorityRepos)
+				require.Equal(t, []string{"repo-b", "repo-a"}, job.priorityRepos)
 			}
 			for range 3 {
 				require.NoError(t, job.backgroundCurrent(t.Context()))
