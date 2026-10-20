@@ -164,6 +164,10 @@ type DirtyLayerRequest struct {
 	// whole dirty set: a change elsewhere does not touch what this
 	// generation claims.
 	narrowMotion func(paths []string)
+
+	// semanticMotion arms verified movement cancellation only while the
+	// unbounded working-copy enrichment call runs, against this exact sample.
+	semanticMotion func(gitstate.DirtySnapshot) func(error)
 }
 
 // DirtyChainFallbackError reports that a working-tree build over a
@@ -391,10 +395,16 @@ func (b *SparseGenerationBuilder) BuildDirtyLayer(
 	}
 	outpaced := false
 	generationID, report, err := b.buildWorkingTreeLayer(ctx, BuildRequest{
-		Identity:          identity,
-		importBatch:       importBatch,
-		samplePinned:      true,
-		contentProof:      proof,
+		Identity:     identity,
+		importBatch:  importBatch,
+		samplePinned: true,
+		contentProof: proof,
+		semanticMotion: func() func(error) {
+			if req.semanticMotion != nil {
+				return req.semanticMotion(before)
+			}
+			return func(error) {}
+		},
 		prePublishBarrier: req.buildBarrier,
 		importReadSetReady: func(ctx context.Context) bool {
 			if req.Sampler == nil {

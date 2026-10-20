@@ -70,6 +70,9 @@ const (
 // goroutine while the loop runs a cycle.
 type checkoutMotion struct {
 	mu sync.Mutex
+	// semantic is the attempt-local verifier, armed only inside the actual
+	// working-copy enrichment call; it never cancels on a hint alone.
+	semantic *semanticMotionAttempt
 	// watch is the checkout's file watcher; nil when it has none, and then
 	// none of the rules that read reported changes apply.
 	watch *checkoutWatch
@@ -259,6 +262,7 @@ func (c *CheckoutCoordinator) noteFilesystemChange(paths []string) {
 		}
 		m.paths[p] = stamp
 	}
+	semantic := m.semantic
 	abort := m.abort
 	touched := false
 	if abort != nil {
@@ -272,6 +276,9 @@ func (c *CheckoutCoordinator) noteFilesystemChange(paths []string) {
 		}
 	}
 	m.mu.Unlock()
+	if semantic != nil {
+		semantic.verify()
+	}
 	if touched {
 		abort.y.fire()
 	}

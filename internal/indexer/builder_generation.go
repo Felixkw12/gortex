@@ -193,6 +193,8 @@ type BuildRequest struct {
 	// parsed (buildContentProof); its PrePublish confirms by them. A build
 	// that leaves the delta path disables it.
 	contentProof *buildContentProof
+	// semanticMotion brackets only the actual unbounded enrichment call.
+	semanticMotion func() func(error)
 
 	// Identity names the generation in the catalog.
 	Identity GenerationIdentity
@@ -1268,14 +1270,23 @@ func (b *SparseGenerationBuilder) runEnrichment(
 	}
 	scope := withCheckoutDeclarations(b.checkoutCompilerScope(req.Changes), req.Base)
 	out.readWorkingCopy = true
-	pass, err := b.Semantic.EnrichCheckoutContext(ctx, handle, semantic.CheckoutEnrichRequest{
-		RepoPrefix:       req.RepoPrefix,
-		CheckoutID:       req.Enrich.CheckoutID,
-		Root:             req.RootPath,
-		Fingerprint:      req.Enrich.Fingerprint,
-		MinLanguageNodes: floor,
-		Compiler:         scope,
-	})
+	var finishMotion func(error)
+	if req.semanticMotion != nil {
+		finishMotion = req.semanticMotion()
+	}
+	pass, err := func() (pass semantic.CheckoutEnrichReport, err error) {
+		if finishMotion != nil {
+			defer func() { finishMotion(err) }()
+		}
+		return b.Semantic.EnrichCheckoutContext(ctx, handle, semantic.CheckoutEnrichRequest{
+			RepoPrefix:       req.RepoPrefix,
+			CheckoutID:       req.Enrich.CheckoutID,
+			Root:             req.RootPath,
+			Fingerprint:      req.Enrich.Fingerprint,
+			MinLanguageNodes: floor,
+			Compiler:         scope,
+		})
+	}()
 	out.Compiler = pass.Compiler
 	// After the pass, never before it: the warm-up yields to compiler loads,
 	// so starting it ahead of this build's own load would only be preempted.

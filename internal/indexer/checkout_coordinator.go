@@ -3501,6 +3501,9 @@ func (c *CheckoutCoordinator) buildDirtyLayerAttempts(
 	var stamped GenerationIdentity
 	var work *GenerationWorkCounters
 	for attempt := 0; attempt < 2; attempt++ {
+		attemptCtx, cancelAttempt := context.WithCancelCause(ctx)
+		motion := &semanticMotionAttempt{ctx: attemptCtx, cancel: cancelAttempt}
+		attemptStarted := time.Now()
 		req := DirtyLayerRequest{
 			Identity:            identity,
 			Base:                dirtyBase,
@@ -3515,6 +3518,9 @@ func (c *CheckoutCoordinator) buildDirtyLayerAttempts(
 			baseCensusFunc:      baseCensus,
 			baseOpen:            baseOpen,
 			narrowMotion:        c.narrowTreeMoveAbort,
+			semanticMotion: func(before gitstate.DirtySnapshot) func(error) {
+				return c.armSemanticMotion(motion, before, attemptStarted)
+			},
 			// A large working-tree change is imported file by file
 			// (checkout_import.go); the builder judges that by the change set
 			// it carries, so a delta over a parent that covers the dirty set
@@ -3534,7 +3540,11 @@ func (c *CheckoutCoordinator) buildDirtyLayerAttempts(
 			req.parent, req.parentManifest, req.parentDepth = parent.Parent, parent.Manifest, parent.Depth
 		}
 		started := time.Now()
-		generationID, report, err := c.builder.BuildDirtyLayer(WithIndexOrigin(ctx, "checkout_coordinator"), req)
+		generationID, report, err := func() (int64, BuildReport, error) {
+			defer cancelAttempt(nil)
+			id, report, err := c.builder.BuildDirtyLayer(WithIndexOrigin(attemptCtx, "checkout_coordinator"), req)
+			return id, report, motion.buildError(ctx, id, c.root, err)
+		}()
 		viewmetrics.Observe(viewmetrics.CoordinatorBuildSeconds, time.Since(started), viewmetrics.SlotDirty)
 		if report.Work != nil {
 			work = report.Work
