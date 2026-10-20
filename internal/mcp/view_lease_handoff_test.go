@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -355,18 +356,49 @@ func TestTrackRepositoryPinsTheViewForItsDetachedIndex(t *testing.T) {
 func TestAbandonedHandlerRetainsAndNamesItsView(t *testing.T) {
 	viewmetrics.Reset()
 	stack := newViewStack(t)
-	stack.srv.ToolCallTimeout = 150 * time.Millisecond
+	// Only this test selects its SQLite view before starting the short
+	// handler deadline. The production wrapper still bounds view selection.
+	stack.srv.ToolCallTimeout = -1
+	deadlineServer := &Server{ToolCallTimeout: 150 * time.Millisecond}
 
 	release := make(chan struct{})
+	handlerScheduled := make(chan struct{})
 	handlerDone := make(chan struct{})
+	retainedRead := make(chan bool, 1)
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		releaseHandler()
+		select {
+		case <-handlerScheduled:
+			select {
+			case <-handlerDone:
+				waitOutstandingHandoffs(t, viewmetrics.HandoffAbandonedHandler, 0)
+			case <-time.After(30 * time.Second):
+				t.Error("abandoned handler did not join during cleanup")
+			}
+		default:
+		}
+	})
 	res, err := stack.callWithView(t, stack.worktreeRoot, "get_symbol", nil,
 		func(hctx context.Context) (*mcplib.CallToolResult, error) {
-			defer close(handlerDone)
-			<-release
-			if !hasNode(stack.srv.readerFor(hctx), "repo/added.go::Fresh") {
-				return nil, errors.New("the abandoned handler lost its view")
-			}
-			return mcplib.NewToolResultText(`{"ok":true}`), nil
+			view := requestViewFromContext(hctx)
+			scope := requestRepositoryScopeFromContext(hctx)
+			close(handlerScheduled)
+			handler := deadlineServer.boundToolHandler(func(inner context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+				defer close(handlerDone)
+				noteRetainedRequest(inner, view, scope)
+				<-release
+				read := hasNode(stack.srv.readerFor(inner), "repo/added.go::Fresh")
+				retainedRead <- read
+				if !read {
+					return nil, errors.New("the abandoned handler lost its view")
+				}
+				return mcplib.NewToolResultText(`{"ok":true}`), nil
+			})
+			req := mcplib.CallToolRequest{}
+			req.Params.Name = "get_symbol"
+			return handler(hctx, req)
 		})
 	if err != nil {
 		t.Fatalf("call: %v", err)
@@ -395,8 +427,11 @@ func TestAbandonedHandlerRetainsAndNamesItsView(t *testing.T) {
 		t.Fatalf("retire while a handler is abandoned = %v, want %v", err, store_sqlite.ErrPayloadGenerationInUse)
 	}
 
-	close(release)
+	releaseHandler()
 	<-handlerDone
+	if !<-retainedRead {
+		t.Fatal("the abandoned handler lost its view")
+	}
 	waitOutstandingHandoffs(t, viewmetrics.HandoffAbandonedHandler, 0)
 	if err := stack.retireDirty(t); err != nil {
 		t.Fatalf("retire after the abandoned handler exited: %v", err)
