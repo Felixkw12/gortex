@@ -52,9 +52,9 @@ const initialDedicatedBaseAuthorityDomain = "gortex.dedicated-base.startup-autho
 
 // InitialBasePublication is one repository's publication outcome.
 //
-// It is a value rather than a log line because the startup publisher runs off
-// the readiness path: by the time a human or a test asks what happened, the
-// work is over. Skipped names a repository nothing was attempted for and why;
+// It is a value rather than a log line so the warmup tail and tests can
+// distinguish prepared bases from completed attempts. Core readiness does not
+// wait for publication. Skipped names a repository nothing was attempted for and why;
 // Err names one that was attempted and failed. A failure is recoverable — the
 // catalog's failed-claim recovery re-enters the same attempt on the next start
 // — so it is reported, never fatal to startup.
@@ -570,6 +570,44 @@ func (p *InitialBasePublisher) Outcomes() []InitialBasePublication {
 	out := make([]InitialBasePublication, len(p.outcomes))
 	copy(out, p.outcomes)
 	return out
+}
+
+// JoinScheduled waits for the queue boundary captured on entry, returning only
+// those outcomes. Unlike Wait, later live demand cannot extend this startup
+// join. BeginDraining must have released the startup queue: thereafter the
+// single worker takes every accepted slot in FIFO order, and coalescing replaces
+// a slot without moving it or incrementing queued.
+func (p *InitialBasePublisher) JoinScheduled(ctx context.Context) ([]InitialBasePublication, error) {
+	if p == nil {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	p.mu.Lock()
+	target := p.queued
+	if !p.drainReleased && target > p.attempted {
+		p.mu.Unlock()
+		return nil, errors.New("indexer: startup publication queue has not been released")
+	}
+	for {
+		count := min(target, len(p.outcomes))
+		outcomes := append([]InitialBasePublication(nil), p.outcomes[:count]...)
+		settled := p.attempted >= target
+		changed := p.changed
+		p.mu.Unlock()
+		if settled {
+			return outcomes, nil
+		}
+		select {
+		case <-ctx.Done():
+			return outcomes, ctx.Err()
+		case <-p.ctx.Done():
+			return outcomes, p.ctx.Err()
+		case <-changed:
+		}
+		p.mu.Lock()
+	}
 }
 
 // Wait blocks until every SCHEDULED publication has been attempted. It is the

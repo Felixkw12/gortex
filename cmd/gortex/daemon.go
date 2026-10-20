@@ -678,6 +678,20 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		if v1EventHub != nil && mw != nil {
 			go v1EventHub.Run(mw.Events())
 		}
+		// Core queries are already ready. Finish only the committed publications
+		// accepted during warmup before admitting linked builds or co-change
+		// writes that could make their initial copy yield to foreground demand.
+		baseStep := startWarmupStep(logger, "known_committed_bases")
+		baseReport, baseErr := joinKnownStartupBases(cmd.Context(), state.basePublisher, viewBuilds)
+		baseStep(zap.String("outcome", baseReport.outcome(baseErr)),
+			zap.Int("published", baseReport.published), zap.Int("owner_only", baseReport.ownerOnly),
+			zap.Int("failed", baseReport.failed), zap.Error(baseErr))
+		if baseErr != nil {
+			logger.Warn("daemon: known committed base preparation incomplete; view builds remain available for recovery", zap.Error(baseErr))
+			if cmd.Context().Err() != nil || baseReport.interrupted {
+				return
+			}
+		}
 		// Community detection and process discovery are a whole-graph pass
 		// costing minutes on a large workspace, and most sessions never ask
 		// for them. Running it here delayed readiness and kept the result
