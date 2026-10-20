@@ -111,10 +111,7 @@ func (r *Resolver) runFileAttributionPassesForFilesLocked(frontier incrementalFi
 	if !r.graphHasLanguage("go") {
 		return
 	}
-	var candidates []*graph.Edge
-	for _, path := range frontier.paths {
-		candidates = append(candidates, r.fileOutEdges(path)...)
-	}
+	candidates := r.goBuiltinFileCandidates(frontier.paths)
 	legs.lap("out_edges")
 	r.attributeGoBuiltinCandidates(candidates)
 	legs.lap("builtin")

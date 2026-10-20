@@ -131,29 +131,41 @@ func (r *Resolver) attributeGoBuiltinsForFile(filePath string) {
 	if !r.graphHasLanguage("go") {
 		return
 	}
-	candidates := r.fileOutEdges(filePath)
+	r.attributeGoBuiltinCandidates(r.goBuiltinFileCandidates([]string{filePath}))
+}
+
+// goBuiltinFileCandidates is shared by the single-file and batched tails.
+// Recording files are authoritative for dataflow sources outside their live
+// node set; the batched path must not silently narrow back to by-node rows.
+func (r *Resolver) goBuiltinFileCandidates(paths []string) []*graph.Edge {
+	allowed := make(map[string]bool, len(paths))
+	var candidates []*graph.Edge
+	for _, path := range paths {
+		if allowed[path] {
+			continue
+		}
+		allowed[path] = true
+		candidates = append(candidates, r.fileOutEdges(path)...)
+	}
 	seen := make(map[graph.EdgeIdentity]struct{}, len(candidates))
 	for _, edge := range candidates {
 		if edge != nil {
 			seen[graph.EdgeIdentityFor(edge)] = struct{}{}
 		}
 	}
-	// Dataflow sources may be placeholders or pathless builtin sentinels,
-	// neither of which belongs to GetFileNodes. Their recording file, rather
-	// than a by-node join, is the authority for the single-file frontier.
 	var recorded []*graph.Edge
 	if reader, ok := graph.RecordedEdgesOf(r.graph); ok {
-		recorded = reader.RecordedEdgesAt([]string{filePath})
+		recorded = reader.RecordedEdgesAt(paths)
 	} else {
-		// In-memory/adaptor stores without the recording-file capability retain
-		// the finite exact-target discovery used by the whole-graph pass.
+		// In-memory/adaptor stores without recording-file reads retain the
+		// finite exact-target discovery used by the whole-graph pass.
 		byTarget := r.graph.GetInEdgesByNodeIDs(goBuiltinUnresolvedTargets)
 		for _, target := range goBuiltinUnresolvedTargets {
 			recorded = append(recorded, byTarget[target]...)
 		}
 	}
 	for _, edge := range recorded {
-		if edge == nil || edge.FilePath != filePath || !graph.IsUnresolvedTarget(edge.To) || !detachedSource(edge.From) {
+		if edge == nil || !allowed[edge.FilePath] || !goBuiltinPendingCandidate(edge) {
 			continue
 		}
 		identity := graph.EdgeIdentityFor(edge)
@@ -162,7 +174,50 @@ func (r *Resolver) attributeGoBuiltinsForFile(filePath string) {
 			candidates = append(candidates, edge)
 		}
 	}
-	r.attributeGoBuiltinCandidates(candidates)
+	return candidates
+}
+
+func goBuiltinPendingCandidate(edge *graph.Edge) bool {
+	if edge == nil || !strings.HasPrefix(edge.To, "unresolved::") {
+		return false
+	}
+	if _, allowed := attributeGoBuiltinCandidateKinds[edge.Kind]; !allowed {
+		return false
+	}
+	return isGoBuiltinName(strings.TrimPrefix(edge.To, "unresolved::"))
+}
+
+// A zero pending count can mean every old unresolved shape was skipped, not
+// that attribution has no work. Inspect only the frontier already loaded by
+// the caller: this runs no generic pass/index build or recording-file query.
+func (r *Resolver) attributeFrontierGoBuiltins(frontier incrementalFileFrontier) {
+	allowed := make(map[string]bool, len(frontier.paths))
+	for _, path := range frontier.paths {
+		allowed[path] = true
+	}
+	seen := make(map[graph.EdgeIdentity]struct{})
+	var candidates []*graph.Edge
+	appendCandidate := func(edge *graph.Edge) {
+		if edge == nil || !allowed[edge.FilePath] || !goBuiltinPendingCandidate(edge) {
+			return
+		}
+		key := graph.EdgeIdentityFor(edge)
+		if _, duplicate := seen[key]; !duplicate {
+			seen[key] = struct{}{}
+			candidates = append(candidates, edge)
+		}
+	}
+	for _, edges := range frontier.outByNode {
+		for _, edge := range edges {
+			appendCandidate(edge)
+		}
+	}
+	for _, edge := range frontier.detached {
+		appendCandidate(edge)
+	}
+	if len(candidates) > 0 && r.graphHasLanguage("go") {
+		r.attributeGoBuiltinCandidates(candidates)
+	}
 }
 
 // attributeGoBuiltinCandidates resolves a set of possible builtin edges with
