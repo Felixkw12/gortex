@@ -62,17 +62,19 @@ func IsAgentConfigMCPFile(relPath string) bool {
 	return IsMCPConfigFile(rel) && IsAgentConfigMCPDir(path.Dir(rel))
 }
 
-// IsBuiltinAgentConfigRule reports whether pattern, a rule m matched, is
-// only the Builtin line that excludes an agent-config root wholesale. The
-// MCP config exception lifts only that line, so a user's own exclude still
-// applies, even one spelled like the Builtin line. Effective exclude lists
-// start with Builtin; a list that does not, or that repeats the line after
-// Builtin, carries a user copy of it.
-func IsBuiltinAgentConfigRule(m *Matcher, pattern string) bool {
-	if !slices.ContainsFunc(agentConfigRoots, func(root string) bool { return pattern == root+"/" }) {
+// ExcludesAgentConfigPath reports whether m excludes an MCP config file or
+// an open agent-config folder once the Builtin lines that exclude the
+// agent-config roots wholesale are lifted. The user's own excludes still
+// apply, even one spelled like the Builtin line.
+func ExcludesAgentConfigPath(m *Matcher, absPath, root string, isDir bool) bool {
+	if m == nil {
 		return false
 	}
-	return m.onlyInBuiltinPrefix(pattern)
+	return m.withoutBuiltinAgentRoots().MatchAbsDir(absPath, root, isDir)
+}
+
+func isAgentConfigRootPattern(pattern string) bool {
+	return slices.ContainsFunc(agentConfigRoots, func(root string) bool { return pattern == root+"/" })
 }
 
 // IsMCPConfigFile reports whether a path's basename is a recognised MCP

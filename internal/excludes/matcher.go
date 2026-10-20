@@ -29,6 +29,11 @@ type Matcher struct {
 	// Whether any anchored negation exists, so the watcher check can return
 	// before matching when none can apply.
 	hasAnchoredNegation bool
+
+	// The same list without Builtin's agent-config root lines, compiled on
+	// first use; see withoutBuiltinAgentRoots.
+	agentRootsLifted     *Matcher
+	agentRootsLiftedOnce sync.Once
 }
 
 // New compiles the given patterns into a Matcher. A nil/empty list is
@@ -155,17 +160,27 @@ func (m *Matcher) Patterns() []string {
 // cleanedBuiltin is Builtin as New cleans it.
 var cleanedBuiltin = sync.OnceValue(func() []string { return New(Builtin).patterns })
 
-// onlyInBuiltinPrefix reports whether the cleaned list starts with Builtin
-// and pattern occurs nowhere after it.
-func (m *Matcher) onlyInBuiltinPrefix(pattern string) bool {
-	if m == nil {
-		return false
-	}
-	builtin := cleanedBuiltin()
-	if len(m.patterns) < len(builtin) || !slices.Equal(m.patterns[:len(builtin)], builtin) {
-		return false
-	}
-	return !slices.Contains(m.patterns[len(builtin):], pattern)
+// withoutBuiltinAgentRoots returns m without the Builtin lines that exclude
+// the agent-config roots wholesale, compiled once. Effective exclude lists
+// start with Builtin; a list that does not holds only the user's lines and
+// is returned as is, and a copy of the line after Builtin stays.
+func (m *Matcher) withoutBuiltinAgentRoots() *Matcher {
+	m.agentRootsLiftedOnce.Do(func() {
+		builtin := cleanedBuiltin()
+		if len(m.patterns) < len(builtin) || !slices.Equal(m.patterns[:len(builtin)], builtin) {
+			m.agentRootsLifted = m
+			return
+		}
+		patterns := make([]string, 0, len(m.patterns))
+		for i, p := range m.patterns {
+			if i < len(builtin) && isAgentConfigRootPattern(p) {
+				continue
+			}
+			patterns = append(patterns, p)
+		}
+		m.agentRootsLifted = New(patterns)
+	})
+	return m.agentRootsLifted
 }
 
 // MatchRel reports whether a repo-root-relative path is excluded.

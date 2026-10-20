@@ -5676,10 +5676,8 @@ func shouldExcludeRules(path, root string, isDir bool, flat *excludes.Matcher, p
 		}
 		// The exception lifts only the Builtin line for the agent-config
 		// root; the user's excludes and per-folder ignore files still apply.
-		if flat != nil {
-			if matched, pattern := flat.ExplainAbsDir(path, root, isDir); matched && !excludes.IsBuiltinAgentConfigRule(flat, pattern) {
-				return true
-			}
+		if excludes.ExcludesAgentConfigPath(flat, path, root, isDir) {
+			return true
 		}
 		return perFolder.Match(path, isDir)
 	}
