@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -311,24 +312,30 @@ func TestPendingRepoPrefixesListsRepositoriesOnlyForUnhydratedSources(t *testing
 	assert.Equal(t, 1, store.listings, "a guess a hydrated source confirms must not pay the listing")
 }
 
-// fullRowCountingStore counts the full in-edge reads by stub key.
+// fullRowCountingStore separates the finite builtin-recording probe from
+// declaration admission reads by stub key.
 type fullRowCountingStore struct {
 	*graph.Graph
-	fullReads map[string]int
+	fullReads           map[string]int
+	builtinProbeBatches int
 }
 
 func (s *fullRowCountingStore) GetInEdgesByNodeIDs(ids []string) map[string][]*graph.Edge {
-	for _, id := range ids {
-		s.fullReads[id]++
+	if slices.Equal(ids, goBuiltinUnresolvedTargets) {
+		s.builtinProbeBatches++
+	} else {
+		for _, id := range ids {
+			s.fullReads[id]++
+		}
 	}
 	return s.Graph.GetInEdgesByNodeIDs(ids)
 }
 
 // With a carry, the incoming leg reads the stub keys' identities first and
 // the full rows only of the keys that park an unresolved reference: a stub key
-// with nothing parked on it is never read in full, neither when the frontier
-// is collected nor when the incoming leg resolves. The admitted references are
-// still resolved.
+// with nothing parked on it is never read in full by declaration admission.
+// The separate builtin tail makes exactly one finite target-set probe to find
+// detached edges recorded in the changed file. The admitted references resolve.
 func TestIncomingLegReadsFullRowsOnlyForParkedKeys(t *testing.T) {
 	g, parked := declarationFixture(t, nil)
 	prior := priorOf(g.GetFileNodes("pkg/changed.go")...)
@@ -343,6 +350,7 @@ func TestIncomingLegReadsFullRowsOnlyForParkedKeys(t *testing.T) {
 	r.ResolveFilesAndIncoming([]string{"pkg/changed.go"})
 	r.SetPriorDeclarations(nil)
 	assert.Equal(t, "pkg/changed.go::Target", parked.To, "the admitted parked reference is resolved")
+	require.Equal(t, 1, store.builtinProbeBatches, "exactly one batch must probe the complete builtin target set")
 	for key, reads := range store.fullReads {
 		if key != "unresolved::Target" && reads > 0 {
 			t.Errorf("stub key %s parks nothing but was read in full %d time(s)", key, reads)

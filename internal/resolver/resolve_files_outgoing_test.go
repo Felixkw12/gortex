@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -8,7 +9,9 @@ import (
 
 // ResolveFilesOutgoing re-binds the references recorded in the files and
 // reads (and so admits) none of the references parked on the names they
-// declare. The control arm shows the same fixture's parked reference IS
+// declare. A separate finite builtin probe discovers detached edges recorded
+// in the file without admitting declaration-name references. The control arm
+// shows the same fixture's parked reference IS
 // reachable through the incoming leg, so the outgoing-only arm leaving it
 // parked is the contract and not a fixture that binds nothing.
 func TestResolveFilesOutgoingRebindsOwnReferencesOnly(t *testing.T) {
@@ -28,8 +31,11 @@ func TestResolveFilesOutgoingRebindsOwnReferencesOnly(t *testing.T) {
 	g, own, parked := fixture()
 	counted := &incomingReadCounter{Store: g}
 	New(counted).ResolveFilesOutgoing([]string{"repo/b.go"})
+	if counted.builtinProbeBatches != 1 {
+		t.Fatalf("builtin recording probes = %d, want exactly one batch with the complete builtin target set", counted.builtinProbeBatches)
+	}
 	if counted.reads != 0 {
-		t.Fatalf("the outgoing-only pass read incoming rows %d time(s); it enumerates no stub key", counted.reads)
+		t.Fatalf("the outgoing-only pass made %d incoming reads outside the exact builtin probe; it admits no declaration stub key", counted.reads)
 	}
 	if own.To != "repo/a.go::F" {
 		t.Fatalf("the file's own reference target = %q, want repo/a.go::F", own.To)
@@ -45,13 +51,18 @@ func TestResolveFilesOutgoingRebindsOwnReferencesOnly(t *testing.T) {
 	}
 }
 
-// incomingReadCounter counts incoming-adjacency reads.
+// incomingReadCounter separates the exact builtin probe from other incoming reads.
 type incomingReadCounter struct {
 	graph.Store
-	reads int
+	reads               int
+	builtinProbeBatches int
 }
 
 func (c *incomingReadCounter) GetInEdgesByNodeIDs(ids []string) map[string][]*graph.Edge {
-	c.reads++
+	if slices.Equal(ids, goBuiltinUnresolvedTargets) {
+		c.builtinProbeBatches++
+	} else {
+		c.reads++
+	}
 	return c.Store.GetInEdgesByNodeIDs(ids)
 }
