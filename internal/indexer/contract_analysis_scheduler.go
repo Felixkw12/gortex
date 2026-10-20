@@ -146,6 +146,9 @@ type ContractScheduleRequest struct {
 	Inputs *graphview.SelectedContractInputs
 	Source *ContractCaptureSource
 	Epoch  uint64
+	// PriorityTarget is an explicit response-target hint. Accepted edits are
+	// prioritized independently, including actors reached through repo: *.
+	PriorityTarget bool
 }
 
 // ContractScheduleOutcome is what Schedule did with a request.
@@ -265,6 +268,9 @@ type contractActorWant struct {
 	inputs         *graphview.SelectedContractInputs
 	source         *ContractCaptureSource
 	repo, checkout string
+	// priorityRepo is a scheduling hint, separate from repo's source/recapture
+	// anchor. A coalesced request must not rehome the retained source.
+	priorityRepo string
 }
 
 type contractActorKeySeq struct {
@@ -549,6 +555,9 @@ func (c *ContractAnalysisCoordinator) Schedule(ctx context.Context, req Contract
 		// The actor already wants these inputs, or newer ones captured at a
 		// later epoch: the request waits on that promise.
 		result.ArrivalSeq = a.want.seq
+		if key == a.want.key && req.PriorityTarget {
+			a.want.priorityRepo = req.Key.RepoPrefix
+		}
 		if key == a.want.key && a.state == contractActorIdle && (a.interestExpired || a.resolved >= a.want.seq && a.resolvedResult == ContractActorInputsStale) {
 			// Renew work whose interest expired, or whose promise resolved
 			// stale, using the inputs and source this request captured.
@@ -577,6 +586,9 @@ func (c *ContractAnalysisCoordinator) Schedule(ctx context.Context, req Contract
 	dropped = a.want.source
 	a.seq++
 	a.want = contractActorWant{key: key, seq: a.seq, epoch: req.Epoch, inputs: req.Inputs, source: req.Source, repo: req.Key.RepoPrefix, checkout: req.Key.CheckoutID}
+	if req.PriorityTarget {
+		a.want.priorityRepo = req.Key.RepoPrefix
+	}
 	a.interestExpired = false
 	kept = true
 	a.requeues, a.backoff, a.retryOnInputs = 0, 0, false
@@ -757,6 +769,60 @@ func (c *ContractAnalysisCoordinator) WaitActor(ctx context.Context, actor Contr
 		}
 		changed := a.changed
 		c.mu.Unlock()
+		if status.Result != ContractActorPending {
+			return status, nil
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return status, ctx.Err()
+		case <-c.ctx.Done():
+			return status, ErrContractSchedulerClosed
+		}
+	}
+}
+
+// WaitTarget wakes a consumer when its exact durable attachment is available.
+// This is only a hint to reopen through the ordinary selected-input and lease
+// fences. It does not resolve the actor's whole-cohort promise or publish proof.
+func (c *ContractAnalysisCoordinator) WaitTarget(ctx context.Context, actor ContractActor, seq uint64, key graph.ContractAttachmentKey) (ContractActorStatus, error) {
+	if key.CheckoutID != actor.Checkout || key.InputVersion == "" || key.InputFingerprint == "" {
+		return ContractActorStatus{}, graph.ErrContractInputVector
+	}
+	if _, found := slices.BinarySearch(actor.Repos(), key.RepoPrefix); !found {
+		return ContractActorStatus{}, graph.ErrContractInputVector
+	}
+	for {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return ContractActorStatus{}, ErrContractSchedulerClosed
+		}
+		status := ContractActorStatus{Result: ContractActorKeyMoved, Seq: seq}
+		var changed <-chan struct{}
+		if a := c.actors[actor]; a != nil {
+			status = ContractActorStatus{Seq: seq, State: a.state.String(), FillCheckpoint: a.fillCheckpoint, Stalled: a.stalled.cycles > 0, RetryAfter: c.retryAfterLocked()}
+			switch {
+			case a.lastPublished.seq >= seq:
+				status.Result = ContractActorPublished
+			case a.resolved >= seq:
+				status.Result = a.resolvedResult
+			case a.want.seq > seq:
+				status.Result = ContractActorKeyMoved
+			}
+			changed = a.changed
+		}
+		c.mu.Unlock()
+		// Capture changed before the read: a commit and wake between these
+		// operations cannot be lost. No SQLite operation holds the scheduler mu.
+		attachment, err := c.options.Store.GetContractAttachmentContext(ctx, key)
+		if err != nil {
+			return status, err
+		}
+		if attachment != nil {
+			status.Result = ContractActorPublished
+			return status, nil
+		}
 		if status.Result != ContractActorPending {
 			return status, nil
 		}
@@ -1419,6 +1485,73 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	}
 	job := &contractAnalysisJob{id: id, snapshot: snapshot, targets: targets, trigger: trigger, queuedAt: triggeredAt, capture: captureDuration}
 	c.mu.Lock()
+	// Persistent debt is not an edit timestamp. Prefer the most recently
+	// announced cohort repository, then the explicitly selected target.
+	var latestRepo string
+	var latest time.Time
+	checkedAccepted := make(map[string]time.Time, len(a.repos))
+	for _, repo := range a.repos {
+		at := c.acceptedAt[repo]
+		checkedAccepted[repo] = at
+		if at.After(latest) || at.Equal(latest) && repo == want.repo {
+			latestRepo, latest = repo, at
+		}
+	}
+	if !latest.IsZero() {
+		job.priorityRepos = append(job.priorityRepos, latestRepo)
+	}
+	if want.priorityRepo != "" && (latest.IsZero() || want.priorityRepo != latestRepo) {
+		job.priorityRepos = append(job.priorityRepos, want.priorityRepo)
+	}
+	job.targetPublished = func(result ContractFollowupTargetResult) {
+		c.mu.Lock()
+		if result.Report.Published && result.Report.UnusedPayloadGeneration == 0 {
+			// An actual new target publication is durable useful progress,
+			// even if later companions are superseded by another edit. A
+			// duplicate's older winner must not disguise a no-progress loop.
+			a.failures = 0
+			a.stalled.cycles, a.stalled.reason = 0, ""
+		}
+		a.notifyLocked()
+		c.mu.Unlock()
+	}
+	job.backgroundCurrent = func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		newer := a.want.seq > want.seq
+		changed := false
+		for _, repo := range a.repos {
+			changed = changed || c.acceptedAt[repo] != checkedAccepted[repo]
+		}
+		var current map[string]time.Time
+		if changed {
+			current = make(map[string]time.Time, len(a.repos))
+			for _, repo := range a.repos {
+				current[repo] = c.acceptedAt[repo]
+			}
+		}
+		c.mu.Unlock()
+		if newer {
+			return errContractJobKeyMoved
+		}
+		// A cheap relevant-repo notification triggers one full input fence.
+		// Ordinary chunks do not reread the entire dependency vector, and
+		// unrelated global input epochs do not invalidate this background job.
+		if changed && snapshot.inputsCurrent != nil {
+			if err := snapshot.inputsCurrent(ctx); err != nil {
+				if errors.Is(err, graph.ErrContractProjectionStale) {
+					return fmt.Errorf("%w: %w", errContractJobKeyMoved, err)
+				}
+				return err
+			}
+		}
+		if changed {
+			checkedAccepted = current
+		}
+		return nil
+	}
 	cached := c.deltaCaches.borrow(a.id)
 	canContinueFill := !a.fillNeedsCheckpoint || (cached != nil && cached.continuation != nil)
 	if a.fillNeedsCheckpoint && !canContinueFill {
@@ -1567,6 +1700,17 @@ func (c *ContractAnalysisCoordinator) endJob(a *contractActor, want contractActo
 		a.stalled.cycles, a.stalled.reason = 0, ""
 		c.setStateLocked(a, contractActorIdle)
 	case viewmetrics.ContractJobSupersededKeyMoved:
+		if rerun {
+			if a.stalled.cycles > 0 {
+				// Preserve the already-proven stall's ended promise; the
+				// newer sequence has not run and must stay unresolved.
+				a.resolveLocked(want.seq, ContractActorStalled)
+			}
+			// A newer request deliberately superseded background companions.
+			// Their cooperative stop is not a failed attempt at the new key.
+			c.enqueueLocked(a, contractJobTriggerInterest, now)
+			break
+		}
 		a.failures++
 		if !c.stallLocked(a, want.seq, outcome, now) {
 			// The key moved: capture the new one and run it now.
