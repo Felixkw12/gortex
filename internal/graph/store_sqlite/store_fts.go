@@ -232,31 +232,38 @@ func upsertSymbolFTSChunkTx(tx *sql.Tx, viewGen int64, chunk []graph.SymbolFTSIt
 		repoPrefix string
 		rowid      int64
 		exists     bool
+		unchanged  bool
 	}
 
 	// Fetch owning repo prefixes and prior FTS docids with one indexed
 	// VALUES join for the whole chunk. This replaces the old two SELECTs
 	// per symbol while retaining the exact old rowid when one exists.
 	var lookup strings.Builder
-	lookup.WriteString(`WITH wanted(ord, node_id) AS (VALUES `)
-	lookupArgs := make([]any, 0, len(chunk)*2)
+	lookup.WriteString(`WITH wanted(ord, node_id, tokens) AS (VALUES `)
+	lookupArgs := make([]any, 0, len(chunk)*3+2)
 	for i, item := range chunk {
 		if i > 0 {
 			lookup.WriteByte(',')
 		}
-		lookup.WriteString(`(?, ?)`)
-		lookupArgs = append(lookupArgs, i, item.NodeID)
+		lookup.WriteString(`(?, ?, ?)`)
+		lookupArgs = append(lookupArgs, i, item.NodeID, item.Tokens)
 	}
 	// Both LEFT JOINs bind the same generation: the owning repo prefix must be
 	// read from the node this generation carries, not a same-id node another
 	// generation happens to hold, or the row would be filed under the wrong
 	// repository in this generation's index.
 	lookup.WriteString(`)
-SELECT wanted.ord, COALESCE(nodes.repo_prefix, ''), symbol_fts_rowid.fts_rowid
+SELECT wanted.ord, COALESCE(nodes.repo_prefix, ''), symbol_fts_rowid.fts_rowid,
+       CASE WHEN symbol_fts_rowid.repo_prefix = COALESCE(nodes.repo_prefix, '') COLLATE BINARY
+                  AND f.node_id = wanted.node_id COLLATE BINARY
+                  AND f.repo_prefix = COALESCE(nodes.repo_prefix, '') COLLATE BINARY
+                  AND typeof(f.tokens) = 'text' AND f.tokens = wanted.tokens COLLATE BINARY
+            THEN 1 ELSE 0 END
 FROM wanted
 LEFT JOIN nodes ON nodes.id = wanted.node_id AND nodes.view_gen = ?
 LEFT JOIN symbol_fts_rowid
        ON symbol_fts_rowid.view_gen = ? AND symbol_fts_rowid.node_id = wanted.node_id
+LEFT JOIN symbol_fts f ON f.rowid = symbol_fts_rowid.fts_rowid
 ORDER BY wanted.ord`)
 	lookupArgs = append(lookupArgs, viewGen, viewGen)
 	rows, err := tx.Query(lookup.String(), lookupArgs...)
@@ -269,7 +276,8 @@ ORDER BY wanted.ord`)
 		var ord int
 		var repoPrefix string
 		var oldRowid sql.NullInt64
-		if err := rows.Scan(&ord, &repoPrefix, &oldRowid); err != nil {
+		var unchanged bool
+		if err := rows.Scan(&ord, &repoPrefix, &oldRowid, &unchanged); err != nil {
 			_ = rows.Close()
 			return err
 		}
@@ -278,6 +286,7 @@ ORDER BY wanted.ord`)
 			return fmt.Errorf("symbol FTS batch lookup returned invalid ordinal %d", ord)
 		}
 		states[ord].repoPrefix = repoPrefix
+		states[ord].unchanged = unchanged
 		if oldRowid.Valid {
 			states[ord].rowid = oldRowid.Int64
 			states[ord].exists = true
@@ -295,7 +304,15 @@ ORDER BY wanted.ord`)
 	}
 
 	oldRowids := make([]any, 0, len(chunk))
+	changed := make([]int, 0, len(chunk))
 	for i := range states {
+		// Only the actual FTS document and its same-generation ownership row
+		// can prove a no-op. In particular, identical ownership alone cannot:
+		// changed tokens must still replace the document and bump revisions.
+		if states[i].unchanged {
+			continue
+		}
+		changed = append(changed, i)
 		if states[i].exists {
 			oldRowids = append(oldRowids, states[i].rowid)
 			continue
@@ -319,35 +336,39 @@ ORDER BY wanted.ord`)
 		stats.deleteStatements++
 	}
 
-	var insert strings.Builder
-	insert.WriteString(`INSERT INTO symbol_fts (rowid, node_id, repo_prefix, tokens) VALUES `)
-	insertArgs := make([]any, 0, len(chunk)*4)
-	for i, item := range chunk {
-		if i > 0 {
-			insert.WriteByte(',')
+	if len(changed) > 0 {
+		var insert strings.Builder
+		insert.WriteString(`INSERT INTO symbol_fts (rowid, node_id, repo_prefix, tokens) VALUES `)
+		insertArgs := make([]any, 0, len(chunk)*4)
+		for pos, i := range changed {
+			item := chunk[i]
+			if pos > 0 {
+				insert.WriteByte(',')
+			}
+			insert.WriteString(`(?, ?, ?, ?)`)
+			insertArgs = append(insertArgs, states[i].rowid, item.NodeID, states[i].repoPrefix, item.Tokens)
 		}
-		insert.WriteString(`(?, ?, ?, ?)`)
-		insertArgs = append(insertArgs, states[i].rowid, item.NodeID, states[i].repoPrefix, item.Tokens)
-	}
-	if _, err := tx.Exec(insert.String(), insertArgs...); err != nil {
-		return err
-	}
-	stats.insertStatements++
+		if _, err := tx.Exec(insert.String(), insertArgs...); err != nil {
+			return err
+		}
+		stats.insertStatements++
 
-	var ownership strings.Builder
-	ownership.WriteString(`INSERT OR REPLACE INTO symbol_fts_rowid (view_gen, node_id, repo_prefix, fts_rowid) VALUES `)
-	ownershipArgs := make([]any, 0, len(chunk)*4)
-	for i, item := range chunk {
-		if i > 0 {
-			ownership.WriteByte(',')
+		var ownership strings.Builder
+		ownership.WriteString(`INSERT OR REPLACE INTO symbol_fts_rowid (view_gen, node_id, repo_prefix, fts_rowid) VALUES `)
+		ownershipArgs := make([]any, 0, len(chunk)*4)
+		for pos, i := range changed {
+			item := chunk[i]
+			if pos > 0 {
+				ownership.WriteByte(',')
+			}
+			ownership.WriteString(`(?, ?, ?, ?)`)
+			ownershipArgs = append(ownershipArgs, viewGen, item.NodeID, states[i].repoPrefix, states[i].rowid)
 		}
-		ownership.WriteString(`(?, ?, ?, ?)`)
-		ownershipArgs = append(ownershipArgs, viewGen, item.NodeID, states[i].repoPrefix, states[i].rowid)
+		if _, err := tx.Exec(ownership.String(), ownershipArgs...); err != nil {
+			return err
+		}
+		stats.ownershipStatements++
 	}
-	if _, err := tx.Exec(ownership.String(), ownershipArgs...); err != nil {
-		return err
-	}
-	stats.ownershipStatements++
 	if collect != nil {
 		for i, item := range chunk {
 			*collect = append(*collect, SymbolFTSRow{RowID: states[i].rowid, NodeID: item.NodeID, RepoPrefix: states[i].repoPrefix, Tokens: item.Tokens})
