@@ -15,6 +15,7 @@ type startupBaseJoiner interface {
 type knownBasePreparation struct {
 	published   int
 	ownerOnly   int
+	uncommitted int
 	failed      int
 	interrupted bool
 }
@@ -22,6 +23,9 @@ type knownBasePreparation struct {
 func (r knownBasePreparation) outcome(err error) string {
 	if err != nil {
 		return "incomplete"
+	}
+	if r.published == 0 && r.uncommitted > 0 {
+		return "skipped_uncommitted"
 	}
 	if r.published == 0 && r.ownerOnly > 0 {
 		return "skipped_owner_only"
@@ -51,6 +55,8 @@ func joinKnownStartupBases(ctx context.Context, publisher startupBaseJoiner, gat
 			err = errors.Join(err, fmt.Errorf("committed base %s: %w", out.RepoPrefix, out.Err))
 		case out.Skipped == "no dependent checkout":
 			report.ownerOnly++
+		case out.Skipped == "owner has no committed tree":
+			report.uncommitted++
 		case out.Skipped != "" || out.GenerationID <= 0:
 			report.failed++
 			err = errors.Join(err, fmt.Errorf("committed base %s not prepared: skip=%q generation=%d", out.RepoPrefix, out.Skipped, out.GenerationID))

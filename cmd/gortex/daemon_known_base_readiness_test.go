@@ -61,6 +61,7 @@ func TestKnownStartupBaseJoinOpensGateOnFailureOrCancellation(t *testing.T) {
 		{name: "publication failure", out: indexer.InitialBasePublication{Err: errors.New("copy failed")}},
 		{name: "canceled attempt", out: indexer.InitialBasePublication{Err: context.Canceled}},
 		{name: "unprepared skip", out: indexer.InitialBasePublication{Skipped: "no ready dedicated graph"}},
+		{name: "unknown uncommitted reason", out: indexer.InitialBasePublication{Skipped: "owner has no committed tree: unknown"}},
 		{name: "missing positive generation", out: indexer.InitialBasePublication{}},
 		{name: "shutdown", err: context.Canceled},
 	} {
@@ -93,6 +94,23 @@ func TestKnownStartupBaseJoinOwnerOnlyDoesNotScheduleAnotherCopy(t *testing.T) {
 	require.Equal(t, 1, report.ownerOnly)
 	require.Equal(t, "skipped_owner_only", report.outcome(err))
 	require.False(t, gate.IsOpen())
+}
+
+func TestKnownStartupBaseJoinUncommittedOwnerHasNoPreparedBase(t *testing.T) {
+	gate := indexer.NewViewBuildGate()
+	report, err := joinKnownStartupBases(t.Context(), startupBaseJoinFunc(func(context.Context) ([]indexer.InitialBasePublication, error) {
+		return []indexer.InitialBasePublication{
+			{RepoPrefix: "uncommitted", Skipped: "owner has no committed tree"},
+			{RepoPrefix: "owner-only", Skipped: "no dependent checkout"},
+		}, nil
+	}), gate)
+	require.NoError(t, err)
+	require.Zero(t, report.published, "a normal skip gives no positive-base preparation credit")
+	require.Zero(t, report.failed)
+	require.Equal(t, 1, report.uncommitted)
+	require.Equal(t, 1, report.ownerOnly)
+	require.Equal(t, "skipped_uncommitted", report.outcome(err))
+	require.False(t, gate.IsOpen(), "the unchanged warmup tail still opens the gate")
 }
 
 func TestKnownStartupBaseJoinCancellationReleasesHeldGate(t *testing.T) {

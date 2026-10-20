@@ -685,6 +685,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		baseReport, baseErr := joinKnownStartupBases(cmd.Context(), state.basePublisher, viewBuilds)
 		baseStep(zap.String("outcome", baseReport.outcome(baseErr)),
 			zap.Int("published", baseReport.published), zap.Int("owner_only", baseReport.ownerOnly),
+			zap.Int("uncommitted", baseReport.uncommitted),
 			zap.Int("failed", baseReport.failed), zap.Error(baseErr))
 		if baseErr != nil {
 			logger.Warn("daemon: known committed base preparation incomplete; view builds remain available for recovery", zap.Error(baseErr))
