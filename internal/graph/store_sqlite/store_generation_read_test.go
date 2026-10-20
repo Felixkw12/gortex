@@ -91,7 +91,7 @@ func oppositeMark(mark string) string {
 // pair, an extra unresolved call site, and a third indexed symbol.
 func genReadNodes(mark string) []*graph.Node {
 	nodes := []*graph.Node{
-		{ID: "env::generation_contract", Kind: graph.KindContract, Name: "Contract" + mark, FilePath: genReadFileA, RepoPrefix: genReadRepo, Meta: map[string]any{"type": "env", "role": "provider", "contract_meta": map[string]any{"marker": mark}}},
+		{ID: "env::generation_contract_" + mark, Kind: graph.KindContract, Name: "Contract" + mark, FilePath: genReadFileA, RepoPrefix: genReadRepo, Meta: map[string]any{"type": "env", "role": "provider", "contract_meta": map[string]any{"marker": mark}}},
 		{ID: genReadFileA, Kind: graph.KindFile, Name: "a.go", FilePath: genReadFileA, RepoPrefix: genReadRepo, Language: "go"},
 		{ID: genImportFile(mark), Kind: graph.KindFile, Name: "b" + mark + ".go", FilePath: genImportFile(mark), RepoPrefix: genReadRepo, Language: "go"},
 		{
@@ -471,6 +471,16 @@ func generationReadProbes() []genProbe {
 		}},
 		{name: "LayerContractRepoProjectionContext", run: func(t *testing.T, s *Store) []string {
 			p, err := s.LayerContractRepoProjectionContext(context.Background(), genReadRepo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return nodeTokens(p.ScalarNodes)
+		}},
+		{name: "LayerContractRepoOwnerProjectionContext", run: func(t *testing.T, s *Store) []string {
+			if s.ContractRepoOwnerProjectionSource() != s {
+				t.Fatal("thin projection must certify this exact generation handle")
+			}
+			p, err := s.LayerContractRepoOwnerProjectionContext(context.Background(), genReadRepo)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1991,6 +2001,7 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.ContractAttachmentReader)(nil), skip: "exact historical identity catalog lookup; isolation and lifecycle tested by TestContractAttachmentAtomicExactWorkAndHistoricalIsolation"},
 		{iface: (*graph.ContractRepoProjectionReader)(nil), probe: "ContractRepoProjectionContext"},
 		{iface: (*graph.OverlayLayerContractRepoProjectionReader)(nil), probe: "LayerContractRepoProjectionContext"},
+		{iface: (*graph.OverlayLayerContractRepoOwnerProjectionReader)(nil), probe: "LayerContractRepoOwnerProjectionContext"},
 		{iface: (*graph.ContractFileProjectionReader)(nil), probe: "ContractFileProjectionContext"},
 		{iface: (*graph.NodePresenceByIDsReader)(nil), probe: "GetNodePresenceByIDsContext"},
 		{iface: (*graph.NodeKindsByIDsReader)(nil), probe: "GetNodeKindsByIDsContext"},
