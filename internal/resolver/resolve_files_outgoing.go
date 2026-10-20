@@ -48,6 +48,7 @@ func (r *Resolver) ResolveFilesOutgoing(filePaths []string) *ResolveStats {
 	frontier = collectOutgoingFileFrontier(r.graph, filePaths, r.incrementalSkipped)
 	if len(frontier.pending) == 0 {
 		outcome = "no_pending"
+		r.attributeFrontierGoBuiltins(frontier)
 		return stats
 	}
 	finish := startIncrementalPhase(logger, "outgoing_build_indexes")

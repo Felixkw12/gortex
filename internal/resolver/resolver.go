@@ -2687,6 +2687,7 @@ func (r *Resolver) ResolveFileAndIncoming(filePath string) *ResolveStats {
 	// survives for them.
 	recordFrontierIncomingAdmission(r.logger, stats, frontier, "preparation")
 	if len(pending) == 0 {
+		r.attributeFrontierGoBuiltins(frontier)
 		return stats
 	}
 
@@ -3132,6 +3133,7 @@ func (r *Resolver) ResolveFilesAndIncoming(filePaths []string) *ResolveStats {
 	}
 	if len(frontier.pending) == 0 && len(carried) == 0 {
 		outcome = "no_pending"
+		r.attributeFrontierGoBuiltins(frontier)
 		return stats
 	}
 	// The pass indexes cover the carried edges too (the attribution passes
