@@ -33,6 +33,15 @@ func snapshotJSON(t *testing.T, overrides map[string]int, drop ...string) string
 // only their language, while a missing or behind global epoch restages every
 // real current language. An empty baseline remains fail-inert.
 func TestStaleLangsDetection(t *testing.T) {
+	t.Run("zero_initialized_go_declaration_upgrade", func(t *testing.T) {
+		if got := ExtractorVersionStaleLangs(snapshotJSON(t, map[string]int{"go": 3})); !reflect.DeepEqual(got, []string{"go"}) {
+			t.Fatalf("previous Go extraction must restage only Go: %v", got)
+		}
+		if got := ExtractorVersionStaleLangs(snapshotJSON(t, nil)); len(got) != 0 {
+			t.Fatalf("current extraction must remain stable: %v", got)
+		}
+	})
+
 	t.Run("only_behind_langs", func(t *testing.T) {
 		stored := map[string]int{"go": 1, "python": 2, "ruby": 1}
 		current := map[string]int{"go": 2, "python": 2, "ruby": 1, "rust": 3, "lua": 1}
@@ -224,7 +233,7 @@ func TestStaleLangsDetection(t *testing.T) {
 				t.Errorf("global policy salt for %s = %q, want %q", path, got, policySalt)
 			}
 		}
-		if got, want := merkleSaltFor("model.go"), policySalt+"|go@3"; got != want {
+		if got, want := merkleSaltFor("model.go"), policySalt+"|go@4"; got != want {
 			t.Errorf("Go extractor salt = %q, want %q", got, want)
 		}
 

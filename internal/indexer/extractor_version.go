@@ -42,7 +42,7 @@ var extractorVersions = map[string]int{
 	"php":    2,                                      // class/interface inheritance now emits typed structural edges
 	"csharp": 24,                                     // receiverless calls bound by a local function / delegate parameter / local carry local_shadow (was: partial / conditionally-compiled properties carry their recorded ownership span)
 	"scala":  2,                                      // explicitly instantiated generic calls emit call edges
-	"go":     3,                                      // generic instantiations are marked so indexing a func value cannot bind (was: generic calls emit call edges)
+	"go":     4,                                      // zero-initialized local declarations exist before reads/assignments (was: generic instantiations are marked)
 	"cpp":    2,                                      // templated and namespace-qualified calls emit call edges
 	"swift":  2,                                      // generic calls and ordinary member calls emit call edges
 	"sql":    2,                                      // dollar-quoted bodies are blanked before parsing so a plpgsql body the grammar cannot read no longer drops its CREATE FUNCTION; CREATE PROCEDURE is indexed
