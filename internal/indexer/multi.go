@@ -2290,7 +2290,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 						// the loop via the shared global-pass pipeline.
 						idx.SetDeferResolve(true)
 
-						result, err := idx.indexCtxRaw(context.Background(), r.absPath)
+						result, err := idx.indexCtxRaw(WithIndexOrigin(context.Background(), "index_all"), r.absPath)
 						if err != nil {
 							idx.Close()
 							resultCh <- repoResult{prefix: r.prefix, err: fmt.Errorf("indexing %s: %w", r.absPath, err)}
@@ -2550,7 +2550,7 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 		}
 	}
 	evictRepoCurrentGeneration(mi.graph, repoPrefix)
-	result, err := idx.indexCtxRaw(context.Background(), meta.RootPath)
+	result, err := idx.indexCtxRaw(WithIndexOrigin(context.Background(), "index_repo"), meta.RootPath)
 	if err != nil {
 		return nil, fmt.Errorf("indexing %s: %w", meta.RootPath, err)
 	}

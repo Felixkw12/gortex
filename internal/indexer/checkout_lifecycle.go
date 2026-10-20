@@ -748,7 +748,8 @@ func (l *CheckoutLifecycle) Register(
 		}
 	}
 
-	result, err := l.mi.TrackRepoCtx(ctx, entry)
+	// The source tells a config reload's re-registration from a user's track.
+	result, err := l.mi.TrackRepoCtx(WithIndexOrigin(ctx, "checkout_register_"+string(source)), entry)
 	if err != nil {
 		return RegisterResult{}, err
 	}
@@ -774,7 +775,7 @@ func (l *CheckoutLifecycle) Register(
 
 	l.attachWatcher(out.Prefix)
 	l.saveConfig("track")
-	l.reconcileFamilyNow(ctx, out.FamilyID, absPath)
+	_ = l.reconcileFamilyNow(ctx, out.FamilyID, absPath)
 	l.notifyTrackedSetChanged()
 	return out, nil
 }
@@ -805,7 +806,7 @@ func (l *CheckoutLifecycle) RecordImplicit(ctx context.Context, root string) err
 
 	identity, err := l.recordCheckout(ctx, prefix, root, TrackSourceImplicit, false)
 	l.attachWatcherContext(ctx, prefix)
-	l.reconcileFamilyNow(ctx, identity.familyID, root)
+	_ = l.reconcileFamilyNow(ctx, identity.familyID, root)
 	l.notifyTrackedSetChanged()
 	return err
 }
@@ -1725,7 +1726,7 @@ func (l *CheckoutLifecycle) sweep(ctx context.Context, retirePayload bool) (Swee
 	if err := l.rec.Resume(ctx); err != nil {
 		errs = append(errs, err)
 	}
-	if err := l.resumeModeTransitions(ctx); err != nil {
+	if _, err := l.resumeModeTransitions(ctx); err != nil {
 		errs = append(errs, err)
 	}
 	for _, fam := range l.knownFamilies(ctx) {
@@ -1871,16 +1872,16 @@ func familyReportRemoved(report reconcile.FamilyReport) bool {
 // reconcileFamilyNow reconciles one family and applies its coordinator
 // dispositions immediately. Failures stay best-effort for registration and
 // startup; the next topology event or scheduled sweep asks again.
-func (l *CheckoutLifecycle) reconcileFamilyNow(ctx context.Context, familyID, fallbackDir string) {
+func (l *CheckoutLifecycle) reconcileFamilyNow(ctx context.Context, familyID, fallbackDir string) error {
 	if l == nil || l.rec == nil || familyID == "" {
-		return
+		return errors.New("checkout lifecycle: family reconciliation is not wired")
 	}
 	baseline := l.repoSetFingerprint()
 	report, err := l.rec.ReconcileFamily(ctx, familyID, l.probeDirFor(ctx, familyID, fallbackDir))
 	if err != nil {
 		l.logger.Debug("checkout lifecycle: could not reconcile the family",
 			zap.String("family", familyID), zap.Error(err))
-		return
+		return err
 	}
 	l.applyCoordinators(ctx, report)
 	l.scheduleFamilyRetry(report)
@@ -1888,6 +1889,7 @@ func (l *CheckoutLifecycle) reconcileFamilyNow(ctx context.Context, familyID, fa
 		l.saveConfig("reconcile")
 		l.notifyFamilyChanged(baseline)
 	}
+	return nil
 }
 
 // familyProbe is one family and the directory to read its inventory from.
@@ -3223,7 +3225,30 @@ func (l *CheckoutLifecycle) sweepRetirements(ctx context.Context) int {
 		return l.leases.InUse(generationID) || l.store.PayloadBuildFlightActive(generationID)
 	}
 	for _, generationID := range owed {
+		started := time.Now()
+		var generation store_sqlite.ViewGeneration
+		prefix := ""
+		if l.catalog != nil {
+			generation, _, _ = l.catalog.GetViewGeneration(ctx, generationID)
+			if graph, found, _ := l.catalog.GetDedicatedGraph(ctx, generation.GraphID); found {
+				prefix = graph.RepoPrefix
+			}
+		}
 		err := l.store.RetirePayloadGeneration(ctx, generationID, inUse)
+		elapsed := time.Since(started)
+		if l.logger != nil {
+			log := l.logger.Debug
+			if elapsed > 5*time.Second {
+				log = l.logger.Info
+			}
+			log("checkout lifecycle generation retirement completed",
+				zap.String("repo", prefix),
+				zap.String("graph", generation.GraphID),
+				zap.String("checkout", generation.CheckoutID),
+				zap.Int64("generation_id", generationID),
+				zap.Float64("elapsed_seconds", elapsed.Seconds()),
+				zap.Error(err))
+		}
 		if err != nil && !errors.Is(err, store_sqlite.ErrCatalogNotFound) {
 			continue
 		}
@@ -3889,9 +3914,11 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 			outcome = "error"
 			fields = append(fields, zap.Error(stageErr))
 		}
+		elapsed := time.Since(started)
 		fields = append(fields,
 			zap.String("stage", stage),
-			zap.Duration("elapsed", time.Since(started)),
+			zap.Duration("elapsed", elapsed),
+			zap.Float64("elapsed_seconds", elapsed.Seconds()),
 			zap.String("outcome", outcome))
 		logger.Info("checkout lifecycle seed stage completed", fields...)
 	}
@@ -3942,6 +3969,9 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 		stageCompleted("sweep_retirements", started, nil, zap.Int("retired_generations", retired))
 	}
 
+	recordStarted := time.Now()
+	recorded := 0
+	var recordErrs []error
 	seeded := map[string]string{}
 	if l.cfgMgr != nil {
 		for _, entry := range l.cfgMgr.Global().Repos {
@@ -3966,7 +3996,11 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 				zap.String("family", identity.familyID),
 				zap.String("checkout", identity.checkoutID))
 			if err != nil {
-				errs = append(errs, fmt.Errorf("seed %s: %w", abs, err))
+				seedErr := fmt.Errorf("seed %s: %w", abs, err)
+				errs = append(errs, seedErr)
+				recordErrs = append(recordErrs, seedErr)
+			} else {
+				recorded++
 			}
 			if identity.familyID != "" {
 				if _, present := seeded[identity.familyID]; !present {
@@ -3975,13 +4009,13 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 			}
 		}
 	}
+	stageCompleted("record_checkout", recordStarted, errors.Join(recordErrs...), zap.Int("recorded_checkouts", recorded))
 	seededFamilies = len(seeded)
 	started = stageStarted("resume_mode_transitions")
-	if err := l.resumeModeTransitions(ctx); err != nil {
-		stageCompleted("resume_mode_transitions", started, err)
+	resumed, err := l.resumeModeTransitions(ctx)
+	stageCompleted("resume_mode_transitions", started, err, zap.Int("resumed_transitions", resumed))
+	if err != nil {
 		errs = append(errs, err)
-	} else {
-		stageCompleted("resume_mode_transitions", started, nil)
 	}
 	// The seeded families are reconciled once here rather than at the janitor's
 	// first tick, so a restart resumes each routed worktree's coordinator within
@@ -3994,6 +4028,9 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 	for familyID := range seeded {
 		go l.healFamilyRacyIndexes(context.WithoutCancel(ctx), familyID)
 	}
+	reconcileStageStarted := time.Now()
+	reconciled := 0
+	var reconcileErr error
 	for familyID, probeDir := range seeded {
 		familyStarted := stageStarted("reconcile_family", zap.String("family", familyID))
 		reconcileStarted := stageStarted("reconcile_family_catalog", zap.String("family", familyID))
@@ -4004,6 +4041,9 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 			logger.Debug("checkout lifecycle: could not reconcile the family",
 				zap.String("family", familyID), zap.Error(err))
 			stageCompleted("reconcile_family", familyStarted, err, zap.String("family", familyID))
+			if reconcileErr == nil {
+				reconcileErr = fmt.Errorf("family %s: %w", familyID, err)
+			}
 			continue
 		}
 		applyStarted := stageStarted("apply_coordinators", zap.String("family", familyID))
@@ -4015,7 +4055,11 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 			l.notifyFamilyChanged(baseline)
 		}
 		stageCompleted("reconcile_family", familyStarted, nil, zap.String("family", familyID))
+		reconciled++
 	}
+	stageCompleted("reconcile_family", reconcileStageStarted, reconcileErr,
+		zap.Int("families", len(seeded)), zap.Int("reconciled_families", reconciled),
+		zap.Int("failed_families", len(seeded)-reconciled))
 	seedErr = errors.Join(errs...)
 	return seedErr
 }

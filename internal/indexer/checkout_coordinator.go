@@ -3027,7 +3027,7 @@ func (c *CheckoutCoordinator) resolveCommitLayer(
 		// every generation a sparse build produces. See ancestryLayerBase.
 		baseReader = c.ancestryLayerBase(view)
 	}
-	generationID, report, err := c.builder.BuildCommitLayer(ctx, CommitLayerRequest{
+	generationID, report, err := c.builder.BuildCommitLayer(WithIndexOrigin(ctx, "checkout_coordinator"), CommitLayerRequest{
 		Identity:      identity,
 		Base:          baseReader,
 		RepoDir:       c.root,
@@ -3534,7 +3534,7 @@ func (c *CheckoutCoordinator) buildDirtyLayerAttempts(
 			req.parent, req.parentManifest, req.parentDepth = parent.Parent, parent.Manifest, parent.Depth
 		}
 		started := time.Now()
-		generationID, report, err := c.builder.BuildDirtyLayer(ctx, req)
+		generationID, report, err := c.builder.BuildDirtyLayer(WithIndexOrigin(ctx, "checkout_coordinator"), req)
 		viewmetrics.Observe(viewmetrics.CoordinatorBuildSeconds, time.Since(started), viewmetrics.SlotDirty)
 		if report.Work != nil {
 			work = report.Work

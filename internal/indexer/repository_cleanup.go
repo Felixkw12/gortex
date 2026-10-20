@@ -359,7 +359,7 @@ func (l *CheckoutLifecycle) runRepositoryCleanup(runtime *repositoryCleanupRunti
 		}
 		// Retry the existing journal, not a second independent cleanup engine.
 		resumeErr := l.rec.Resume(runtime.ctx)
-		transitionErr := l.resumeModeTransitions(runtime.ctx)
+		_, transitionErr := l.resumeModeTransitions(runtime.ctx)
 		pending, finishErr := l.finalizeRepositoryCleanups(runtime.ctx, "")
 		if runtime.ctx.Err() != nil {
 			return

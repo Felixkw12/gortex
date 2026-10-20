@@ -283,7 +283,7 @@ func (l *CheckoutLifecycle) indexPromotedCorpus(
 		if l.indexBarrier != nil {
 			l.indexBarrier()
 		}
-		result, err := l.mi.TrackRepoCtx(ctx, config.RepoEntry{Path: checkout.RootPath, Name: prefix})
+		result, err := l.mi.TrackRepoCtx(WithIndexOrigin(ctx, "checkout_promotion"), config.RepoEntry{Path: checkout.RootPath, Name: prefix})
 		if err != nil {
 			return nil, resampled, err
 		}
