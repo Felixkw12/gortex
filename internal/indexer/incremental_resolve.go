@@ -134,9 +134,8 @@ func captureIncrementalState(g graph.Store, graphPath string) (reuse map[reuseKe
 				continue
 			}
 			if graph.IsUnresolvedTarget(e.To) {
-				priorUnresolved = append(priorUnresolved, &graph.Edge{
-					From: e.From, Kind: e.Kind, To: e.To, Meta: e.Meta,
-				})
+				prior := *e
+				priorUnresolved = append(priorUnresolved, &prior)
 				continue
 			}
 			if !reusableResolvedEdge(e) {

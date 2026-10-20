@@ -547,7 +547,8 @@ type Resolver struct {
 	// out-edges that were already unresolved before the edit; the forward
 	// pass skips them. Set/cleared around ResolveFileAndIncoming by the
 	// single-file index path. nil on every batch/whole-graph pass.
-	incrementalSkip map[string]struct{}
+	incrementalSkip      map[string]struct{}
+	incrementalTerminals map[graph.EdgeIdentity]*graph.Edge
 	// priorBindings are the forward leg's carried bindings (prior_bindings.go);
 	// carriedReindex / carriedJobs are the carried edges awaiting the outgoing
 	// leg's apply.
@@ -2687,6 +2688,9 @@ func (r *Resolver) ResolveFileAndIncoming(filePath string) *ResolveStats {
 	// survives for them.
 	recordFrontierIncomingAdmission(r.logger, stats, frontier, "preparation")
 	if len(pending) == 0 {
+		if !stats.IncomingAdmissionRefused {
+			r.restoreIncrementalTerminalStampsLocked([]string{filePath})
+		}
 		return stats
 	}
 
@@ -2721,6 +2725,9 @@ func (r *Resolver) ResolveFileAndIncoming(filePath string) *ResolveStats {
 	incomingStarted := time.Now()
 	r.resolveIncomingLocked(filePath, stats)
 	incomingDuration := time.Since(incomingStarted)
+	if !stats.IncomingAdmissionRefused {
+		r.restoreIncrementalTerminalStampsLocked([]string{filePath})
+	}
 	if elapsed := time.Since(started); elapsed >= time.Second {
 		r.logger.Info("resolver: incremental file phases",
 			zap.String("file", filePath),
@@ -3132,6 +3139,9 @@ func (r *Resolver) ResolveFilesAndIncoming(filePaths []string) *ResolveStats {
 	}
 	if len(frontier.pending) == 0 && len(carried) == 0 {
 		outcome = "no_pending"
+		if !stats.IncomingAdmissionRefused {
+			r.restoreIncrementalTerminalStampsLocked(frontier.paths)
+		}
 		return stats
 	}
 	// The pass indexes cover the carried edges too (the attribution passes
@@ -3179,6 +3189,9 @@ func (r *Resolver) ResolveFilesAndIncoming(filePaths []string) *ResolveStats {
 	r.prepareIncrementalAttributionCache(frontier)
 	r.runFileAttributionPassesForFilesLocked(frontier)
 	r.clearIncrementalAttributionCache()
+	if !stats.IncomingAdmissionRefused {
+		r.restoreIncrementalTerminalStampsLocked(frontier.paths)
+	}
 	attributionDuration = finish()
 	outcome = "complete"
 	return stats

@@ -921,9 +921,8 @@ func captureIncrementalStateFromView(
 				continue
 			}
 			if graph.IsUnresolvedTarget(edge.To) {
-				priorPending = append(priorPending, &graph.Edge{
-					From: edge.From, Kind: edge.Kind, To: edge.To, Meta: edge.Meta,
-				})
+				prior := *edge
+				priorPending = append(priorPending, &prior)
 				continue
 			}
 			if !reusableResolvedEdge(edge) {
