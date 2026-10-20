@@ -2825,6 +2825,7 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 		// overtook it: its files' core-write windows close, as a completed
 		// body's do, though nothing accepts this receipt.
 		if journal := idx.contractCoreInputs; journal != nil {
+			journal.settle()
 			journal.written()
 		}
 		return errMutationSuperseded

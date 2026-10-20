@@ -761,9 +761,9 @@ func unchangedRawEdgesAndSpans(prior, fresh []*graph.Node) bool {
 
 // rawEdgesPriorCompleted is captured before staging the next mutation. The
 // raw marker alone is only extraction identity: it is durable before resolver
-// and derived catch-up. Only the installed runtime's exact physical current
-// accepted receipt certifies that the prior source finished the outer apply.
-// Never substitute its accepted Previous row for a pending current prefix.
+// and derived catch-up. The installed runtime must certify completion of the
+// exact physical current source, through acceptance or its unchanged settled
+// write sequence. Never substitute Previous for a pending current prefix.
 func (idx *Indexer) rawEdgesPriorCompleted(graphPath string, prior []*graph.Node) bool {
 	if idx == nil || (idx.contractCoreRuntime.Load() == nil && idx.contractCoreInputs == nil) {
 		return false
@@ -780,10 +780,25 @@ func (idx *Indexer) rawEdgesPriorCompleted(graphPath string, prior []*graph.Node
 	if idx.contractCoreInputs != nil {
 		ctx = idx.contractCoreInputs.ctx
 	}
+	before := physical.ContractReceiptWriteStates(idx.repoPrefix, "", []string{graphPath})[graphPath]
 	row, found, err := physical.ContractBoundaryReceiptContext(ctx, idx.repoPrefix, "", graphPath)
-	return err == nil && found && row != nil && row.Accepted && !row.Deleted &&
-		row.RepoPrefix == idx.repoPrefix && row.CheckoutID == "" && row.FilePath == graphPath &&
-		row.Version == contractBoundaryReceiptVersion && row.SourceFingerprint == input.Source
+	if err != nil || !found || row == nil || row.Deleted ||
+		row.RepoPrefix != idx.repoPrefix || row.CheckoutID != "" || row.FilePath != graphPath ||
+		row.Version != contractBoundaryReceiptVersion || row.SourceFingerprint == "" || row.SourceFingerprint != input.Source {
+		return false
+	}
+	if row.Accepted {
+		return true
+	}
+	// A successful watcher tail can lose its generation without accepting the
+	// source. Only its exact still-current sequence certifies that its graph
+	// is complete. A new begin (even a refused write) or restart loses this
+	// authority; the pending receipt itself remains unaccepted.
+	if before.Seq == 0 || !before.Settled || before.Writing {
+		return false
+	}
+	after := physical.ContractReceiptWriteStates(idx.repoPrefix, "", []string{graphPath})[graphPath]
+	return before == after
 }
 
 func mergeRefreshMeta(oldMeta, freshMeta map[string]any) map[string]any {

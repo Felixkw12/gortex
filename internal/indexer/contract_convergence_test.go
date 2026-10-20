@@ -3344,15 +3344,16 @@ func TestContractWatcherPatchOvertakenAfterItsWritesEndsItsWindow(t *testing.T) 
 	require.NoError(t, err)
 	stamp := stamps.Stamps["fixture/consts.go"]
 	require.Positive(t, stamp.Seq, "the patch staged the file's receipt")
-	require.False(t, stamp.Accepted || stamp.Settled, "an overtaken patch is neither accepted nor settled")
+	require.False(t, stamp.Accepted, "an overtaken patch is never accepted")
+	require.True(t, stamp.Settled, "its successful full tail settled the exact receipt sequence")
 	require.False(t, stamp.Writing, "its core-write window closed with its writes")
 	require.True(t, stamp.quiescent())
 }
 
 // TestContractCaptureAdmitsAnUnacceptedRowOnTheRuleAJobProvesItsReadsBy: the
 // capture admits an unaccepted receipt row on the rule a job proves its reads
-// by. A watcher patch overtaken after its writes leaves its row neither
-// accepted nor settled with its window closed: a job is admitted and publishes
+// by. A watcher patch overtaken after its writes leaves its row unaccepted
+// but settled with its window closed: a job is admitted and publishes
 // the cold build from it. An apply that staged a row and has not ended its
 // core writes leaves that row's window open: the capture admits it in flight,
 // and the job's reads of the file wait for the window to close
@@ -3391,7 +3392,8 @@ func TestContractCaptureAdmitsAnUnacceptedRowOnTheRuleAJobProvesItsReadsBy(t *te
 		// patch's receipt row stays as the patch left it.
 		f.restoreKey(before)
 		state := f.store.ContractReceiptWriteStates("fixture", "", []string{"fixture/consts.go"})["fixture/consts.go"]
-		require.False(t, state.Settled || state.Writing, "the overtaken patch's row is unsettled with its window closed")
+		require.True(t, state.Settled, "the overtaken patch completed its exact core writes")
+		require.False(t, state.Writing, "its completed tail closed the window")
 		report, err := f.job(nil, contractJobDeadline(time.Minute))
 		require.NoError(t, err)
 		require.True(t, report.Published)
