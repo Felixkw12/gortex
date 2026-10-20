@@ -135,8 +135,7 @@ func (s *Store) EdgesLightSeq(kinds ...graph.EdgeKind) iter.Seq[*graph.Edge] {
 		if len(args) == 0 {
 			return
 		}
-		query := `SELECT ` + edgeColsLight + ` FROM edges WHERE kind IN (` +
-			inPlaceholders(len(args)) + `) AND view_gen = ?`
+		query := edgesLightSnapshotSQL(len(args), s.viewGen)
 		rows, err := s.db.Query(query, append(args, s.viewGen)...)
 		if err != nil {
 			panicOnFatal(err)
@@ -157,6 +156,19 @@ func (s *Store) EdgesLightSeq(kinds ...graph.EdgeKind) iter.Seq[*graph.Edge] {
 			panicOnFatal(rowsErr)
 		}
 	}
+}
+
+// edgesLightSnapshotSQL keeps base kind scans driven by edges_by_kind,
+// matching baseEdgesByKindSQL. A usable view_gen predicate can otherwise make
+// SQLite scan every base edge through a generation-leading index. Positive
+// generations retain their generation-selective predicate.
+func edgesLightSnapshotSQL(kindCount int, viewGen int64) string {
+	generationColumn := "view_gen"
+	if viewGen == baseViewGeneration {
+		generationColumn = "+view_gen"
+	}
+	return `SELECT ` + edgeColsLight + ` FROM edges WHERE kind IN (` +
+		inPlaceholders(kindCount) + `) AND ` + generationColumn + ` = ?`
 }
 
 func (s *Store) edgesLightSeqPages(kinds ...graph.EdgeKind) iter.Seq[*graph.Edge] {
