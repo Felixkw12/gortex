@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/crashpool"
 )
@@ -24,9 +26,11 @@ const (
 	sourceSemanticFingerprintMeta = "source_semantic_fingerprint"
 	sourceMetadataFingerprintMeta = "source_metadata_fingerprint"
 	sourceCoreFingerprintMeta     = "source_core_fingerprint"
+	sourceRawEdgesFingerprintMeta = "source_raw_edges_fingerprint"
 )
 
 type fileDeltaFingerprints struct {
+	rawEdges string
 	semantic string
 	metadata string
 	core     string
@@ -312,7 +316,7 @@ var presentationMetaKeys = map[string]struct{}{
 
 func isFingerprintMeta(key string) bool {
 	switch key {
-	case sourceSemanticFingerprintMeta, sourceMetadataFingerprintMeta, sourceCoreFingerprintMeta,
+	case sourceSemanticFingerprintMeta, sourceMetadataFingerprintMeta, sourceCoreFingerprintMeta, sourceRawEdgesFingerprintMeta,
 		contractDependencyInputMeta,
 		sourceDerivedDeclFingerprintMeta, sourceDerivedImportFingerprintMeta,
 		sourceDerivedRuntimeFingerprintMeta, sourceDerivedArtifactFingerprintMeta,
@@ -513,6 +517,18 @@ func extractionFingerprints(result *parser.ExtractionResult) (fileDeltaFingerpri
 	if result == nil {
 		return fileDeltaFingerprints{}, derivedFingerprints{}, false
 	}
+	rawNodeIDs := make(map[string]struct{}, len(result.Nodes))
+	rawFilePath := ""
+	fileAnchors := 0
+	for _, node := range result.Nodes {
+		if node != nil {
+			rawNodeIDs[node.ID] = struct{}{}
+			if node.Kind == graph.KindFile {
+				rawFilePath = node.FilePath
+				fileAnchors++
+			}
+		}
+	}
 	var artifactIDs map[string]struct{}
 	for _, node := range result.Nodes {
 		if node == nil || !isArtifactNodeKind(node.Kind) {
@@ -530,6 +546,10 @@ func extractionFingerprints(result *parser.ExtractionResult) (fileDeltaFingerpri
 	coreRows := make([]fingerprintDigest, 0, capacity)
 	var declarations, imports, runtimeRows, artifacts, hierarchy []fingerprintDigest
 	h := sha256.New()
+	rawEdgesSupported := fileAnchors == 1 && rawFilePath != ""
+	rawEdges := sha256.New()
+	writeFingerprintString(rawEdges, "raw-edge-vector-v1")
+	writeFingerprintUint(rawEdges, uint64(len(result.Edges)))
 	for _, node := range result.Nodes {
 		if node == nil {
 			continue
@@ -569,13 +589,41 @@ func extractionFingerprints(result *parser.ExtractionResult) (fileDeltaFingerpri
 		}
 	}
 	for _, edge := range result.Edges {
+		writeFingerprintBool(rawEdges, edge != nil)
 		if edge == nil {
 			continue
+		}
+		// Preserve the established source ownership rule. A pathless pseudo
+		// source cannot be attributed by either source-node adjacency or the
+		// captured by-file sibling dependency guard.
+		if edge.FilePath != "" && edge.FilePath != rawFilePath {
+			rawEdgesSupported = false
+		}
+		if edge.FilePath == "" {
+			if _, owned := rawNodeIDs[edge.From]; !owned {
+				rawEdgesSupported = false
+			}
+		}
+		// Reserved stamps are not part of the established edge digest.
+		// They are not expected on raw edges: refuse this extra proof rather
+		// than silently declaring an excluded raw payload unchanged.
+		for key := range edge.Meta {
+			if isFingerprintMeta(key) {
+				rawEdgesSupported = false
+			}
 		}
 		metadata, ok := edgeFingerprintDigest(h, edge, fingerprintMetadata)
 		if !ok {
 			return fileDeltaFingerprints{}, derivedFingerprints{}, false
 		}
+		// Preserve raw extraction order and every Edge field, including the
+		// response-only fields omitted by the established metadata digest.
+		// Conflicting duplicate storage keys can have order-dependent winners.
+		_, _ = rawEdges.Write(metadata[:])
+		writeFingerprintString(rawEdges, edge.Context)
+		writeFingerprintString(rawEdges, edge.ReturnUsage)
+		writeFingerprintString(rawEdges, edge.Via)
+		writeFingerprintBool(rawEdges, edge.NameOnly)
 		semantic, ok := edgeFingerprintDigest(h, edge, fingerprintSemantic)
 		if !ok {
 			return fileDeltaFingerprints{}, derivedFingerprints{}, false
@@ -608,7 +656,12 @@ func extractionFingerprints(result *parser.ExtractionResult) (fileDeltaFingerpri
 			artifacts = append(artifacts, derived)
 		}
 	}
+	rawProof := ""
+	if rawEdgesSupported {
+		rawProof = "v1:" + hex.EncodeToString(rawEdges.Sum(nil))
+	}
 	return fileDeltaFingerprints{
+		rawEdges: rawProof,
 		metadata: stableFingerprintDigests(metadataRows),
 		semantic: stableFingerprintDigests(semanticRows),
 		core:     stableFingerprintDigests(coreRows),
@@ -632,6 +685,11 @@ func stampExtractionGraphFingerprints(result *parser.ExtractionResult, fingerpri
 		n.Meta[sourceSemanticFingerprintMeta] = fingerprints.semantic
 		n.Meta[sourceMetadataFingerprintMeta] = fingerprints.metadata
 		n.Meta[sourceCoreFingerprintMeta] = fingerprints.core
+		if fingerprints.rawEdges != "" {
+			n.Meta[sourceRawEdgesFingerprintMeta] = fingerprints.rawEdges
+		} else {
+			delete(n.Meta, sourceRawEdgesFingerprintMeta)
+		}
 		return
 	}
 }
@@ -654,9 +712,78 @@ func storedExtractionGraphFingerprints(nodes []*graph.Node) fileDeltaFingerprint
 		semantic, _ := n.Meta[sourceSemanticFingerprintMeta].(string)
 		metadata, _ := n.Meta[sourceMetadataFingerprintMeta].(string)
 		core, _ := n.Meta[sourceCoreFingerprintMeta].(string)
-		return fileDeltaFingerprints{semantic: semantic, metadata: metadata, core: core}
+		rawEdges, _ := n.Meta[sourceRawEdgesFingerprintMeta].(string)
+		return fileDeltaFingerprints{semantic: semantic, metadata: metadata, core: core, rawEdges: rawEdges}
 	}
 	return fileDeltaFingerprints{}
+}
+
+// unchangedRawEdgesAndSpans proves the raw extraction supplied exactly the
+// same ordered edge vector that produced the stored resolved graph. This is
+// not a resolver reconstruction: all resolved/derived rows stay untouched.
+// Symbol spans are part of derived edge presentation (clones/frameworks), so
+// only the file anchor may change its end position, as with an EOF comment.
+func unchangedRawEdgesAndSpans(prior, fresh []*graph.Node) bool {
+	oldProof := storedExtractionGraphFingerprints(prior).rawEdges
+	newProof := storedExtractionGraphFingerprints(fresh).rawEdges
+	if len(oldProof) != len("v1:")+sha256.Size*2 || !strings.HasPrefix(oldProof, "v1:") || oldProof != newProof {
+		return false
+	}
+	if _, err := hex.DecodeString(oldProof[len("v1:"):]); err != nil {
+		return false
+	}
+	oldByID := make(map[string]*graph.Node, len(prior))
+	for _, node := range prior {
+		if node == nil || oldByID[node.ID] != nil {
+			return false
+		}
+		oldByID[node.ID] = node
+	}
+	if len(oldByID) != len(fresh) {
+		return false
+	}
+	seen := make(map[string]bool, len(fresh))
+	for _, node := range fresh {
+		if node == nil || seen[node.ID] {
+			return false
+		}
+		seen[node.ID] = true
+		old := oldByID[node.ID]
+		if old == nil || old.Kind != node.Kind || old.StartLine != node.StartLine || old.StartColumn != node.StartColumn {
+			return false
+		}
+		if node.Kind != graph.KindFile && (old.EndLine != node.EndLine || old.EndColumn != node.EndColumn) {
+			return false
+		}
+	}
+	return true
+}
+
+// rawEdgesPriorCompleted is captured before staging the next mutation. The
+// raw marker alone is only extraction identity: it is durable before resolver
+// and derived catch-up. Only the installed runtime's exact physical current
+// accepted receipt certifies that the prior source finished the outer apply.
+// Never substitute its accepted Previous row for a pending current prefix.
+func (idx *Indexer) rawEdgesPriorCompleted(graphPath string, prior []*graph.Node) bool {
+	if idx == nil || (idx.contractCoreRuntime.Load() == nil && idx.contractCoreInputs == nil) {
+		return false
+	}
+	physical, ok := idx.graph.(*store_sqlite.Store)
+	if !ok || physical.ViewGeneration() != 0 {
+		return false
+	}
+	input, known := storedContractDependencyInputs(prior)
+	if !known {
+		return false
+	}
+	ctx := context.Background()
+	if idx.contractCoreInputs != nil {
+		ctx = idx.contractCoreInputs.ctx
+	}
+	row, found, err := physical.ContractBoundaryReceiptContext(ctx, idx.repoPrefix, "", graphPath)
+	return err == nil && found && row != nil && row.Accepted && !row.Deleted &&
+		row.RepoPrefix == idx.repoPrefix && row.CheckoutID == "" && row.FilePath == graphPath &&
+		row.Version == contractBoundaryReceiptVersion && row.SourceFingerprint == input.Source
 }
 
 func mergeRefreshMeta(oldMeta, freshMeta map[string]any) map[string]any {
@@ -832,6 +959,9 @@ func (idx *Indexer) applyPreparedMetadataRefresh(filePath string, priorNodes []*
 	if len(priorByID) != len(result.Nodes) {
 		return nil, false, false
 	}
+	// Authority comes from untouched fresh extraction, before old presentation
+	// metadata is merged into the nodes that will be stored.
+	preserveRawEdges := unchangedRawEdgesAndSpans(priorNodes, result.Nodes) && idx.rawEdgesPriorCompleted(graphPath, priorNodes)
 	for i, fresh := range result.Nodes {
 		if fresh == nil {
 			return nil, false, false
@@ -851,8 +981,14 @@ func (idx *Indexer) applyPreparedMetadataRefresh(filePath string, priorNodes []*
 		result.Nodes[i] = &cp
 	}
 
-	edgeUpdates, ok := metadataEdgeRefreshes(idx.graph, graphPath, priorNodes, result.Nodes, result.Edges)
-	if !ok {
+	var edgeUpdates []graph.EdgeReindex
+	if !preserveRawEdges {
+		var ok bool
+		edgeUpdates, ok = metadataEdgeRefreshes(idx.graph, graphPath, priorNodes, result.Nodes, result.Edges)
+		if !ok {
+			return nil, false, false
+		}
+	} else if csharpVisibilityStampForNodes(priorNodes) != csharpVisibilityStampForNodes(result.Nodes) {
 		return nil, false, false
 	}
 	if idx.contentSearcher() != nil && !idx.replaceContentSections(graphPath, result.Nodes, false) &&

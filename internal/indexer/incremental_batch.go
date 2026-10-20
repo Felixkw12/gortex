@@ -28,25 +28,26 @@ const (
 )
 
 type incrementalBatchStage struct {
-	absPath       string
-	mtimeKey      string
-	readVersion   fileReadVersion
-	rawSHA256     string
-	relPath       string
-	graphPath     string
-	src           []byte
-	result        *parser.ExtractionResult
-	prepared      *preparedExtraction
-	priorNodes    []*graph.Node
-	storedGraph   fileDeltaFingerprints
-	storedDerived derivedFingerprints
-	probe         fileDeltaProbe
-	metadataOnly  bool
-	edgeRefreshes []graph.EdgeReindex
-	abSnap        *affectedBySnapshot
-	reuse         map[reuseKey]*reuseVal
-	priorPending  []*graph.Edge
-	bytes         int64
+	absPath                string
+	mtimeKey               string
+	readVersion            fileReadVersion
+	rawSHA256              string
+	relPath                string
+	graphPath              string
+	src                    []byte
+	result                 *parser.ExtractionResult
+	prepared               *preparedExtraction
+	priorNodes             []*graph.Node
+	storedGraph            fileDeltaFingerprints
+	storedDerived          derivedFingerprints
+	probe                  fileDeltaProbe
+	metadataOnly           bool
+	priorRawEdgesCompleted bool
+	edgeRefreshes          []graph.EdgeReindex
+	abSnap                 *affectedBySnapshot
+	reuse                  map[reuseKey]*reuseVal
+	priorPending           []*graph.Edge
+	bytes                  int64
 }
 
 func (stage *incrementalBatchStage) releasePrepared() {
@@ -401,6 +402,11 @@ func (idx *Indexer) reindexIncrementalChunk(
 				probe.fingerprints.semantic == storedGraph.semantic &&
 				unchangedProbeContractInputs(priorNodes, probe),
 		}
+		// Capture completion authority BEFORE commitIncrementalStages opens
+		// the next pending receipt. Absence/errors preserve the old path.
+		if stage.metadataOnly && unchangedRawEdgesAndSpans(priorNodes, stage.result.Nodes) {
+			stage.priorRawEdgesCompleted = idx.rawEdgesPriorCompleted(graphPath, priorNodes)
+		}
 		stage.bytes = estimateParseGraphBytes(stage.result.Nodes, stage.result.Edges) + int64(len(stage.src))
 		stages = append(stages, stage)
 		nodeCount += len(stage.result.Nodes)
@@ -699,7 +705,7 @@ func (idx *Indexer) commitIncrementalStages(
 		changed = false
 		evicted := structuralPriorIDs(stages)
 		for _, stage := range stages {
-			if !stage.metadataOnly || metadataStageIndependent(stage, view.outByNode, evicted) {
+			if !stage.metadataOnly || metadataStageIndependent(stage, view.outByNode, evicted, view.inByNode) {
 				continue
 			}
 			stage.metadataOnly = false
@@ -739,6 +745,29 @@ func (idx *Indexer) commitIncrementalStages(
 			structural = append(structural, stage)
 		}
 	}
+
+	// Pairing refusal above can introduce new structural siblings after the
+	// first dependency closure. Close that frontier too before preserving raw
+	// edges; a raw-proof success must not retain a dependency just promoted.
+	for changed := true; changed; {
+		changed = false
+		evicted := structuralPriorIDs(stages)
+		for _, stage := range metadata {
+			if stage.metadataOnly && !metadataStageIndependent(stage, view.outByNode, evicted, view.inByNode) {
+				stage.metadataOnly = false
+				changed = true
+			}
+		}
+	}
+	keptMetadata := metadata[:0]
+	for _, stage := range metadata {
+		if stage.metadataOnly {
+			keptMetadata = append(keptMetadata, stage)
+		} else {
+			structural = append(structural, stage)
+		}
+	}
+	metadata = keptMetadata
 
 	// A validation failure above may have promoted another replacement. Rebuild
 	// target existence and apply captured resolutions only after classification
@@ -837,7 +866,30 @@ func metadataStageIndependent(
 	stage *incrementalBatchStage,
 	outByNode map[string][]*graph.Edge,
 	evicted map[string]struct{},
+	incoming ...map[string][]*graph.Edge,
 ) bool {
+	// A preserved raw edge vector may contain pseudo-source IDs absent from
+	// priorNodes. The captured incoming adjacency still sees its dependency on
+	// a structurally replaced sibling; exact recording ownership must block it.
+	for _, byNode := range incoming {
+		for id := range evicted {
+			for _, edge := range byNode[id] {
+				if edge != nil && edge.FilePath == stage.graphPath {
+					return false
+				}
+			}
+		}
+	}
+	// Resolved dataflow can also be recorded in this file FROM a sibling
+	// definition. Evicting that sibling deletes its incident row in either
+	// direction; a preserved-edge stage must not rely on re-extraction here.
+	for id := range evicted {
+		for _, edge := range outByNode[id] {
+			if edge != nil && edge.FilePath == stage.graphPath {
+				return false
+			}
+		}
+	}
 	for _, node := range stage.priorNodes {
 		if node == nil {
 			continue
@@ -958,6 +1010,8 @@ func prepareMetadataRefreshFromView(
 	if len(priorByID) != len(stage.result.Nodes) {
 		return false
 	}
+	// Evaluate only the untouched extraction's own proof, not merged metadata.
+	preserveRawEdges := stage.priorRawEdgesCompleted && unchangedRawEdgesAndSpans(stage.priorNodes, stage.result.Nodes)
 	for i, fresh := range stage.result.Nodes {
 		if fresh == nil {
 			return false
@@ -977,6 +1031,12 @@ func prepareMetadataRefreshFromView(
 		stage.result.Nodes[i] = &copyNode
 	}
 
+	// Check before resolution mutates any raw edge. A matching proof preserves
+	// every existing resolved/derived edge and needs no edge refresh rows.
+	if preserveRawEdges {
+		stage.edgeRefreshes = nil
+		return true
+	}
 	applyResolvedOutEdgesFromView(stage.result.Edges, stage.reuse, existing)
 	for _, edge := range stage.result.Edges {
 		if edge != nil && priorByID[edge.From] == nil {
