@@ -3,49 +3,18 @@ package store_sqlite
 import (
 	"context"
 	"database/sql"
-	"sort"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-// editWaits runs `edits` edit-path mutations beside a running retirement:
-// each announces itself (AnnounceWrite), then commits `writes` separate
-// transactions through the write gate — the receipt row, the delta payload,
-// the publish — and records how long it waited for the gate in total.
-func editWaits(t *testing.T, s *Store, edits, writes int, gap time.Duration) []time.Duration {
-	t.Helper()
-	var out []time.Duration
-	for e := 0; e < edits; e++ {
-		time.Sleep(gap)
-		release := s.AnnounceWrite()
-		var waited time.Duration
-		for w := 0; w < writes; w++ {
-			start := time.Now()
-			s.writeMu.Lock()
-			waited += time.Since(start)
-			_, err := s.writerDB.Exec(`INSERT INTO edit_rows(v) VALUES (?)`, e*writes+w)
-			s.writeMu.Unlock()
-			require.NoError(t, err)
-		}
-		release()
-		out = append(out, waited)
-	}
-	return out
-}
-
-func percentile(ds []time.Duration, p float64) time.Duration {
-	sorted := append([]time.Duration(nil), ds...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	return sorted[int(float64(len(sorted)-1)*p)]
-}
-
-// An edit's writes take precedence over retirement chunks: a chunk boundary
-// that finds an announced edit mutation waits for it, so a three-write edit
-// waits at most for the one chunk already in flight when it arrived — not for
-// a chunk before each of its writes — and the retirement still finishes.
+// An announced edit owns all three of its transactions before retirement
+// starts the next chunk. Channels order the in-flight chunk and announcement;
+// no measured latency or synthetic chunk duration decides correctness.
 func TestRetirementYieldsTheWriteGateToEditWriters(t *testing.T) {
 	t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "0")
 	store := openPayloadStore(t)
@@ -56,30 +25,82 @@ func TestRetirementYieldsTheWriteGateToEditWriters(t *testing.T) {
 	_, err := store.writerDB.Exec(`UPDATE view_generations SET state = ? WHERE generation_id = ?`, string(ViewGenerationRetiring), generationID)
 	require.NoError(t, err)
 
-	const chunkCost = 60 * time.Millisecond
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	firstStarted, releaseFirst := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unpark := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+	var wg sync.WaitGroup
+	defer func() { cancel(); unpark(); wg.Wait() }()
+	var committed atomic.Int32
+	var eventsMu sync.Mutex
+	var events []string
+	record := func(event string) {
+		eventsMu.Lock()
+		events = append(events, event)
+		eventsMu.Unlock()
+	}
 	chunks := 0
-	var mu sync.Mutex
 	chunk := func(ctx context.Context, tx *sql.Tx) (int64, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if chunks >= 60 {
+		chunks++
+		switch chunks {
+		case 1:
+			record("first chunk")
+			close(firstStarted)
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		case 2:
+			if committed.Load() != 3 {
+				return 0, fmt.Errorf("retirement resumed before all edit transactions committed")
+			}
+			record("second chunk")
+		default:
 			return 0, nil
 		}
-		chunks++
-		time.Sleep(chunkCost) // a chunk's delete, holding the write gate
 		_, err := tx.ExecContext(ctx, `UPDATE view_generations SET state = state WHERE generation_id = ?`, generationID)
 		return 1, err
 	}
 	done := make(chan error, 1)
-	started := time.Now()
-	go func() { done <- store.deletePayloadChunks(context.Background(), generationID, chunk, nil) }()
-	waits := editWaits(t, store, 8, 3, 170*time.Millisecond)
-	require.NoError(t, <-done)
-	st := store.WALReclaimStats()
-	t.Logf("edit waits (3 writes each) beside %s retirement chunks: p50=%s max=%s all=%v; retirement %d chunks in %s, yields=%d timeouts=%d",
-		chunkCost, percentile(waits, 0.5), percentile(waits, 1), waits, chunks, time.Since(started).Round(time.Millisecond),
-		st.RetirementEditYields, st.RetirementEditYieldTimeouts)
-	require.Equal(t, 60, chunks, "retirement must finish")
-	require.Positive(t, st.RetirementEditYields)
-	require.Less(t, percentile(waits, 1), chunkCost+chunkCost/2, "an edit waited for more than the chunk in flight")
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		done <- store.deletePayloadChunks(ctx, generationID, chunk, nil)
+	}()
+	select {
+	case <-firstStarted:
+	case <-ctx.Done():
+		t.Fatal("retirement did not enter its first chunk")
+	}
+	release := store.AnnounceWrite()
+	defer release()
+	unpark()
+	// Observe the real yield before starting the edit's three transactions.
+	// This timeout bounds a broken test; it is not an elapsed-time assertion.
+	require.Eventually(t, func() bool { return store.WALReclaimStats().RetirementEditYields > 0 }, 30*time.Second, time.Millisecond)
+	for i := 0; i < 3; i++ {
+		require.NoError(t, store.writeMu.LockContext(ctx))
+		_, err := store.writerDB.ExecContext(ctx, `INSERT INTO edit_rows(v) VALUES (?)`, i)
+		if err == nil {
+			committed.Add(1)
+			record(fmt.Sprintf("edit %d", i))
+		}
+		store.writeMu.Unlock()
+		require.NoError(t, err)
+	}
+	release()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal("retirement did not resume after the edit")
+	}
+	wg.Wait()
+	require.Equal(t, 3, chunks, "retirement must finish its two productive chunks")
+	require.Equal(t, []string{"first chunk", "edit 0", "edit 1", "edit 2", "second chunk"}, events)
+	var rows int
+	require.NoError(t, store.db.QueryRowContext(ctx, `SELECT count(*) FROM edit_rows`).Scan(&rows))
+	require.Equal(t, 3, rows)
+	require.Positive(t, store.WALReclaimStats().RetirementEditYields)
 }
