@@ -7,6 +7,20 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// Keep the dense base-repository sort outside FTS5's internal rank stream:
+// generation and repository rejection happens before scoring retained rows.
+// BM25 still uses the shared corpus; rowid retains the rank stream's tie order.
+const symbolRepoDenseSpanQuery = `SELECT symbol_fts.node_id, bm25(symbol_fts)
+FROM symbol_fts
+CROSS JOIN symbol_fts_rowid INDEXED BY symbol_fts_rowid_by_rowid
+WHERE symbol_fts MATCH ?
+  AND symbol_fts.rowid BETWEEN ? AND ?
+  AND symbol_fts_rowid.fts_rowid = symbol_fts.rowid
+  AND CASE WHEN symbol_fts_rowid.view_gen = ?
+           THEN symbol_fts.repo_prefix IN ('', ?) ELSE 0 END = 1
+  AND symbol_fts.rank MATCH 'bm25()'
+ORDER BY bm25(symbol_fts), symbol_fts.rowid LIMIT ?`
+
 func (s *Store) searchSymbolRepoSpanPlan(ctx context.Context, match, repo string, limit int) ([]graph.SymbolHit, bool, error) {
 	return s.searchSymbolRepoSpanSnapshot(ctx, match, repo, limit, nil)
 }
@@ -77,6 +91,8 @@ WHERE view_gen = ? AND repo_prefix = ? ORDER BY fts_rowid `+order+` LIMIT 1`, s.
 			args = append(args, id)
 		}
 		args = append(args, repo, limit)
+	} else if s.viewGen == baseViewGeneration {
+		query = symbolRepoDenseSpanQuery
 	}
 	if afterProbe != nil {
 		if err = afterProbe(tx); err != nil {

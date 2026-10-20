@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,5 +183,77 @@ func TestSymbolRepoRangeCancellationIsAuthoritative(t *testing.T) {
 	})
 	if !handled || !errors.Is(err, context.Canceled) {
 		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+}
+
+// Dense base spans preserve shared BM25 even under a persistent custom rank,
+// with foreign generations and repositories interleaved inside the same run.
+func TestSymbolRepoDenseRangePreservesCustomRankAndTieCutoffs(t *testing.T) {
+	s := viewBatchTestStore(t)
+	seedRepoRange(t, s, "repo", "owned-first", 3)
+	seedRepoRange(t, s, "foreign", "foreign-inside", 4)
+	seedRepoRange(t, viewBatchHandle(s, 12), "repo", "other-generation", 3)
+	seedRepoRange(t, s, "", "unowned", 2)
+	seedRepoRange(t, s, "repo", "owned-last", 3)
+	if err := s.BatchUpsertSymbolFTS([]graph.SymbolFTSItem{
+		{NodeID: "owned-first-0000", Tokens: "needle needle needle shared"},
+		{NodeID: "owned-first-0001", Tokens: "needle needle needle shared"},
+		{NodeID: "owned-first-0002", Tokens: "needle shared " + strings.Repeat("padding ", 40)},
+		{NodeID: "foreign-inside-0000", Tokens: strings.Repeat("needle ", 20) + "shared"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewBatchHandle(s, 12).BatchUpsertSymbolFTS([]graph.SymbolFTSItem{{NodeID: "other-generation-0000", Tokens: strings.Repeat("needle ", 30) + "shared"}}); err != nil {
+		t.Fatal(err)
+	}
+	before := unboundedSingleGeneration(t, s, 0, "needle shared", []string{"repo"}, 200)
+	if len(before) != 8 || before[0].Score == before[len(before)-1].Score {
+		t.Fatalf("heterogeneous scoped rank fixture is inactive: %v", before)
+	}
+	tieCutoff := 0
+	for i := 0; i+1 < len(before); i++ {
+		if before[i].NodeID == "owned-first-0000" && before[i+1].NodeID == "owned-first-0001" && math.Float64bits(before[i].Score) == math.Float64bits(before[i+1].Score) {
+			tieCutoff = i + 1
+		}
+	}
+	if tieCutoff == 0 {
+		t.Fatalf("rowid tie-cutoff fixture is inactive: %v", before)
+	}
+	if _, err := s.writerDB.Exec(`INSERT INTO symbol_fts(symbol_fts, rank) VALUES('rank', 'bm25(0.0, 0.0, 0.0)')`); err != nil {
+		t.Fatal(err)
+	}
+	var customRank, explicitBM25 float64
+	if err := s.db.QueryRow(`SELECT rank, bm25(symbol_fts) FROM symbol_fts WHERE symbol_fts MATCH 'needle' LIMIT 1`).Scan(&customRank, &explicitBM25); err != nil {
+		t.Fatal(err)
+	}
+	if customRank == explicitBM25 {
+		t.Fatal("persistent custom-rank fixture is inactive")
+	}
+	if after := unboundedSingleGeneration(t, s, 0, "needle shared", []string{"repo"}, 200); !reflect.DeepEqual(after, before) {
+		t.Fatalf("shared explicit BM25 reference changed under custom rank: got=%v want=%v", after, before)
+	}
+	for _, tc := range []struct {
+		repo, query string
+		limit       int
+	}{
+		{"repo", "needle shared", 1}, {"repo", "needle shared", tieCutoff},
+		{"repo", "needle shared", 4}, {"repo", "needle shared", 100},
+		{"repo", "needle shared", 200}, {"repo", "absentRareTerm", 200},
+		{"", "needle shared", 200}, {"missing", "needle shared", 200},
+	} {
+		want := unboundedSingleGeneration(t, s, 0, tc.query, []string{tc.repo}, tc.limit)
+		got, handled, err := s.searchSymbolRepoSpanPlan(t.Context(), s.buildFTSMatch(tc.query, true), tc.repo, tc.limit)
+		if err != nil || !handled || !reflect.DeepEqual(got, want) {
+			t.Fatalf("repo=%q query=%q limit=%d handled=%v err=%v got=%v want=%v", tc.repo, tc.query, tc.limit, handled, err, got, want)
+		}
+		for i := range got {
+			if math.Float64bits(got[i].Score) != math.Float64bits(want[i].Score) {
+				t.Fatalf("raw score bits differ at %d", i)
+			}
+		}
+		public, err := s.SearchSymbolsRepoScopedContext(t.Context(), tc.query, []string{tc.repo}, tc.limit)
+		if err != nil || !reflect.DeepEqual(public, want) {
+			t.Fatalf("public repo=%q limit=%d err=%v got=%v want=%v", tc.repo, tc.limit, err, public, want)
+		}
 	}
 }
