@@ -627,7 +627,8 @@ func (w *generationBulkWindow) close() error {
 //     predicate and not the authority: the store re-proves emptiness over
 //     nodes AND edges when the bulk window opens, and generationBulkWindow
 //     turns that refusal into a failed build rather than an unbracketed write
-//     onto the residue;
+//     onto the residue. Retained contract input state also requires reparse:
+//     a copied primary actor must not coexist with an interrupted owner input;
 //
 //  2. generation zero recorded a CLEAN index at a known commit — the indexer
 //     stamps repo_index_state.dirty at the end of every pass, so this is the
@@ -700,6 +701,13 @@ func (b *SparseGenerationBuilder) claimedBaseCopyPlan(
 	}
 	if len(handle.GetRepoNodesLight(repoPrefix)) > 0 {
 		return false, none, "the reserved generation already carries payload"
+	}
+	inputs, err := handle.ContractInputStatesForRepoContext(ctx, repoPrefix)
+	if err != nil {
+		return false, none, "the reserved generation contract input is unreadable"
+	}
+	if len(inputs) != 0 {
+		return false, none, "the reserved generation carries interrupted contract input"
 	}
 	state, found, err := b.Store.AtGeneration(generationZero).GetRepoIndexState(repoPrefix)
 	switch {
