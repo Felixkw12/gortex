@@ -1161,6 +1161,9 @@ type contractFollowupEvidence struct {
 	// Completed names belong to this private, single-worker captured evidence.
 	// Keep raw row counts so cached names still consume the request's budget;
 	// scratch results and final accepted-source fences remain live.
+	// Only complete physical-seed or full-file rounds enable declaration
+	// discovery for kinds whose imports update Spring/Java side trackers.
+	handlerSeededFiles     map[string]bool
 	completedCoreNames     map[string]int
 	completedCoreNameBytes int
 	endpointReplay         *contractEndpointReplayBatch
