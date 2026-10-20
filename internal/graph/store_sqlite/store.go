@@ -65,6 +65,10 @@ type backgroundCheckpointCoordination struct {
 }
 
 type storeCore struct {
+	// baseFTSPages retains only exact ranked rows keyed by same-transaction
+	// global FTS state and mutable base ownership revision.
+	baseFTSPages symbolFTSPageCache
+
 	// Test-only overrides of fixed real-time budgets. Zero means the
 	// production constant; tests set them before the store does any work.
 	// See retirementQuantum and walPressureHold.

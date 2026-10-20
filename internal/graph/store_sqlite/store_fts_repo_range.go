@@ -3,6 +3,7 @@ package store_sqlite
 import (
 	"context"
 	"database/sql"
+	"strconv"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -99,6 +100,15 @@ WHERE view_gen = ? AND repo_prefix = ? ORDER BY fts_rowid `+order+` LIMIT 1`, s.
 			return nil, true, err
 		}
 	}
+	key := s.symbolRepoPageKey(ctx, tx, match, repo, limit)
+	if err = ctx.Err(); err != nil {
+		return nil, true, err
+	}
+	if key != "" {
+		if hits, ok := s.baseFTSPages.page(key, limit, true); ok {
+			return hits, true, ctx.Err()
+		}
+	}
 	// Generation/repository ownership still decides membership in both plans,
 	// and BM25 continues to use the complete shared table.
 	rows, err := tx.QueryContext(ctx, query, args...)
@@ -107,11 +117,15 @@ WHERE view_gen = ? AND repo_prefix = ? ORDER BY fts_rowid `+order+` LIMIT 1`, s.
 	}
 	defer rows.Close()
 	var hits []graph.SymbolHit
+	var ranked []symbolFTSRow
 	for rows.Next() {
 		var id string
 		var score float64
 		if err = rows.Scan(&id, &score); err != nil {
 			return nil, true, err
+		}
+		if key != "" {
+			ranked = append(ranked, symbolFTSRow{id: id, score: score})
 		}
 		if id != "" {
 			hits = append(hits, graph.SymbolHit{NodeID: id, Score: -score})
@@ -120,8 +134,45 @@ WHERE view_gen = ? AND repo_prefix = ? ORDER BY fts_rowid `+order+` LIMIT 1`, s.
 	if err = rows.Err(); err != nil {
 		return nil, true, err
 	}
+	if err = rows.Close(); err != nil {
+		return nil, true, err
+	}
 	if err = ctx.Err(); err != nil {
 		return nil, true, err
 	}
+	if key != "" {
+		// The original SQL limit counts empty IDs too. An exact-limit page
+		// is conservatively incomplete; a larger request runs SQL again.
+		s.baseFTSPages.store(key, ranked, len(ranked) < limit)
+	}
 	return hits, true, nil
+}
+
+// symbolRepoPageKey names only a fully known snapshot. Every authority read is
+// on the ranking transaction, including the global FTS blocks: a foreign
+// generation write can change native BM25 even when base ownership is unchanged.
+// Missing installation/state/revision falls back to the ordinary SQL cursor.
+func (s *Store) symbolRepoPageKey(ctx context.Context, tx *sql.Tx, match, repo string, limit int) string {
+	if s.viewGen != baseViewGeneration || limit <= 0 || limit > symbolFTSPageCacheRows || !s.rowCountersReady.Load() {
+		return ""
+	}
+	var seeded, triggers int
+	var revision int64
+	if err := tx.QueryRowContext(ctx, `SELECT
+ (SELECT seeded FROM `+rowCountsState+` WHERE id = 1),
+ (SELECT rev FROM `+symbolFTSRevisionsTable+` WHERE view_gen = 0),
+ (SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name IN (?, ?, ?))`,
+		symbolFTSRevisionsTable+"_insert", symbolFTSRevisionsTable+"_delete", symbolFTSRevisionsTable+"_update").Scan(&seeded, &revision, &triggers); err != nil || seeded != 1 || revision <= 0 || triggers != 3 {
+		return ""
+	}
+	stats, err := symbolFTSStatsTx(ctx, tx)
+	if err != nil || stats.Stamp == "" {
+		return ""
+	}
+	// Length prefixes preserve exact raw spelling, including delimiter bytes.
+	key := "0/" + strconv.FormatInt(revision, 10)
+	for _, value := range []string{stats.Stamp, match, repo} {
+		key += "/" + strconv.Itoa(len(value)) + ":" + value
+	}
+	return key
 }
