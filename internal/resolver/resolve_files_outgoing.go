@@ -49,6 +49,7 @@ func (r *Resolver) ResolveFilesOutgoing(filePaths []string) *ResolveStats {
 	if len(frontier.pending) == 0 {
 		outcome = "no_pending"
 		r.attributeFrontierGoBuiltins(frontier)
+		r.restoreIncrementalTerminalStampsLocked(frontier.paths)
 		return stats
 	}
 	finish := startIncrementalPhase(logger, "outgoing_build_indexes")
@@ -73,6 +74,7 @@ func (r *Resolver) ResolveFilesOutgoing(filePaths []string) *ResolveStats {
 	r.prepareIncrementalAttributionCache(frontier)
 	r.runFileAttributionPassesForFilesLocked(frontier)
 	r.clearIncrementalAttributionCache()
+	r.restoreIncrementalTerminalStampsLocked(frontier.paths)
 	attributionDuration = finish()
 	outcome = "complete"
 	return stats
