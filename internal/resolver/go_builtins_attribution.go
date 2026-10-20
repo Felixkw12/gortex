@@ -131,7 +131,38 @@ func (r *Resolver) attributeGoBuiltinsForFile(filePath string) {
 	if !r.graphHasLanguage("go") {
 		return
 	}
-	r.attributeGoBuiltinCandidates(r.fileOutEdges(filePath))
+	candidates := r.fileOutEdges(filePath)
+	seen := make(map[graph.EdgeIdentity]struct{}, len(candidates))
+	for _, edge := range candidates {
+		if edge != nil {
+			seen[graph.EdgeIdentityFor(edge)] = struct{}{}
+		}
+	}
+	// Dataflow sources may be placeholders or pathless builtin sentinels,
+	// neither of which belongs to GetFileNodes. Their recording file, rather
+	// than a by-node join, is the authority for the single-file frontier.
+	var recorded []*graph.Edge
+	if reader, ok := graph.RecordedEdgesOf(r.graph); ok {
+		recorded = reader.RecordedEdgesAt([]string{filePath})
+	} else {
+		// In-memory/adaptor stores without the recording-file capability retain
+		// the finite exact-target discovery used by the whole-graph pass.
+		byTarget := r.graph.GetInEdgesByNodeIDs(goBuiltinUnresolvedTargets)
+		for _, target := range goBuiltinUnresolvedTargets {
+			recorded = append(recorded, byTarget[target]...)
+		}
+	}
+	for _, edge := range recorded {
+		if edge == nil || edge.FilePath != filePath || !graph.IsUnresolvedTarget(edge.To) || !detachedSource(edge.From) {
+			continue
+		}
+		identity := graph.EdgeIdentityFor(edge)
+		if _, found := seen[identity]; !found {
+			seen[identity] = struct{}{}
+			candidates = append(candidates, edge)
+		}
+	}
+	r.attributeGoBuiltinCandidates(candidates)
 }
 
 // attributeGoBuiltinCandidates resolves a set of possible builtin edges with
@@ -153,6 +184,9 @@ func (r *Resolver) attributeGoBuiltinCandidates(candidates []*graph.Edge) {
 		}
 		if owner := enclosingFunctionForBinding(e.From); owner != "" {
 			ids[owner] = struct{}{}
+		}
+		if detachedSource(e.From) && e.FilePath != "" {
+			ids[e.FilePath] = struct{}{}
 		}
 	}
 	idList := make([]string, 0, len(ids))
@@ -178,6 +212,7 @@ func (r *Resolver) attributeGoBuiltinCandidates(candidates []*graph.Edge) {
 	targeter, ok := r.graph.(graph.UnresolvedEdgeTargetBatchReindexer)
 	if !ok {
 		r.graph.ReindexEdges(batch)
+		reconcilePlaceholderSources(r.graph, nil, batch)
 		return
 	}
 
@@ -190,9 +225,11 @@ func (r *Resolver) attributeGoBuiltinCandidates(candidates []*graph.Edge) {
 	direct, compactOK := compactGoBuiltinTargetReindexes(batch)
 	if !compactOK {
 		r.graph.ReindexEdges(batch)
+		reconcilePlaceholderSources(r.graph, nil, batch)
 		return
 	}
 	targeter.ReindexUnresolvedEdgeTargets(direct)
+	reconcilePlaceholderSources(r.graph, nil, batch)
 }
 
 // attributeGoBuiltinIdentityCandidates evaluates compact logical rows and, when
@@ -220,6 +257,9 @@ func (r *Resolver) attributeGoBuiltinIdentityCandidates(
 			}
 			if owner := enclosingFunctionForBinding(identity.From); owner != "" {
 				ids[owner] = struct{}{}
+			}
+			if detachedSource(identity.From) && identity.FilePath != "" {
+				ids[identity.FilePath] = struct{}{}
 			}
 		}
 	}
@@ -266,6 +306,15 @@ func (r *Resolver) attributeGoBuiltinIdentityCandidates(
 	if len(direct) > 0 {
 		r.noteImportTargetReindexes(direct)
 		targeter.ReindexUnresolvedEdgeTargets(direct)
+		// The main resolver's placeholder reconciliation has already finished
+		// before this attribution tail. Reconcile these newly bound builtins at
+		// the same exact recording sites as an ordinary resolution batch.
+		resolved := make([]graph.EdgeReindex, 0, len(direct))
+		for _, mutation := range direct {
+			edge := &graph.Edge{From: mutation.Old.From, To: mutation.NewTo, Kind: mutation.Old.Kind, FilePath: mutation.Old.FilePath, Line: mutation.Old.Line}
+			resolved = append(resolved, graph.EdgeReindex{Edge: edge, OldTo: mutation.Old.To})
+		}
+		reconcilePlaceholderSources(r.graph, nil, resolved)
 	}
 	return true
 }
@@ -434,7 +483,17 @@ func tryAttributeGoBuiltin(e *graph.Edge, sourceNodes map[string]*graph.Node, ma
 	if boundarySource == nil {
 		boundarySource = sourceNodes[enclosingFunctionForBinding(e.From)]
 	}
-	repoPrefix := ""
+	if boundarySource == nil && detachedSource(e.From) {
+		if file := sourceNodes[e.FilePath]; file != nil && file.Kind == graph.KindFile && file.FilePath == e.FilePath {
+			// A detached source spelling may name a different repository even
+			// when recorded at this site; never borrow that file's boundary.
+			if repo := sourceSpellingRepoPrefix(e.From); repo != "" && repo != file.RepoPrefix {
+				return ""
+			}
+			boundarySource = file
+		}
+	}
+	repoPrefix := sourceSpellingRepoPrefix(e.From)
 	workspaceID := ""
 	projectID := ""
 	if boundarySource != nil {
