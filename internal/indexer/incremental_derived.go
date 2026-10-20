@@ -406,6 +406,24 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesWithPriorTopologyHeld(
 		report.FrameworkMs = time.Since(phase).Milliseconds()
 		notePassFaults("framework")
 	}
+	if !frameworkRuns && len(merged.structuralFiles) > 0 {
+		// Unchanged framework inputs do not imply that their output rows
+		// survived a structural reparse. Rebind the fresh file-local reads and
+		// external terminals evicted with these files, without a registry run.
+		phase = time.Now()
+		report.Framework += resolver.ResolveValueRefsForFilesWithSelection(
+			mi.graph, scopedPrefixes, merged.structuralFiles,
+			mi.frameworkSynthesizerSelection(scopedPrefixes),
+		)
+		report.FrameworkMs += time.Since(phase).Milliseconds()
+		notePassFaults("framework")
+		phase = time.Now()
+		report.ExternalCalls = resolver.SynthesizeExternalCallsForFiles(
+			mi.graph, mi.externalCallSynthesisEnabled(), merged.structuralFiles,
+		)
+		report.ExternalCallsMs = time.Since(phase).Milliseconds()
+		notePassFaults("external_calls")
+	}
 	if merged.Flags.Has(DerivedInvalidatesDeclarations) ||
 		merged.Flags.Has(DerivedInvalidatesImports) ||
 		merged.Flags.Has(DerivedInvalidatesRuntime) {

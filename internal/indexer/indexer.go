@@ -7131,6 +7131,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 	failedFiles = appendUniqueSorted(failedFiles, manifestFailed...)
 	failedFiles = appendUniqueSorted(failedFiles, discoveryFailed...)
 	invalidation.Files = appendUniqueSorted(invalidation.Files, idx.graphFilePaths(reparsedFiles)...)
+	invalidation.structuralFiles = appendUniqueSorted(invalidation.structuralFiles, idx.graphFilePaths(reparsedFiles)...)
 	invalidation.Files = appendUniqueSorted(invalidation.Files, deletedDependencyFiles...)
 	idx.pruneDeletedFileMtimes(deletedFiles)
 	idx.flushReparsePendingEnrichment(markerBatch)

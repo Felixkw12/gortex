@@ -60,6 +60,10 @@ type DerivedInvalidationPlan struct {
 	// (derivedFingerprints.hierarchy) the change left as it was: their
 	// inferred implements/overrides rows are the prior ones.
 	HierarchyUnchanged []string `json:"hierarchy_unchanged,omitempty"`
+	// structuralFiles are successful source reparses whose eviction removed
+	// derived rows. Files also includes metadata refreshes and deleted/frontier
+	// paths, which must not trigger source-row restatement.
+	structuralFiles []string
 }
 
 // hierarchyUnchanged reports whether every file of the plan left its
@@ -83,6 +87,7 @@ func (p DerivedInvalidationPlan) hierarchyUnchanged() bool {
 func (p DerivedInvalidationPlan) Empty() bool {
 	return p.Flags == 0 && len(p.Files) == 0 && len(p.ContractGroups) == 0 &&
 		len(p.ContractSymbolIDs) == 0 && len(p.ContractBridgeNodeIDs) == 0 &&
+		len(p.structuralFiles) == 0 &&
 		p.BodyOnlyFiles == 0 && p.MetadataOnlyFiles == 0 && p.InertFiles == 0 &&
 		!p.CSharpHierarchyChanged
 }
@@ -98,6 +103,7 @@ func (p *DerivedInvalidationPlan) Merge(other DerivedInvalidationPlan) {
 	p.LegacyFallback = p.LegacyFallback || other.LegacyFallback
 	p.CSharpHierarchyChanged = p.CSharpHierarchyChanged || other.CSharpHierarchyChanged
 	p.Files = appendUniqueSorted(p.Files, other.Files...)
+	p.structuralFiles = appendUniqueSorted(p.structuralFiles, other.structuralFiles...)
 	p.TypeIDs = appendUniqueSorted(p.TypeIDs, other.TypeIDs...)
 	p.HierarchyUnchanged = appendUniqueSorted(p.HierarchyUnchanged, other.HierarchyUnchanged...)
 	p.ContractGroups = mergeContractGroups(p.ContractGroups, other.ContractGroups...)
