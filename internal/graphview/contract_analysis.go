@@ -323,8 +323,9 @@ func (r *contractRegistryReader) LayerContractIDProjectionContext(ctx context.Co
 				}
 			}
 		} else {
+			reads := contractRegistrySourceReadScope{ids: missing}
 			for repo, reader := range r.sources {
-				core, err := graph.ContractSourceNodesContext(ctx, reader, missing)
+				core, err := reads.read(ctx, reader)
 				if err != nil {
 					return graph.ContractFileProjection{}, err
 				}
@@ -352,4 +353,46 @@ func (r *contractRegistryReader) LoadContractFileProjectionContext(ctx context.C
 }
 func (r *contractRegistryReader) LoadContractIDProjectionContext(ctx context.Context, ids []string) (graph.ContractFileProjection, error) {
 	return graph.CompleteContractIDProjection(ctx, r, ids)
+}
+
+// A composed input capture gives each companion its own gen0 handle, but those
+// handles may share one physical source snapshot. Reuse that full checked
+// projection only within this LayerContractIDProjectionContext call. Every repo
+// still applies its namespace/kind/ambiguity checks, and the consumer's input
+// validation rejects a source change after this physical read.
+type contractRegistrySourceReadScope struct {
+	ids    []string
+	native []contractRegistryNativeSourceRead
+}
+type contractRegistryNativeSourceRead struct {
+	handle *store_sqlite.Store
+	nodes  map[string]*graph.Node
+}
+
+func (scope *contractRegistrySourceReadScope) read(ctx context.Context, reader graph.Reader) (map[string]*graph.Node, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	handle, native := reader.(*store_sqlite.Store)
+	native = native && handle != nil && handle.ViewGeneration() == BaseCorpusGeneration
+	if native {
+		for _, physical := range scope.native {
+			// This existing native method compares the open storeCore pointers,
+			// not paths, repository hints or symbol-cache contents.
+			if physical.handle.SharesSymbolSearchCore(handle) {
+				return physical.nodes, nil
+			}
+		}
+	}
+	nodes, err := graph.ContractSourceNodesContext(ctx, reader, scope.ids)
+	if err != nil {
+		return nil, err
+	}
+	if native {
+		scope.native = append(scope.native, contractRegistryNativeSourceRead{handle: handle, nodes: nodes})
+	}
+	return nodes, nil
 }
