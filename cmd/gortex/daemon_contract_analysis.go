@@ -95,7 +95,7 @@ func installDaemonContractAnalysisWith(state *daemonState, logger *zap.Logger, a
 	}
 	state.indexer.SetContractCoreRuntime(hooks)
 	state.multiIndexer.SetContractCoreRuntime(hooks)
-	state.mcpServer.SetContractAnalysisRuntime(&gortexmcp.ContractAnalysisRuntime{AcquireLastPublishedCohort: coordinator.AcquireLastPublishedCohort, Schedule: coordinator.Schedule, WaitActor: coordinator.WaitActor,
+	state.mcpServer.SetContractAnalysisRuntime(&gortexmcp.ContractAnalysisRuntime{AcquireLastPublishedCohort: coordinator.AcquireLastPublishedCohort, Schedule: coordinator.Schedule, WaitActor: coordinator.WaitActor, WaitTarget: coordinator.WaitTarget,
 		WaitCapacity: coordinator.WaitCapacity, CapacityEpoch: coordinator.CapacityEpoch, InputEpoch: coordinator.InputEpoch, WaitInputs: coordinator.WaitInputs})
 	return runtime, nil
 }
