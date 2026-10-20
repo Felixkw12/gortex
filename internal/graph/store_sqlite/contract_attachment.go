@@ -156,8 +156,14 @@ func (s *Store) publishContractAttachments(ctx context.Context, targets []Contra
 	}
 	defer func() { _ = tx.Rollback() }()
 	results := make([]ContractAttachmentPublication, len(targets))
+	// Publication already holds writeMu. Use its cached connection limit, with
+	// the normal conservative fallback; never acquire a writer inside this tx.
+	workVariableLimit := s.batchVariableLimit
+	if workVariableLimit <= 0 {
+		workVariableLimit = sqliteFallbackVariableLimit
+	}
 	for i, target := range targets {
-		if err := target.Store.validateContractAttachmentPublicationTx(ctx, tx, target.Expected, target.Witnesses, target.Attachment, target.Work, &results[i]); err != nil {
+		if err := target.Store.validateContractAttachmentPublicationWorkBatchTx(ctx, tx, target.Expected, target.Witnesses, target.Attachment, target.Work, &results[i], workVariableLimit); err != nil {
 			return nil, err
 		}
 	}
@@ -180,6 +186,10 @@ func (s *Store) publishContractAttachments(ctx context.Context, targets []Contra
 }
 
 func (s *Store) validateContractAttachmentPublicationTx(ctx context.Context, tx *sql.Tx, expected graph.ContractInputState, witnesses []graph.ContractInputWitness, attachment graph.ContractAttachment, work []graph.ContractWork, result *ContractAttachmentPublication) error {
+	return s.validateContractAttachmentPublicationWorkBatchTx(ctx, tx, expected, witnesses, attachment, work, result, sqliteFallbackVariableLimit)
+}
+
+func (s *Store) validateContractAttachmentPublicationWorkBatchTx(ctx context.Context, tx *sql.Tx, expected graph.ContractInputState, witnesses []graph.ContractInputWitness, attachment graph.ContractAttachment, work []graph.ContractWork, result *ContractAttachmentPublication, workVariableLimit int) error {
 	if ctx == nil {
 		return fmt.Errorf("%w: nil context", ErrCatalogInvalidValue)
 	}
@@ -307,10 +317,8 @@ func (s *Store) validateContractAttachmentPublicationTx(ctx context.Context, tx 
 			workChain = append(workChain, 0)
 		}
 	}
-	for i, row := range work {
-		if err := validateCapturedContractWorkTx(ctx, tx, workChain, row, string(encoded[i])); err != nil {
-			return err
-		}
+	if err := validateCapturedContractWorkBatchTx(ctx, tx, workChain, work, encoded, workVariableLimit); err != nil {
+		return err
 	}
 	var payloadState string
 	if err := tx.QueryRowContext(ctx, `SELECT state FROM view_generations WHERE generation_id=?`, attachment.PayloadGeneration).Scan(&payloadState); err != nil {
@@ -490,25 +498,6 @@ func contractInputAncestryTx(ctx context.Context, tx *sql.Tx, generation int64, 
 		generation = base.Int64
 	}
 	return nil, fmt.Errorf("%w: contract ancestry limit", ErrCatalogInvalidValue)
-}
-
-func validateCapturedContractWorkTx(ctx context.Context, tx *sql.Tx, chain []int64, w graph.ContractWork, scope string) error {
-	for _, generation := range chain {
-		var origin int64
-		var checkout, repo, file, version, fingerprint, state, storedScope string
-		err := tx.QueryRowContext(ctx, `SELECT origin_generation,checkout_id,repo_prefix,file_path,input_version,input_fingerprint,state,scope FROM generation_contract_work WHERE view_gen=? AND token=?`, generation, w.Token).Scan(&origin, &checkout, &repo, &file, &version, &fingerprint, &state, &storedScope)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if origin != w.OriginGeneration || checkout != w.CheckoutID || repo != w.RepoPrefix || file != w.FilePath || version != w.InputVersion || fingerprint != w.InputFingerprint || state != string(graph.ContractWorkPending) || storedScope != scope {
-			return ErrCatalogStaleGuard
-		}
-		return nil
-	}
-	return ErrCatalogStaleGuard
 }
 
 func contractGenerationAncestryTx(ctx context.Context, tx *sql.Tx, generation int64) ([]int64, error) {
