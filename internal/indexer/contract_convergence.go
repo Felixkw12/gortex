@@ -186,18 +186,19 @@ type contractUnit struct {
 
 // Recorded read kinds: what the ledger facade can ask again.
 const (
-	contractReadExtractionFile  = "extraction_file"
-	contractReadFile            = "file"
-	contractReadFileNodes       = "file_nodes"
-	contractReadIDs             = "ids"
-	contractReadNames           = "names"
-	contractReadConstCandidates = "constant_candidates"
-	contractReadConstants       = "constants"
-	contractReadRepoFiles       = "repo_files"
-	contractReadSemantic        = "semantic"
-	contractReadSeeds           = "seeds"
-	contractReadLivePaths       = "live_paths"
-	contractReadEndpoints       = "endpoints"
+	contractReadExtractionFile      = "extraction_file"
+	contractReadFile                = "file"
+	contractReadFileNodes           = "file_nodes"
+	contractReadIDs                 = "ids"
+	contractReadNames               = "names"
+	contractReadHandlerDeclarations = "handler_declarations"
+	contractReadConstCandidates     = "constant_candidates"
+	contractReadConstants           = "constants"
+	contractReadRepoFiles           = "repo_files"
+	contractReadSemantic            = "semantic"
+	contractReadSeeds               = "seeds"
+	contractReadLivePaths           = "live_paths"
+	contractReadEndpoints           = "endpoints"
 )
 
 // contractRecordedRead is one read the ledger facade answered: what was
@@ -400,7 +401,7 @@ func (m contractMoves) depends(path string, read contractRecordedRead) bool {
 		return false
 	case contractReadSeeds:
 		return m.unknown[path] || m.seeders[path]
-	case contractReadNames:
+	case contractReadNames, contractReadHandlerDeclarations:
 		prefix = "name:"
 	case contractReadConstCandidates:
 		prefix = "name:"
@@ -493,7 +494,7 @@ func (m contractMoves) affected(read contractRecordedRead) bool {
 		return true
 	case contractReadSeeds:
 		return m.seeding || !m.declaredKnown
-	case contractReadNames:
+	case contractReadNames, contractReadHandlerDeclarations:
 		prefix = "name:"
 	case contractReadConstCandidates:
 		prefix = "name:"
@@ -1484,7 +1485,7 @@ func (c *contractConvergence) indexers(evidence *contractFollowupEvidence, read 
 			cfg = override
 		}
 		root := filepath.Join(string(filepath.Separator), "contract-followup", repo)
-		idx := &Indexer{contractProviderValue: c.ownedProviderSchema, contractProviderObserved: c.rememberProviderSchema, contractBindingValue: c.ownedBodyBinding, contractBindingObserved: c.rememberBodyBinding, graph: evidence, rootPath: root, repoPrefix: repo, workspaceID: workspace, projectID: project, config: cfg, logger: c.logger, registry: c.req.Registry}
+		idx := &Indexer{contractHandlerCandidates: evidence.contractHandlerDeclarations, contractProviderValue: c.ownedProviderSchema, contractProviderObserved: c.rememberProviderSchema, contractBindingValue: c.ownedBodyBinding, contractBindingObserved: c.rememberBodyBinding, graph: evidence, rootPath: root, repoPrefix: repo, workspaceID: workspace, projectID: project, config: cfg, logger: c.logger, registry: c.req.Registry}
 		opts := c.snap.RepoExtractionOptions[repo]
 		idx.extractionOptions.Store(&opts)
 		idx.contractAnalysisOnly = true
@@ -1509,7 +1510,7 @@ func (c *contractConvergence) indexers(evidence *contractFollowupEvidence, read 
 	// A certified empty own namespace still receives a complete empty snapshot.
 	if out[c.snap.Key.RepoPrefix] == nil {
 		cfg := c.req.Config
-		idx := &Indexer{contractProviderValue: c.ownedProviderSchema, contractProviderObserved: c.rememberProviderSchema, contractBindingValue: c.ownedBodyBinding, contractBindingObserved: c.rememberBodyBinding, graph: evidence, rootPath: "/contract-followup", repoPrefix: c.snap.Key.RepoPrefix, workspaceID: c.req.WorkspaceID, projectID: c.req.ProjectID, config: cfg, logger: c.logger, registry: c.req.Registry}
+		idx := &Indexer{contractHandlerCandidates: evidence.contractHandlerDeclarations, contractProviderValue: c.ownedProviderSchema, contractProviderObserved: c.rememberProviderSchema, contractBindingValue: c.ownedBodyBinding, contractBindingObserved: c.rememberBodyBinding, graph: evidence, rootPath: "/contract-followup", repoPrefix: c.snap.Key.RepoPrefix, workspaceID: c.req.WorkspaceID, projectID: c.req.ProjectID, config: cfg, logger: c.logger, registry: c.req.Registry}
 		opts := c.snap.RepoExtractionOptions[c.snap.Key.RepoPrefix]
 		idx.extractionOptions.Store(&opts)
 		idx.contractAnalysisOnly = true
@@ -2451,6 +2452,15 @@ func (c *contractConvergence) ask(evidence *contractFollowupEvidence, read contr
 		return c.askIDs(evidence, read.args)
 	case contractReadNames:
 		return c.askNames(evidence, read.args)
+	case contractReadHandlerDeclarations:
+		defer c.guard.enter()()
+		out, err := evidence.readHandlerDeclarations(c.snap.Core, read.args)
+		if !errors.Is(err, errContractHandlerDeclarationFallback) {
+			return out, err
+		}
+		// A prior representable declaration proof cannot accept a new answer
+		// whose raw spelling/kind/import semantics require the legacy path.
+		return nil, graph.ErrContractProjectionStale
 	case contractReadConstCandidates:
 		if len(read.args) != 2 {
 			break
@@ -3433,6 +3443,11 @@ func (c *contractConvergence) enrichFrom(r0 ContractFollowupScan, clock uint64) 
 	raws := c.unitRaws()
 	if err := c.seed(evidence); err != nil {
 		return false, err
+	}
+	if c.snap.Seeds != nil || c.req.delta != nil {
+		// A completed physical-seed round (or full-file fallback) covers the
+		// live census. Frozen unit-only fixtures make no such promise.
+		evidence.handlerSeededFiles = c.live
 	}
 	paths := make([]string, 0, len(c.units))
 	for path := range c.units {

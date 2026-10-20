@@ -348,10 +348,11 @@ type Indexer struct {
 	contractRegistry *contracts.Registry
 	// Job-local owned binding projections are supplied only by the contract
 	// convergence worker. Legacy/ordinary indexing keeps these hooks nil.
-	contractProviderValue    func(contracts.Contract, []*graph.Node) (map[string]any, bool)
-	contractProviderObserved func(contracts.Contract, []*graph.Node, map[string]any)
-	contractBindingValue     func(*graph.Node, string) (contracts.Binding, bool)
-	contractBindingObserved  func(*graph.Node, string, contracts.Binding)
+	contractHandlerCandidates func([]string) (map[string][]*graph.Node, bool)
+	contractProviderValue     func(contracts.Contract, []*graph.Node) (map[string]any, bool)
+	contractProviderObserved  func(contracts.Contract, []*graph.Node, map[string]any)
+	contractBindingValue      func(*graph.Node, string) (contracts.Binding, bool)
+	contractBindingObserved   func(*graph.Node, string, contracts.Binding)
 	// contractRegistrySeed defers immutable-stack hydration until an edit
 	// actually needs the complete repository registry.
 	contractRegistrySeed           func()
@@ -7859,7 +7860,18 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 			handlerNames = append(handlerNames, name)
 		}
 	}
-	handlerCandidates := idx.graph.FindNodesByNames(handlerNames)
+	var handlerCandidates map[string][]*graph.Node
+	projectedHandlers := false
+	if idx.contractHandlerCandidates != nil {
+		handlerCandidates, projectedHandlers = idx.contractHandlerCandidates(handlerNames)
+	}
+	if !projectedHandlers {
+		handlerCandidates = idx.graph.FindNodesByNames(handlerNames)
+	} else if handlerCandidates == nil {
+		// A handled empty/error answer must not reopen the trail resolver's
+		// generic point-lookup door.
+		handlerCandidates = make(map[string][]*graph.Node)
+	}
 
 	type resolvedPending struct {
 		pending pending
@@ -7884,6 +7896,29 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 		}
 		seenHandlerPaths[handler.FilePath] = struct{}{}
 		handlerPaths = append(handlerPaths, handler.FilePath)
+	}
+	if projectedHandlers {
+		var ids []string
+		seen := make(map[string]bool)
+		for _, item := range resolvedTodo {
+			if !seen[item.handler.ID] {
+				ids = append(ids, item.handler.ID)
+				seen[item.handler.ID] = true
+			}
+		}
+		// Capture the original scratch-first full candidate BEFORE a file load
+		// may refresh that row. Full fields, including body ranges and metadata,
+		// must keep precisely the precedence of the original name lookup.
+		fullHandlers := idx.graph.GetNodesByIDs(ids)
+		for i := range resolvedTodo {
+			declaration := resolvedTodo[i].handler
+			full := contractHydrateHandler(declaration, fullHandlers[declaration.ID])
+			if full == nil {
+				idx.rememberContractInputError(graph.ErrContractProjectionStale)
+				return
+			}
+			resolvedTodo[i].handler = full
+		}
 	}
 	handlerFileNodes := idx.graph.GetFileNodesByPaths(handlerPaths)
 
