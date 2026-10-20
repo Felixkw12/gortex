@@ -112,20 +112,31 @@ func TestContractBaselineReusesCurrentAcceptedReceiptThroughAttachment(t *testin
 			coordinator, err := NewContractAnalysisCoordinator(ContractAnalysisCoordinatorOptions{Store: options.Store, Leases: options.Materializer.Leases, Registry: options.Registry, Config: options.Config, Capture: NewContractFollowupSourceCapture(options), Inputs: NewContractPrimaryInputCapture(options.Materializer), ReconcileBaseline: NewContractBaselineReconciler(options), Yield: options.Yield})
 			require.NoError(t, err)
 			defer coordinator.Close()
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			// This test proves receipt reuse through real asynchronous publication,
+			// not a latency bound. Wait on its promise with an ordinary hang guard;
+			// give the subsequent checked read its own independent hang guard.
+			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 			defer cancel()
+			defer func() {
+				if t.Failed() {
+					t.Logf("receipt attachment actor status: %+v", coordinator.Status(NewContractActor("", []string{"fixture"})))
+				}
+			}()
 			attached := scheduleUntilAttached(t, ctx, coordinator, options.Materializer, []string{"fixture"}, "fixture")
+			cancel()
 			require.Equal(t, inputs.State, attached.State)
-			analysis, err := options.Materializer.OpenContractAnalysisForInputs(ctx, nil, inputs)
+			readCtx, cancelRead := context.WithTimeout(t.Context(), time.Minute)
+			defer cancelRead()
+			analysis, err := options.Materializer.OpenContractAnalysisForInputs(readCtx, nil, inputs)
 			require.NoError(t, err)
-			nodes, err := analysis.NodesByKindsContext(ctx, []graph.NodeKind{graph.KindContract})
+			nodes, err := analysis.NodesByKindsContext(readCtx, []graph.NodeKind{graph.KindContract})
 			require.NoError(t, err)
 			var ids []string
 			for _, node := range nodes {
 				ids = append(ids, node.ID)
 			}
 			require.Contains(t, ids, "http::GET::/reused-current")
-			require.NoError(t, analysis.Validate(ctx))
+			require.NoError(t, analysis.Validate(readCtx))
 			analysis.Close()
 			require.Zero(t, spy.reads.Load(), "worker must use accepted core evidence and the frozen helper policy")
 		})
