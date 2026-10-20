@@ -101,8 +101,11 @@ type ContractAnalysisCoordinator struct {
 	closed    bool
 	changed   chan struct{}
 	published uint64
+	// acceptedEpoch uses the global publication sequence for per-repository
+	// change detection and ordering, even when acceptance timestamps coincide.
+	acceptedEpoch map[string]uint64
 	// acceptedAt holds when each repository last announced an accepted core
-	// mutation.
+	// mutation, for age and diagnostic measurements only.
 	acceptedAt      map[string]time.Time
 	actors          map[ContractActor]*contractActor
 	rings           map[string]*contractRing
@@ -137,7 +140,7 @@ func NewContractAnalysisCoordinator(options ContractAnalysisCoordinatorOptions) 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &ContractAnalysisCoordinator{deltaCaches: contractDeltaLRU{budget: contractDeltaMemoryBudget(options.MemoryLimitBytes)}, options: options, ctx: ctx, cancel: cancel, changed: make(chan struct{}),
-		acceptedAt: make(map[string]time.Time), actors: make(map[ContractActor]*contractActor), rings: make(map[string]*contractRing),
+		acceptedEpoch: make(map[string]uint64), acceptedAt: make(map[string]time.Time), actors: make(map[ContractActor]*contractActor), rings: make(map[string]*contractRing),
 		slots: &contractJobSlots{free: contractJobSlotCount(options.JobSlots)}, capacityChanged: make(chan struct{})}
 	return c, nil
 }
@@ -173,6 +176,7 @@ func contractAnalysisCohortID(snapshot ContractFollowupSnapshot, cfg config.Inde
 func (c *ContractAnalysisCoordinator) Published(_ context.Context, repo, _ string) {
 	c.mu.Lock()
 	c.published++
+	c.acceptedEpoch[repo] = c.published
 	c.acceptedAt[repo] = time.Now()
 	c.markPublishedLocked(repo, c.now())
 	c.notifyLocked()

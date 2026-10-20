@@ -1485,22 +1485,22 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 	}
 	job := &contractAnalysisJob{id: id, snapshot: snapshot, targets: targets, trigger: trigger, queuedAt: triggeredAt, capture: captureDuration}
 	c.mu.Lock()
-	// Persistent debt is not an edit timestamp. Prefer the most recently
+	// Persistent debt is not an edit sequence. Prefer the most recently
 	// announced cohort repository, then the explicitly selected target.
 	var latestRepo string
-	var latest time.Time
-	checkedAccepted := make(map[string]time.Time, len(a.repos))
+	var latest uint64
+	checkedAccepted := make(map[string]uint64, len(a.repos))
 	for _, repo := range a.repos {
-		at := c.acceptedAt[repo]
-		checkedAccepted[repo] = at
-		if at.After(latest) || at.Equal(latest) && repo == want.repo {
-			latestRepo, latest = repo, at
+		epoch := c.acceptedEpoch[repo]
+		checkedAccepted[repo] = epoch
+		if epoch > latest {
+			latestRepo, latest = repo, epoch
 		}
 	}
-	if !latest.IsZero() {
+	if latest != 0 {
 		job.priorityRepos = append(job.priorityRepos, latestRepo)
 	}
-	if want.priorityRepo != "" && (latest.IsZero() || want.priorityRepo != latestRepo) {
+	if want.priorityRepo != "" && (latest == 0 || want.priorityRepo != latestRepo) {
 		job.priorityRepos = append(job.priorityRepos, want.priorityRepo)
 	}
 	job.targetPublished = func(result ContractFollowupTargetResult) {
@@ -1523,13 +1523,13 @@ func (c *ContractAnalysisCoordinator) runActor(a *contractActor, want contractAc
 		newer := a.want.seq > want.seq
 		changed := false
 		for _, repo := range a.repos {
-			changed = changed || c.acceptedAt[repo] != checkedAccepted[repo]
+			changed = changed || c.acceptedEpoch[repo] != checkedAccepted[repo]
 		}
-		var current map[string]time.Time
+		var current map[string]uint64
 		if changed {
-			current = make(map[string]time.Time, len(a.repos))
+			current = make(map[string]uint64, len(a.repos))
 			for _, repo := range a.repos {
-				current[repo] = c.acceptedAt[repo]
+				current[repo] = c.acceptedEpoch[repo]
 			}
 		}
 		c.mu.Unlock()
