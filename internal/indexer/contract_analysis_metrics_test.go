@@ -126,3 +126,55 @@ func TestContractAnalysisCountsRequestsAndJobs(t *testing.T) {
 	require.EqualValues(t, 1, fields["pp_runs"])
 	require.EqualValues(t, 0, fields["pp_reruns"])
 }
+
+// Publication is one physical transaction even though each target retains
+// that transaction's duration for its independent report. Keep the job log
+// additive for payload work, without multiplying shared publication time.
+func TestContractJobLogCountsSharedPublicationOnce(t *testing.T) {
+	f := newContractWorkerFixture(t)
+	a := f.request(t, "repo-a", "metrics-shared-a")
+	b := f.request(t, "repo-b", "metrics-shared-b")
+	batch, err := RunContractFollowupBatch(t.Context(), ContractFollowupBatchRequest{
+		Snapshot: a.Snapshot,
+		Targets: []ContractFollowupTarget{
+			{Key: a.Snapshot.Key, Work: a.Snapshot.Work, Payload: a.Payload, Catalog: a.Catalog},
+			{Key: b.Snapshot.Key, Work: b.Snapshot.Work, Payload: b.Payload, Catalog: b.Catalog},
+		},
+		RebuildReason: a.RebuildReason, Registry: a.Registry, Config: a.Config,
+		Leases: a.Leases, Yield: a.Yield, ScratchParent: t.TempDir(),
+	})
+	require.NoError(t, err)
+	require.Len(t, batch.Targets, 2)
+	require.Positive(t, batch.Cohort.PublishDuration, "the real shared publication must be observed")
+	var payload time.Duration
+	for _, target := range batch.Targets {
+		require.True(t, target.Report.Published)
+		require.Equal(t, batch.Cohort.PublishDuration, target.Report.PublishDuration)
+		payload += target.Report.PayloadDuration
+	}
+	for _, tc := range []struct {
+		name, outcome            string
+		report                   ContractFollowupBatchReport
+		wantPayload, wantPublish time.Duration
+		wantPublished            int
+	}{
+		{"published_batch", viewmetrics.ContractJobPublished, batch, payload, batch.Cohort.PublishDuration, 2},
+		// A later cleanup failure may change the job outcome after publication.
+		{"failed_after_publication", viewmetrics.ContractJobFailed, batch, payload, batch.Cohort.PublishDuration, 2},
+		{"single_target", viewmetrics.ContractJobPublished, ContractFollowupBatchReport{Cohort: batch.Cohort, Targets: batch.Targets[:1]}, batch.Targets[0].Report.PayloadDuration, batch.Cohort.PublishDuration, 1},
+		// A partial payload failure never entered the publication transaction.
+		{"partial_before_publication", viewmetrics.ContractJobFailed, ContractFollowupBatchReport{Targets: []ContractFollowupTargetResult{{Report: ContractFollowupReport{PayloadDuration: batch.Targets[0].Report.PayloadDuration}}}}, batch.Targets[0].Report.PayloadDuration, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.InfoLevel)
+			logContractJob(zap.New(core), viewmetrics.ContractModeCold, tc.outcome, time.Second, tc.report)
+			lines := logs.FilterMessage("contract analysis job").All()
+			require.Len(t, lines, 1)
+			fields := lines[0].ContextMap()
+			require.Equal(t, tc.wantPublish, fields["publish"])
+			require.Equal(t, tc.wantPayload, fields["payload"])
+			require.EqualValues(t, tc.wantPublished, fields["published"])
+			require.Equal(t, tc.outcome, fields["outcome"])
+		})
+	}
+}

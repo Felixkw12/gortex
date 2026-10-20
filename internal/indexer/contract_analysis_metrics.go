@@ -68,14 +68,15 @@ func logContractJob(logger *zap.Logger, mode, outcome string, elapsed time.Durat
 	phases := contractJobPhases{
 		Census: cohort.CensusDuration, Stamps: cohort.StampsDuration, Scratch: cohort.ScratchDuration,
 		Extract: cohort.ExtractDuration, Rounds: cohort.RoundsDuration, PP: cohort.EnrichDuration,
+		Publish: cohort.PublishDuration,
 	}
-	// Payload assembly and publication are per target; the line sums them.
+	// Payload assembly is per target. Publication is one physical cohort
+	// transaction whose duration is also copied into each target report.
 	for _, target := range report.Targets {
 		if target.Report.Published {
 			published++
 		}
 		phases.Payload += target.Report.PayloadDuration
-		phases.Publish += target.Report.PublishDuration
 	}
 	fields := []zap.Field{
 		zap.String("mode", mode), zap.String("outcome", outcome), zap.Duration("elapsed", elapsed),
