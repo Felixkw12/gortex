@@ -263,6 +263,7 @@ type contractFollowupPrepared struct {
 	coverage          contractCoveredWork
 	work              []graph.ContractWork
 	registry          *contracts.Registry
+	matched           []contracts.CrossLink
 	evidence          *contractFollowupEvidence
 	report            ContractFollowupReport
 	scratch           *store_sqlite.Store
@@ -506,6 +507,9 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 		prepared.coverage = engine.coverage.sealed
 		prepared.proof = contractPublishedProof(snap.Inputs, engine.clock, snap.Key.CheckoutID)
 		registry, evidence = engine.registry, engine.evidence
+		// Convergence has sealed the cohort's registry. Every target uses the
+		// same complete match groups; only its payload ownership is filtered.
+		prepared.matched = contracts.Match(registry).Matched
 		report.PrepareDuration = time.Since(prepareStart)
 		report.ScratchNodes, report.ScratchEdges = evidence.writtenNodes, evidence.writtenEdges
 		report.ScratchBytes = contractFollowupScratchBytes(prepared.scratchDir)
@@ -526,7 +530,7 @@ func buildContractFollowupPrepared(ctx context.Context, req ContractFollowupRequ
 		return report, fmt.Errorf("contract followup: %d missing selected source owners", missing)
 	}
 	report.Records = len(own)
-	matches := contracts.Match(registry).Matched
+	matches := prepared.matched
 	groups := make(map[bridgeGroupKey]bool)
 	for _, match := range matches {
 		if match.Provider.RepoPrefix == snap.Key.RepoPrefix || match.Consumer.RepoPrefix == snap.Key.RepoPrefix {
