@@ -253,6 +253,12 @@ func insertNodeChunksTx(tx *sql.Tx, viewGen int64, nodes []*graph.Node, returnCh
 }
 
 func insertNodeChunksTxLimited(tx *sql.Tx, viewGen int64, nodes []*graph.Node, returnChanged bool, variableLimit *int) (rowsChanged, statements int, changedIDs map[string]int, err error) {
+	return insertNodeChunksTxWithConflict(tx, viewGen, nodes, returnChanged, variableLimit, nodeUpsertClause)
+}
+
+// Generated fallback sentinels use DO NOTHING rather than the real-node upsert:
+// materialization must never replace an explicit or already stored node.
+func insertNodeChunksTxWithConflict(tx *sql.Tx, viewGen int64, nodes []*graph.Node, returnChanged bool, variableLimit *int, conflict string) (rowsChanged, statements int, changedIDs map[string]int, err error) {
 	if returnChanged {
 		changedIDs = make(map[string]int)
 	}
@@ -297,7 +303,7 @@ func insertNodeChunksTxLimited(tx *sql.Tx, viewGen int64, nodes []*graph.Node, r
 			continue
 		}
 
-		query := `INSERT INTO nodes (` + nodeInsertColumns + `) VALUES ` + multiValues(len(chunk), nodeInsertParams) + nodeUpsertClause
+		query := `INSERT INTO nodes (` + nodeInsertColumns + `) VALUES ` + multiValues(len(chunk), nodeInsertParams) + conflict
 		if returnChanged {
 			query += ` RETURNING id`
 		}
@@ -558,16 +564,28 @@ func (s *Store) addBatchSetOriented(nodes []*graph.Node, edges []*graph.Edge) (s
 			s.builtinSeen.Delete(key)
 		}
 	}()
+	realNodes := nodes
+	var fallbackBuiltins []*graph.Node
 	if stubs := graph.BuiltinStubNodes(edges); len(stubs) > 0 {
+		explicit := make(map[string]struct{}, len(nodes))
+		for _, node := range nodes {
+			if node != nil && node.ID != "" && !graph.IsProxyNode(node) {
+				explicit[node.ID] = struct{}{}
+			}
+		}
 		var fresh []*graph.Node
 		for _, stub := range stubs {
+			if _, supplied := explicit[stub.ID]; supplied {
+				continue
+			}
 			key := builtinSeenKey(s.viewGen, stub.ID)
 			if _, dup := s.builtinSeen.LoadOrStore(key, struct{}{}); !dup {
 				fresh = append(fresh, stub)
 			}
 		}
 		if len(fresh) > 0 {
-			nodes = append(append(make([]*graph.Node, 0, len(nodes)+len(fresh)), nodes...), fresh...)
+			fallbackBuiltins = fresh
+			nodes = append(append(make([]*graph.Node, 0, len(nodes)+len(fresh)), fresh...), nodes...)
 		}
 	}
 
@@ -676,12 +694,28 @@ func (s *Store) addBatchSetOriented(nodes []*graph.Node, edges []*graph.Edge) (s
 	}
 	var changedNodeIDs map[string]int
 	if useJSONB {
-		stats.nodeRowsChanged, stats.nodeStatements, changedNodeIDs, err = insertNodeChunksJSONBTxWithBuffers(tx, s.viewGen, nodes, receiptDelta != nil, &s.jsonbIngestBuffers)
+		stats.nodeRowsChanged, stats.nodeStatements, changedNodeIDs, err = insertNodeChunksJSONBTxWithBuffers(tx, s.viewGen, realNodes, receiptDelta != nil, &s.jsonbIngestBuffers)
 	} else {
-		stats.nodeRowsChanged, stats.nodeStatements, changedNodeIDs, err = insertNodeChunksTxLimited(tx, s.viewGen, nodes, receiptDelta != nil, &variableLimit)
+		stats.nodeRowsChanged, stats.nodeStatements, changedNodeIDs, err = insertNodeChunksTxLimited(tx, s.viewGen, realNodes, receiptDelta != nil, &variableLimit)
 	}
 	if err != nil {
 		return stats, err
+	}
+	if len(fallbackBuiltins) > 0 {
+		inserted, statements, ids, insertErr := insertNodeChunksTxWithConflict(tx, s.viewGen, fallbackBuiltins, receiptDelta != nil, &variableLimit, ` ON CONFLICT(id, view_gen) DO NOTHING`)
+		if insertErr != nil {
+			return stats, insertErr
+		}
+		stats.nodeRowsChanged += inserted
+		stats.nodeStatements += statements
+		if receiptDelta != nil {
+			if changedNodeIDs == nil {
+				changedNodeIDs = make(map[string]int, len(ids))
+			}
+			for id, count := range ids {
+				changedNodeIDs[id] += count
+			}
+		}
 	}
 	if corpusRows := cloneCorpusRowsFromNodes(nodes); len(corpusRows) > 0 {
 		if err := upsertCloneCorpusTx(tx, s.viewGen, "", corpusRows); err != nil {
@@ -718,7 +752,9 @@ func (s *Store) addBatchSetOriented(nodes []*graph.Node, edges []*graph.Edge) (s
 			}
 		}
 		for id, node := range lastNodes {
-			identities[id] = sqliteIdentityForNode(node)
+			if changedNodeIDs[id] > 0 {
+				identities[id] = sqliteIdentityForNode(node)
+			}
 		}
 	}
 
