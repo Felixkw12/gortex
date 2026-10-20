@@ -79,6 +79,10 @@ func (f *contractConsumerFixture) publish(t *testing.T, selected *graphview.Repo
 }
 
 func (f *contractConsumerFixture) publishRows(t *testing.T, selected *graphview.RepoView, actor, route string, nodes []*graph.Node, edges []*graph.Edge) {
+	f.publishRowsForTargets(t, selected, actor, route, nodes, edges, []string{"repo", "b"})
+}
+
+func (f *contractConsumerFixture) publishRowsForTargets(t *testing.T, selected *graphview.RepoView, actor, route string, nodes []*graph.Node, edges []*graph.Edge, targets []string) {
 	t.Helper()
 	var captures []*graphview.SelectedContractInputs
 	for _, repo := range []string{"repo", "b"} {
@@ -96,7 +100,7 @@ func (f *contractConsumerFixture) publishRows(t *testing.T, selected *graphview.
 	meta := map[string]any{"path": route, "method": "GET", "framework": "test-framework", "response_type": "repo/types.go::Response", "response_envelope": []map[string]any{{"name": "fresh"}}}
 	canonical := &graph.Node{ID: id, Name: "GET " + route, Kind: graph.KindContract, FilePath: "repo/handler.go", RepoPrefix: "repo", WorkspaceID: "ws", ProjectID: "project", Meta: map[string]any{"type": "http", "role": "provider", "symbol_id": "repo/handler.go::Handle", "workspace": "ws", "project": "project", "contract_owner_record": true, "contract_meta": meta}}
 	bridge := &graph.Node{ID: "bridge::ws::project::" + id, Name: "GET " + route, Kind: graph.KindContractBridge, FilePath: indexer.ContractBridgeFilePath, RepoPrefix: "repo", WorkspaceID: "ws", ProjectID: "project", Meta: map[string]any{"contract_type": "http", "canonical_key": "GET " + route, "contract_id": id, "workspace": "ws", "project": "project", "repos": []string{"repo", "b"}, "provider_count": 1, "consumer_count": 1, "cross_repo": true}}
-	for _, repo := range []string{"repo", "b"} {
+	for _, repo := range targets {
 		input, err := graphview.ComposeSelectedContractInputs(repo, actor, captures...)
 		require.NoError(t, err)
 		f.sequence++

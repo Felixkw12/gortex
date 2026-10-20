@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -27,10 +29,13 @@ type ContractAnalysisRuntime struct {
 	AcquireLastPublishedCohort func(context.Context, indexer.ContractActor) (*indexer.ContractPublishedCohort, func(), error)
 	Schedule                   func(context.Context, indexer.ContractScheduleRequest) (indexer.ContractScheduleResult, error)
 	WaitActor                  func(context.Context, indexer.ContractActor, uint64) (indexer.ContractActorStatus, error)
-	WaitCapacity               func(context.Context, uint64) error
-	CapacityEpoch              func() uint64
-	InputEpoch                 func() uint64
-	WaitInputs                 func(context.Context, uint64) error
+	// WaitTarget is an optional durable-target reopen hint. It does not certify
+	// actor completion; the consumer still opens and validates current inputs.
+	WaitTarget    func(context.Context, indexer.ContractActor, uint64, graph.ContractAttachmentKey) (indexer.ContractActorStatus, error)
+	WaitCapacity  func(context.Context, uint64) error
+	CapacityEpoch func() uint64
+	InputEpoch    func() uint64
+	WaitInputs    func(context.Context, uint64) error
 }
 
 // SetContractAnalysisRuntime is a startup-only installation seam. Leaving it
@@ -78,6 +83,7 @@ type contractConsumerStatus struct {
 	consulted       bool
 	retryAfter      time.Duration
 	receiptsUnknown bool
+	targetRepos     []string
 }
 
 func contractConsumerStatusFromContext(ctx context.Context) *contractConsumerStatus {
@@ -169,6 +175,8 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 	if err != nil {
 		return ctx, mcp.NewToolResultError(err.Error())
 	}
+	targets := contractListTargetRepos(lowered, repos)
+	status.targetRepos = targets
 	view := requestViewFromContext(ctx)
 	var selected *graphview.RepoView
 	checkout := ""
@@ -216,7 +224,7 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 		// Sampled before the capture: an accept landing after it moves the
 		// epoch past this sample.
 		epoch := runtime.InputEpoch()
-		binding, pending, err := s.openContractConsumerBinding(waitCtx, selected, checkout, repos)
+		binding, pending, err := s.openContractConsumerTargets(waitCtx, selected, checkout, repos, targets)
 		if err == nil {
 			status.state, status.reason, status.fresh = graphview.StateComplete, "", true
 			binding.served = status.allowServed
@@ -318,6 +326,10 @@ func (s *Server) scheduleAndWaitContractAnalysis(ctx context.Context, actor inde
 			return indexer.ContractActorStatus{}, 0, err
 		}
 		pending.arrivalSeq = scheduled.ArrivalSeq
+		if pending.targetOnly && runtime.WaitTarget != nil {
+			status, err := runtime.WaitTarget(ctx, scheduled.Actor, scheduled.ArrivalSeq, pending.key)
+			return status, status.RetryAfter, err
+		}
 		status, err := runtime.WaitActor(ctx, scheduled.Actor, scheduled.ArrivalSeq)
 		return status, status.RetryAfter, err
 	}
@@ -339,6 +351,7 @@ type pendingContractBinding struct {
 	inputs     *graphview.SelectedContractInputs
 	stale      bool
 	arrivalSeq uint64
+	targetOnly bool
 }
 
 // contractConsumerRepos follows the same workspace/project/repo admission as
@@ -390,6 +403,31 @@ func (s *Server) contractConsumerRepos(ctx context.Context, req mcp.CallToolRequ
 }
 
 func (s *Server) openContractConsumerBinding(ctx context.Context, selected *graphview.RepoView, checkout string, repos []string) (*contractAnalysisContext, *pendingContractBinding, error) {
+	return s.openContractConsumerTargets(ctx, selected, checkout, repos, nil)
+}
+
+// contractListTargetRepos only narrows an explicit single-repository list.
+// The dependency cohort remains unchanged. Other consumers may combine graph
+// or shape data across targets and retain the original whole-cohort behavior.
+func contractListTargetRepos(req mcp.CallToolRequest, repos []string) []string {
+	allRepos, _ := req.GetArguments()["all_repos"].(bool)
+	action := req.GetString("action", "list")
+	if req.Params.Name != "contracts" || (action != "list" && action != "") || allRepos {
+		return nil
+	}
+	repo := strings.TrimSpace(req.GetString("repo", ""))
+	for _, admitted := range repos {
+		if repo == admitted {
+			return []string{repo}
+		}
+	}
+	return nil
+}
+
+// All admitted inputs are captured, even when only requested targets are opened.
+// A current target is certified against that full vector, never its own inputs
+// alone. Missing companion payloads need not delay an explicitly scoped list.
+func (s *Server) openContractConsumerTargets(ctx context.Context, selected *graphview.RepoView, checkout string, repos, targets []string) (*contractAnalysisContext, *pendingContractBinding, error) {
 	captures := make([]*graphview.SelectedContractInputs, 0, len(repos))
 	for _, repo := range repos {
 		var source *graphview.RepoView
@@ -415,6 +453,9 @@ func (s *Server) openContractConsumerBinding(ctx context.Context, selected *grap
 	}
 	binding := &contractAnalysisContext{views: make(map[string]*graphview.ContractAnalysisView, len(repos))}
 	for index, repo := range repos {
+		if len(targets) > 0 && !slices.Contains(targets, repo) {
+			continue
+		}
 		actor := captures[index].State.CheckoutID
 		input, err := graphview.ComposeSelectedContractInputs(repo, actor, captures...)
 		if err != nil {
@@ -430,7 +471,7 @@ func (s *Server) openContractConsumerBinding(ctx context.Context, selected *grap
 			binding.close()
 			if graphview.CodeOf(err) == graphview.CodeRequiredCapabilityIncomplete || errors.Is(err, graph.ErrContractProjectionStale) {
 				key := graph.ContractAttachmentKey{RepoPrefix: repo, CheckoutID: actor, InputVersion: input.State.InputVersion, InputFingerprint: input.State.InputFingerprint}
-				return nil, &pendingContractBinding{key: key, inputs: input, stale: errors.Is(err, graph.ErrContractProjectionStale)}, err
+				return nil, &pendingContractBinding{key: key, inputs: input, stale: errors.Is(err, graph.ErrContractProjectionStale), targetOnly: len(targets) > 0}, err
 			}
 			return nil, nil, err
 		}
@@ -476,6 +517,10 @@ func decorateContractConsumerResult(ctx context.Context, result *mcp.CallToolRes
 		}
 	}
 	fields := map[string]any{"capability": graphview.CapContracts, "state": status.state, "fresh": fresh}
+	if len(status.targetRepos) > 0 {
+		fields["scope"] = "repository"
+		fields["repositories"] = status.targetRepos
+	}
 	if status.reason != "" {
 		fields["reason"] = status.reason
 	}
