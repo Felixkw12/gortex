@@ -21,6 +21,7 @@ import (
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/reconcile"
 	"github.com/zzet/gortex/internal/search"
+	"github.com/zzet/gortex/internal/semantic"
 )
 
 // The coordinator fixture: one family, one primary checkout whose content is
@@ -372,12 +373,24 @@ func (c *CheckoutCoordinator) retirementBacklog() []int64 {
 }
 
 func TestCheckoutCoordinatorLogsFullIndexOrigin(t *testing.T) {
+	t.Setenv("GORTEX_ENRICH_MIN_NODES", "0")
 	f := newCoordinatorFixture(t)
 	f.commitTreeB()
 	builderWriteFile(t, f.worktree, "origin.go", "package fixture\n\nfunc Origin() {}\n")
 	core, logs := observer.New(zap.InfoLevel)
 	builder := builderNewBuilder(f.store)
 	builder.Logger = zap.New(core)
+	provider := &coordinatorOriginProvider{checkoutEnrichSpy: &checkoutEnrichSpy{}}
+	manager := semantic.NewManager(semantic.Config{
+		Enabled:                  true,
+		CheckoutLSPMaxWorkspaces: 4,
+		Providers: []semantic.ProviderConfig{
+			{Name: provider.Name(), Languages: provider.Languages(), Priority: 1, Enabled: true},
+		},
+	}, zap.NewNop())
+	manager.RegisterProvider(provider)
+	t.Cleanup(func() { _ = manager.Close() })
+	builder.Semantic = manager
 	c := f.inertCoordinator(t, CheckoutCoordinatorConfig{Builder: builder})
 
 	cycle := coordinatorReconcile(t, c)
@@ -385,8 +398,11 @@ func TestCheckoutCoordinatorLogsFullIndexOrigin(t *testing.T) {
 		t.Fatalf("built commit=%v dirty=%v, want both", cycle.CommitBuilt, cycle.DirtyBuilt)
 	}
 	entries := logs.FilterMessage("indexer: full index started").All()
-	if len(entries) != 2 {
-		t.Fatalf("full-index starts = %d, want 2 for the commit and dirty layers", len(entries))
+	// The commit pass is a full index; the dirty builder uses its sparse
+	// edit-delta path. It must inherit the origin without inventing a second
+	// full-index event.
+	if len(entries) != 1 {
+		t.Fatalf("full-index starts = %d, want 1 for the commit layer", len(entries))
 	}
 	for _, entry := range entries {
 		fields := entry.ContextMap()
@@ -394,6 +410,36 @@ func TestCheckoutCoordinatorLogsFullIndexOrigin(t *testing.T) {
 			t.Errorf("full-index start = %v, want origin checkout_coordinator and repo %s", fields, builderRepoPrefix)
 		}
 	}
+	provider.mu.Lock()
+	origins := append([]string(nil), provider.origins...)
+	provider.mu.Unlock()
+	if len(origins) != 1 || origins[0] != "checkout_coordinator" {
+		t.Fatalf("sparse dirty enrichment origins = %v, want [checkout_coordinator]", origins)
+	}
+	if roots := provider.enriched(); len(roots) != 1 || roots[0] != f.worktree {
+		t.Fatalf("dirty enrichment roots = %v, want [%s]", roots, f.worktree)
+	}
+	row, found := f.generation(cycle.DirtyGenerationID)
+	if !found || row.GenerationKind != DirtyLayerGenerationKind || row.State != store_sqlite.ViewGenerationReady {
+		t.Fatalf("dirty generation = %+v, found=%v; want a published ready dirty layer", row, found)
+	}
+	if nodes := f.store.AtGeneration(cycle.DirtyGenerationID).FindNodesByName("Origin"); len(nodes) != 1 {
+		t.Fatalf("dirty Origin declarations = %d, want 1", len(nodes))
+	}
+}
+
+// coordinatorOriginProvider observes the context at the existing semantic
+// provider boundary of a real sparse dirty build; no production hook is added.
+type coordinatorOriginProvider struct {
+	*checkoutEnrichSpy
+	origins []string
+}
+
+func (p *coordinatorOriginProvider) EnrichRepoContext(ctx context.Context, g graph.Store, _, root string, _ semantic.EnrichDeadlinePolicy) (*semantic.EnrichResult, error) {
+	p.mu.Lock()
+	p.origins = append(p.origins, indexOrigin(ctx))
+	p.mu.Unlock()
+	return p.Enrich(g, root)
 }
 
 // --- the debounce -------------------------------------------------------
