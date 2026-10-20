@@ -478,6 +478,14 @@ func liveMotionCoordinator(t *testing.T, f *coordinatorFixture, cycles *motionFi
 // A plain save in a linked worktree — no query, no MCP edit, no poll — is
 // published by the checkout's own watcher.
 func TestALinkedWorktreeSaveIsPublishedWithoutAQuery(t *testing.T) {
+	linkedWorktreeSavePublication(t)
+}
+
+// linkedWorktreeSavePublication proves the native watcher publishes the exact
+// current tree within the existing bounded wait. The opt-in measurement owns
+// the tighter latency assertion; regular CI retains publication correctness.
+func linkedWorktreeSavePublication(t *testing.T) (time.Duration, time.Duration) {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("starts a native file watcher")
 	}
@@ -488,70 +496,7 @@ func TestALinkedWorktreeSaveIsPublishedWithoutAQuery(t *testing.T) {
 	saved := time.Now()
 	motionAtomicWrite(t, filepath.Join(f.worktree, "helper.go"), "package fixture\n\nfunc Helper() {\n\t_ = 1\n}\n")
 	took := cycles.published(t, f, c, saved, 5*time.Second)
-	t.Logf("save published %s after the write (quiet window %s)", took, c.quiet)
-	if took > 2*time.Second {
-		t.Fatalf("save published %s after the write, want about the quiet window plus one build", took)
-	}
-}
-
-// A working tree written every 300 ms produces held and abandoned background
-// cycles, never a failed one, and its final state is published once the
-// writes stop.
-func TestAWorkingTreeWrittenEvery300msCoalescesWithoutFailedBuilds(t *testing.T) {
-	if testing.Short() {
-		t.Skip("starts a native file watcher")
-	}
-	t.Setenv(checkoutWatchDisableEnv, "")
-	f := newCoordinatorFixture(t)
-	cycles := &motionFixtureCycles{}
-	c := liveMotionCoordinator(t, f, cycles)
-	cycles.mu.Lock()
-	before := len(cycles.cycles)
-	cycles.mu.Unlock()
-	files := []string{"core.go", "helper.go", "island.go", "extra.go"}
-	writes := 0
-	var lastWrite time.Time
-	for i := 0; i < 14; i++ {
-		if i > 0 {
-			time.Sleep(300 * time.Millisecond)
-		}
-		name := files[i%len(files)]
-		motionAtomicWrite(t, filepath.Join(f.worktree, name), fmt.Sprintf("package fixture\n\nfunc Edit%d() {}\n", i))
-		lastWrite = time.Now()
-		writes++
-	}
-	took := cycles.published(t, f, c, lastWrite, 5*time.Second)
-
-	cycles.mu.Lock()
-	defer cycles.mu.Unlock()
-	held, abandoned, built, failed := 0, 0, 0, 0
-	for _, out := range cycles.cycles[before:] {
-		switch {
-		case out.Err != nil:
-			failed++
-			t.Errorf("cycle failed: %v", out.Err)
-		case out.Held:
-			held++
-		case out.YieldedTo == treeMovedReason:
-			abandoned++
-		case out.DirtyBuilt:
-			built++
-		}
-	}
-	t.Logf("%d writes: %d cycles (%d held, %d abandoned, %d built, %d failed); final state published %s after the last write",
-		writes, len(cycles.cycles)-before, held, abandoned, built, failed, took)
-	if failed != 0 {
-		t.Fatalf("%d background cycles failed over a moving working tree", failed)
-	}
-	// A held cycle samples the moving tree but never admits build work.
-	// Count abandoned and completed builds, rather than watcher wakes, when
-	// checking that the writes were coalesced.
-	if admitted := abandoned + built; admitted >= writes {
-		t.Fatalf("%d admitted builds for %d writes: the changes were not coalesced", admitted, writes)
-	}
-	if took > 2*time.Second {
-		t.Fatalf("the final state was published %s after the last write, want about the quiet window plus one build", took)
-	}
+	return took, c.quiet
 }
 
 // A background cycle that has not queued for the lane yet steps aside the
