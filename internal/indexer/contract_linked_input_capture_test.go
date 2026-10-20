@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 func TestContractLinkedInputCaptureReopensCurrentCheckoutAncestry(t *testing.T) {
@@ -51,6 +52,12 @@ func TestContractLinkedInputCaptureKeepsCompanionPositiveAbsence(t *testing.T) {
 	w := newContractLinkedWorktree(t, f, files, "helper.go")
 	state := graph.ContractInputState{RepoPrefix: "companion", InputVersion: "v", InputFingerprint: "f", Accepted: true}
 	require.NoError(t, f.store.BeginContractInputMutationContext(t.Context(), nil, state, nil))
+	method := &graph.Node{ID: "companion/Service.java::bean", Name: "bean", Kind: graph.KindMethod, Language: "java", RepoPrefix: "companion", FilePath: "companion/Service.java", StartLine: 7, Meta: map[string]any{"signature": "Bean bean()", "spring_config_keys": []string{"service.url"}}}
+	foreign := &graph.Node{ID: "other/Foreign::target", Kind: graph.KindFunction, RepoPrefix: "other", FilePath: "other/foreign.go"}
+	require.NoError(t, f.store.AddBatchChecked([]*graph.Node{method, foreign}, []*graph.Edge{
+		{From: method.ID, To: foreign.ID, Kind: graph.EdgeProvides, FilePath: method.FilePath, Meta: map[string]any{graph.MetaDIBinding: graph.DIBindingUseExisting, graph.MetaDIToken: "ALIAS"}},
+		{From: foreign.ID, To: method.ID, Kind: graph.EdgeConsumes, FilePath: foreign.FilePath},
+	}))
 	require.NoError(t, f.store.AcceptContractInputMutationContext(t.Context(), state))
 	capture := NewContractLinkedInputCapture(f.options.Materializer)
 	actor := NewContractActor(contractLinkedCheckout, []string{"fixture", "companion"})
@@ -67,6 +74,30 @@ func TestContractLinkedInputCaptureKeepsCompanionPositiveAbsence(t *testing.T) {
 		}
 	}
 	require.True(t, absent, "selected positive namespace absence participates in the exact vector")
+	reader, ok := inputs.SourceReaders()["companion"].(*store_sqlite.Store)
+	require.True(t, ok, "the actual companion source is native despite its positive absence witness")
+	require.Zero(t, reader.ViewGeneration())
+	var handles []*store_sqlite.Store
+	for _, witness := range inputs.Witnesses {
+		if witness.State.RepoPrefix == "companion" {
+			handles = append(handles, f.store.AtGeneration(witness.GenerationID))
+		}
+	}
+	require.GreaterOrEqual(t, len(handles), 2, "the handle-count proxy would choose composed seed preparation")
+	before := append([]graph.ContractInputWitness(nil), inputs.Witnesses...)
+	wantNodes, err := reader.ContractSeedNodesContext(t.Context(), "companion")
+	require.NoError(t, err)
+	wantEdges, err := reader.ContractSeedEdgesContext(t.Context(), "companion")
+	require.NoError(t, err)
+	require.Len(t, wantNodes, 1)
+	require.Len(t, wantEdges, 1)
+	nodes, edges, supported, err := readContractFollowupSeeds(t.Context(), reader, handles, "companion")
+	require.NoError(t, err)
+	require.True(t, supported)
+	require.Equal(t, wantNodes, nodes)
+	require.Equal(t, wantEdges, edges)
+	require.Equal(t, before, inputs.Witnesses, "seed dispatch must not remove the physical absence publication guard")
+	require.NoError(t, inputs.Validate(t.Context()))
 	companionOnly, selectedSource, err := capture(t.Context(), NewContractActor(contractLinkedCheckout, []string{"companion"}), "companion")
 	require.NoError(t, err)
 	defer selectedSource.Release()
@@ -83,6 +114,7 @@ func TestContractLinkedInputCaptureKeepsCompanionPositiveAbsence(t *testing.T) {
 	moved.InputFingerprint += "-changed"
 	require.NoError(t, f.store.BeginContractInputMutationContext(t.Context(), &selected, moved, nil))
 	require.NoError(t, f.store.AcceptContractInputMutationContext(t.Context(), moved))
+	require.ErrorIs(t, inputs.Validate(t.Context()), graph.ErrContractProjectionStale, "native companion seeds do not weaken the selected cohort fence")
 	require.ErrorIs(t, companionOnly.Validate(t.Context()), graph.ErrContractProjectionStale, "the private selected authority is still validated for a companion-only vector")
 	// In-flight input authority is validated, not rejected for Accepted alone.
 	next := state

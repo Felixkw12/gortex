@@ -777,12 +777,19 @@ func readContractFollowupSeeds(ctx context.Context, reader graph.Reader, handles
 	if len(handles) == 0 {
 		return nil, nil, false, nil
 	}
-	if len(handles) == 1 && handles[0].ViewGeneration() == 0 {
-		edges, err := handles[0].ContractSeedEdgesContext(ctx, repo)
+	native, nativeReader := reader.(*store_sqlite.Store)
+	if reader == nil || nativeReader && native == nil {
+		return nil, nil, false, graph.ErrContractProjectionUnsupported
+	}
+	// Witness handles include positive namespace absence for companions whose
+	// selected core is still primary. Only the selected reader certifies that
+	// no composition masks or checked wrapper fence must be applied.
+	if nativeReader && native.ViewGeneration() == 0 {
+		edges, err := native.ContractSeedEdgesContext(ctx, repo)
 		if err != nil {
 			return nil, nil, false, err
 		}
-		nodes, err := handles[0].ContractSeedNodesContext(ctx, repo)
+		nodes, err := native.ContractSeedNodesContext(ctx, repo)
 		if err != nil {
 			return nil, nil, false, err
 		}
