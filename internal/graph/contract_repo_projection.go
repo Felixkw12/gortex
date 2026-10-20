@@ -1,6 +1,9 @@
 package graph
 
-import "context"
+import (
+	"context"
+	"reflect"
+)
 
 // ContractRepoProjectionReader reads an exact namespace, including the empty
 // standalone namespace. The result includes checked same-ID ownership evidence.
@@ -15,7 +18,50 @@ type OverlayLayerContractRepoProjectionReader interface {
 	LayerContractRepoProjectionContext(context.Context, string) (ContractFileProjection, error)
 }
 
+// OverlayLayerContractRepoOwnerProjectionReader may read scalar completion
+// identities without opaque metadata. The source must be the exact nonnil pointer receiver: a wrapper that
+// promotes these methods must still run its own checked full projection.
+type OverlayLayerContractRepoOwnerProjectionReader interface {
+	ContractRepoOwnerProjectionSource() any
+	LayerContractRepoOwnerProjectionContext(context.Context, string) (ContractFileProjection, error)
+}
+
+func contractRepoOwnerLayer(ctx context.Context, layer any, repo string) (ContractFileProjection, error) {
+	if owner, ok := layer.(OverlayLayerContractRepoOwnerProjectionReader); ok {
+		source := reflect.ValueOf(owner.ContractRepoOwnerProjectionSource())
+		if source.IsValid() && source.Kind() == reflect.Pointer && !source.IsNil() && source.Interface() == layer {
+			return owner.LayerContractRepoOwnerProjectionContext(ctx, repo)
+		}
+	}
+	checked, ok := layer.(OverlayLayerContractRepoProjectionReader)
+	if !ok {
+		return ContractFileProjection{}, ErrContractProjectionUnsupported
+	}
+	p, err := checked.LayerContractRepoProjectionContext(ctx, repo)
+	return p, err
+}
+
+func rawContractRepoOwnerProjection(ctx context.Context, r Reader, repo string) (ContractFileProjection, error) {
+	switch v := r.(type) {
+	case *OverlaidView:
+		return v.contractRepoProjectionMode(ctx, repo, true)
+	case *DeltaWriter:
+		return v.view.contractRepoProjectionMode(ctx, repo, true)
+	}
+	if _, checked := r.(OverlayLayerContractRepoProjectionReader); checked {
+		return contractRepoOwnerLayer(ctx, r, repo)
+	}
+	// Preserve existing checked-wrapper/unwrapper behavior; do not discover an
+	// accelerator through a wrapper whose own authority is unknown.
+	p, err := rawContractRepoProjection(ctx, r, repo)
+	return p, err
+}
+
 func (v *OverlaidView) contractRepoProjection(ctx context.Context, repo string) (ContractFileProjection, error) {
+	return v.contractRepoProjectionMode(ctx, repo, false)
+}
+
+func (v *OverlaidView) contractRepoProjectionMode(ctx context.Context, repo string, ownersOnly bool) (ContractFileProjection, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -25,7 +71,11 @@ func (v *OverlaidView) contractRepoProjection(ctx context.Context, repo string) 
 	var base, own ContractFileProjection
 	var err error
 	if v.base != nil {
-		base, err = rawContractRepoProjection(ctx, v.base, repo)
+		if ownersOnly {
+			base, err = rawContractRepoOwnerProjection(ctx, v.base, repo)
+		} else {
+			base, err = rawContractRepoProjection(ctx, v.base, repo)
+		}
 		if err != nil {
 			return ContractFileProjection{}, err
 		}
@@ -35,7 +85,11 @@ func (v *OverlaidView) contractRepoProjection(ctx context.Context, repo string) 
 		if !ok {
 			return ContractFileProjection{}, ErrContractProjectionUnsupported
 		}
-		own, err = reader.LayerContractRepoProjectionContext(ctx, repo)
+		if ownersOnly {
+			own, err = contractRepoOwnerLayer(ctx, v.layer, repo)
+		} else {
+			own, err = reader.LayerContractRepoProjectionContext(ctx, repo)
+		}
 		if err != nil {
 			return ContractFileProjection{}, err
 		}
@@ -143,4 +197,39 @@ func (dw *DeltaWriter) LoadContractRepoProjectionContext(ctx context.Context, re
 }
 func (l *deltaLayer) LayerContractRepoProjectionContext(ctx context.Context, repo string) (ContractFileProjection, error) {
 	return l.work.LayerContractRepoProjectionContext(ctx, repo)
+}
+
+// CompleteContractDISeedProjection keeps the existing selected ownership/mask
+// and same-ID completion rules, avoiding initial scalar metadata hydration.
+// Unknown checked layers retain their full projection, scalar completion keys,
+// and all of its errors: their scalar keys may reveal otherwise unseen owners.
+func CompleteContractDISeedProjection(ctx context.Context, r Reader, repo string) (ContractFileProjection, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ContractFileProjection{}, err
+	}
+	local, err := rawContractRepoOwnerProjection(ctx, r, repo)
+	if err != nil {
+		return ContractFileProjection{}, err
+	}
+	for _, row := range local.OwnerRows {
+		if row.Edge == nil {
+			return ContractFileProjection{}, ErrContractProjectionIncomplete
+		}
+	}
+	// Keep the original canonical key set, including cross-kind owner targets.
+	// A route-owned ID may also carry DI rows from another selected owner.
+	groups, err := CompleteContractIDProjection(ctx, r, contractProjectionIDs(local))
+	if err != nil {
+		return ContractFileProjection{}, err
+	}
+	if !contractProjectionWithinLimit(groups) {
+		return ContractFileProjection{}, ErrContractProjectionLimit
+	}
+	if err := ctx.Err(); err != nil {
+		return ContractFileProjection{}, err
+	}
+	return groups, nil
 }

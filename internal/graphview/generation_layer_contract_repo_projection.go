@@ -23,3 +23,19 @@ func (l *GenerationLayer) LayerContractRepoProjectionContext(ctx context.Context
 	}
 	return graph.FilterContractFileProjection(p, l.servesNode, l.servesEdge), nil
 }
+
+func (l *GenerationLayer) ContractRepoOwnerProjectionSource() any { return l }
+
+func (l *GenerationLayer) LayerContractRepoOwnerProjectionContext(ctx context.Context, repo string) (graph.ContractFileProjection, error) {
+	if err := l.checkContractInputRevision(ctx); err != nil {
+		return graph.ContractFileProjection{}, err
+	}
+	p, err := l.handle.LayerContractRepoOwnerProjectionContext(ctx, repo)
+	if err != nil {
+		return graph.ContractFileProjection{}, err
+	}
+	if err := l.checkContractInputRevision(ctx); err != nil {
+		return graph.ContractFileProjection{}, err
+	}
+	return graph.FilterContractFileProjection(p, l.servesNode, l.servesEdge), nil
+}

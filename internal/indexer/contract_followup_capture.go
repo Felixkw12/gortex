@@ -795,7 +795,7 @@ func readContractFollowupSeeds(ctx context.Context, reader graph.Reader, handles
 		}
 		return nodes, edges, true, nil
 	}
-	projection, err := graph.CompleteContractRepoProjection(ctx, reader, repo)
+	projection, err := graph.CompleteContractDISeedProjection(ctx, reader, repo)
 	if err != nil {
 		return nil, nil, false, err
 	}
