@@ -10,6 +10,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/gitcmd"
+	"github.com/zzet/gortex/internal/indexer"
 )
 
 // autoIndexFileLimit bounds zero-config auto-indexing: a cwd repo with more
@@ -61,7 +62,7 @@ func (s *Server) autoIndexCWDBackground() {
 		s.logger.Info("auto-index: background-indexing untracked cwd", zap.String("root", root))
 	}
 	ctx := context.Background()
-	if _, err := s.multiIndexer.TrackRepoCtx(ctx, config.RepoEntry{Path: root}); err != nil {
+	if _, err := s.multiIndexer.TrackRepoCtx(indexer.WithIndexOrigin(ctx, "mcp_auto_index"), config.RepoEntry{Path: root}); err != nil {
 		if s.logger != nil {
 			s.logger.Warn("auto-index: track failed", zap.String("root", root), zap.Error(err))
 		}

@@ -42,3 +42,27 @@ func TestResolveRepoPrefixOrReconcileLogsAutoTrackOrigin(t *testing.T) {
 	assert.Equal(t, "auto-track", srv.resolveRepoPrefixOrReconcile(context.Background(), root))
 	assert.Zero(t, logs.FilterMessage("indexer: full index started").Len(), "an already tracked repo must not start indexing")
 }
+
+func TestAutoIndexCWDLogsFullIndexOrigin(t *testing.T) {
+	root := setupMiniRepo(t, "auto-index-origin")
+	runGitT(t, root, "init")
+	runGitT(t, root, "add", ".")
+	t.Chdir(root)
+	cm, err := config.NewConfigManager(filepath.Join(t.TempDir(), "config.yaml"))
+	require.NoError(t, err)
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core)
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	mi := indexer.NewMultiIndexer(graph.New(), reg, search.NewNull(), cm, logger)
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+	srv := &Server{multiIndexer: mi, configManager: cm, logger: logger}
+
+	srv.autoIndexCWDBackground()
+	entries := logs.FilterMessage("indexer: full index started").All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "mcp_auto_index", entries[0].ContextMap()["origin"])
+	logs.TakeAll()
+	srv.autoIndexCWDBackground()
+	assert.Zero(t, logs.FilterMessage("indexer: full index started").Len(), "an already tracked cwd must not start indexing")
+}

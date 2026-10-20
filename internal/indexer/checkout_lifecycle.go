@@ -458,7 +458,8 @@ func (l *CheckoutLifecycle) Register(
 		}
 	}
 
-	result, err := l.mi.TrackRepoCtx(ctx, entry)
+	// The source tells a config reload's re-registration from a user's track.
+	result, err := l.mi.TrackRepoCtx(WithIndexOrigin(ctx, "checkout_register_"+string(source)), entry)
 	if err != nil {
 		return RegisterResult{}, err
 	}
@@ -484,7 +485,7 @@ func (l *CheckoutLifecycle) Register(
 
 	l.attachWatcher(out.Prefix)
 	l.saveConfig("track")
-	l.reconcileFamilyNow(ctx, out.FamilyID, absPath)
+	_ = l.reconcileFamilyNow(ctx, out.FamilyID, absPath)
 	l.notifyTrackedSetChanged()
 	return out, nil
 }
@@ -515,7 +516,7 @@ func (l *CheckoutLifecycle) RecordImplicit(ctx context.Context, root string) err
 
 	identity, err := l.recordCheckout(ctx, prefix, root, TrackSourceImplicit, false)
 	l.attachWatcherContext(ctx, prefix)
-	l.reconcileFamilyNow(ctx, identity.familyID, root)
+	_ = l.reconcileFamilyNow(ctx, identity.familyID, root)
 	l.notifyTrackedSetChanged()
 	return err
 }
@@ -1412,15 +1413,15 @@ func familyReportRemoved(report reconcile.FamilyReport) bool {
 // reconcileFamilyNow reconciles one family and applies its coordinator
 // dispositions immediately. Failures stay best-effort for registration and
 // startup; the next topology event or scheduled sweep asks again.
-func (l *CheckoutLifecycle) reconcileFamilyNow(ctx context.Context, familyID, fallbackDir string) bool {
+func (l *CheckoutLifecycle) reconcileFamilyNow(ctx context.Context, familyID, fallbackDir string) error {
 	if l == nil || l.rec == nil || familyID == "" {
-		return false
+		return errors.New("checkout lifecycle: family reconciliation is not wired")
 	}
 	report, err := l.rec.ReconcileFamily(ctx, familyID, l.probeDirFor(ctx, familyID, fallbackDir))
 	if err != nil {
 		l.logger.Debug("checkout lifecycle: could not reconcile the family",
 			zap.String("family", familyID), zap.Error(err))
-		return false
+		return err
 	}
 	l.applyCoordinators(ctx, report)
 	l.scheduleFamilyRetry(report)
@@ -1428,7 +1429,7 @@ func (l *CheckoutLifecycle) reconcileFamilyNow(ctx context.Context, familyID, fa
 		l.saveConfig("reconcile")
 		l.notifyTrackedSetChanged()
 	}
-	return true
+	return nil
 }
 
 // familyProbe is one family and the directory to read its inventory from.
@@ -2647,17 +2648,19 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 	// marks it worth resuming across the restart.
 	started = time.Now()
 	reconciled := 0
-	for familyID, probeDir := range seeded {
-		if l.reconcileFamilyNow(ctx, familyID, probeDir) {
-			reconciled++
-		}
-	}
 	var reconcileErr error
-	if reconciled != len(seeded) {
-		reconcileErr = errors.New("family reconciliation incomplete; see family debug logs")
+	for familyID, probeDir := range seeded {
+		if err := l.reconcileFamilyNow(ctx, familyID, probeDir); err != nil {
+			if reconcileErr == nil {
+				reconcileErr = fmt.Errorf("family %s: %w", familyID, err)
+			}
+			continue
+		}
+		reconciled++
 	}
 	stageCompleted("reconcile_family", started, reconcileErr,
-		zap.Int("families", len(seeded)), zap.Int("reconciled_families", reconciled))
+		zap.Int("families", len(seeded)), zap.Int("reconciled_families", reconciled),
+		zap.Int("failed_families", len(seeded)-reconciled))
 	return errors.Join(errs...)
 }
 

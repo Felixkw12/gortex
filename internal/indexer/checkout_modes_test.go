@@ -606,6 +606,7 @@ func TestSeedResumesDurablePromotion(t *testing.T) {
 	f.restart()
 	core, logs := observer.New(zap.InfoLevel)
 	f.lc.logger = zap.New(core)
+	f.mi.logger = zap.New(core)
 	require.NoError(t, f.lc.Seed(ctx))
 	stages := logs.FilterMessage("checkout lifecycle seed stage completed").FilterField(zap.String("stage", "resume_mode_transitions")).All()
 	require.Len(t, stages, 1)
@@ -613,6 +614,10 @@ func TestSeedResumesDurablePromotion(t *testing.T) {
 
 	outcome := awaitModeTransition(t, f.lc, transition.TransitionID)
 	require.NoError(t, outcome.err)
+	indexes := logs.FilterMessage("indexer: full index started").All()
+	require.Len(t, indexes, 1)
+	assert.Equal(t, "checkout_promotion", indexes[0].ContextMap()["origin"])
+	assert.Equal(t, outcome.promotion.Prefix, indexes[0].ContextMap()["repo"])
 	checkout, found, err := f.catalog.GetCheckout(ctx, f.automatic.CheckoutID)
 	require.NoError(t, err)
 	require.True(t, found)

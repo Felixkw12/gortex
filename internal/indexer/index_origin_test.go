@@ -12,7 +12,9 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/search"
 )
 
 func TestFullIndexLogsOrigin(t *testing.T) {
@@ -81,4 +83,42 @@ func TestFullIndexDoesNotLogStartWhenMemoryAdmissionIsCancelled(t *testing.T) {
 		t.Fatal("cancelled index did not return")
 	}
 	assert.Zero(t, logs.FilterMessage("indexer: full index started").Len(), "a cancelled admission must not log a started index")
+}
+
+func TestCheckoutRegisterLogsFullIndexOrigin(t *testing.T) {
+	f := newLifecycleFixture(t)
+	defer f.close()
+	core, logs := observer.New(zap.InfoLevel)
+	f.mi.logger = zap.New(core)
+	root := f.gitRepo("register-origin")
+
+	registered, err := f.lc.Register(context.Background(), config.RepoEntry{Path: root, Name: "register-origin"}, TrackSourceCLI)
+	require.NoError(t, err)
+	require.NoError(t, registered.CatalogErr)
+	entries := logs.FilterMessage("indexer: full index started").All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "register-origin", entries[0].ContextMap()["repo"])
+	assert.Equal(t, "checkout_register_cli_track", entries[0].ContextMap()["origin"])
+}
+
+func TestMultiIndexerLogsFullIndexEntryPoints(t *testing.T) {
+	cm := newTestConfigManager(t)
+	root := setupRepoDir(t, "multi-origin")
+	require.NoError(t, cm.Global().AddRepo(config.RepoEntry{Path: root, Name: "multi-origin"}))
+	core, logs := observer.New(zap.InfoLevel)
+	mi := NewMultiIndexer(graph.New(), newTestRegistry(), search.NewNull(), cm, zap.New(core))
+	t.Cleanup(func() { require.NoError(t, mi.Close(context.Background())) })
+
+	_, err := mi.IndexAll()
+	require.NoError(t, err)
+	entries := logs.FilterMessage("indexer: full index started").All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "index_all", entries[0].ContextMap()["origin"])
+	logs.TakeAll()
+
+	_, err = mi.IndexRepo("multi-origin")
+	require.NoError(t, err)
+	entries = logs.FilterMessage("indexer: full index started").All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "index_repo", entries[0].ContextMap()["origin"])
 }
