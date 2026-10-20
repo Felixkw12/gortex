@@ -3418,6 +3418,10 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 					zap.String("repo", idx.RepoPrefix()),
 					zap.Int("nodes", n), zap.Int("edges", e))
 			}
+			if err := resetShadowCloneCorpus(diskTarget, idx.RepoPrefix()); err != nil {
+				retErr = fmt.Errorf("indexer: prepare shadow clone corpus: %w", err)
+				return
+			}
 			bl.BeginBulkLoad()
 			// Transfer the shadow in explicit row/byte-capped batches. The
 			// process-wide shadow admission caps all live shadows at 1 GiB; these
