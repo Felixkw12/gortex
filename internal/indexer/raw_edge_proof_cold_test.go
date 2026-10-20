@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,6 +26,20 @@ func TestRawEdgeProofColdInstallEOFEqualsCold(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.True(t, before.Accepted)
+	// The metadata refresh changes accepted source bytes, but leaves symbol
+	// documents equal. The combined path must preserve exact score inputs and
+	// ordered results, not invalidate shared prefix counts for this save.
+	require.NoError(t, f.store.EnsureRowCounters(t.Context()))
+	prefixes := []string{"adj", "build", "missing"}
+	beforeStats, beforeCounts, err := f.store.SymbolFTSScoringSnapshot(t.Context(), prefixes)
+	require.NoError(t, err)
+	require.Positive(t, beforeStats.Rows)
+	require.Positive(t, beforeStats.Tokens)
+	require.NotEmpty(t, beforeStats.Stamp)
+	require.Positive(t, beforeCounts["adj"], "prefix parity must include actual matching documents")
+	beforeHits, err := f.store.SearchSymbols("adjacency", 100)
+	require.NoError(t, err)
+	require.NotEmpty(t, beforeHits, "ordered score parity must exercise actual matches")
 	files["adjacency.go"] += "\n// contract AG first EOF save\n"
 	path := filepath.Join(f.root, "adjacency.go")
 	writeFile(t, path, files["adjacency.go"])
@@ -45,6 +60,19 @@ func TestRawEdgeProofColdInstallEOFEqualsCold(t *testing.T) {
 	require.NotEqual(t, before.SourceFingerprint, after.SourceFingerprint)
 	require.Equal(t, contractInputHash([]byte(files["adjacency.go"])), after.SourceFingerprint)
 	require.True(t, idx.rawEdgesPriorCompleted(owner, f.store.GetFileNodes(owner)))
+	afterStats, afterCounts, err := f.store.SymbolFTSScoringSnapshot(t.Context(), prefixes)
+	require.NoError(t, err)
+	require.Equal(t, beforeStats.Rows, afterStats.Rows)
+	require.Equal(t, beforeStats.Tokens, afterStats.Tokens)
+	require.Equal(t, beforeStats.Stamp, afterStats.Stamp)
+	require.Equal(t, beforeCounts, afterCounts)
+	afterHits, err := f.store.SearchSymbols("adjacency", 100)
+	require.NoError(t, err)
+	require.Len(t, afterHits, len(beforeHits))
+	for i, hit := range beforeHits {
+		require.Equal(t, hit.NodeID, afterHits[i].NodeID, "ordered symbol identity")
+		require.Equal(t, math.Float64bits(hit.Score), math.Float64bits(afterHits[i].Score), "exact symbol score bits")
+	}
 
 	cold := newContractJobFixture(t, files)
 	require.Equal(t, builderRenderNodes(cold.store.AllNodes()), builderRenderNodes(f.store.AllNodes()), "every persisted node field and metadata must match a completed cold index")
