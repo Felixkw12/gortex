@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/gitstate"
@@ -294,7 +295,10 @@ func TestRefViewBuildsOnceAndReusesThePayload(t *testing.T) {
 	f.setRef("refs/heads/feature", commitB)
 
 	var builds atomic.Int64
-	manager := f.manager(t, func() { builds.Add(1) })
+	core, logs := observer.New(zap.InfoLevel)
+	manager := f.managerTuned(t, func() { builds.Add(1) }, func(cfg *RefViewManagerConfig) {
+		cfg.Builder.Logger = zap.New(core)
+	})
 	ctx := context.Background()
 
 	first, err := manager.EnsureRefView(ctx, f.request("refs/heads/feature"))
@@ -328,6 +332,13 @@ func TestRefViewBuildsOnceAndReusesThePayload(t *testing.T) {
 	}
 	if n := builds.Load(); n != 1 {
 		t.Fatalf("%d build passes ran for two selections of an unmoved branch", n)
+	}
+	entries := logs.FilterMessage("indexer: full index started").All()
+	if len(entries) != 1 {
+		t.Fatalf("full-index starts = %d, want 1", len(entries))
+	}
+	if origin := entries[0].ContextMap()["origin"]; origin != "ref_view" {
+		t.Errorf("full-index origin = %v, want ref_view", origin)
 	}
 }
 

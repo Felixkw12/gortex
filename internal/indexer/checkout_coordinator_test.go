@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
@@ -287,6 +288,31 @@ func coordinatorReconcile(t *testing.T, c *CheckoutCoordinator) CheckoutCycle {
 		t.Fatalf("reconcile: %v", out.Err)
 	}
 	return out
+}
+
+func TestCheckoutCoordinatorLogsFullIndexOrigin(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	f.commitTreeB()
+	builderWriteFile(t, f.worktree, "origin.go", "package fixture\n\nfunc Origin() {}\n")
+	core, logs := observer.New(zap.InfoLevel)
+	builder := builderNewBuilder(f.store)
+	builder.Logger = zap.New(core)
+	c := f.inertCoordinator(t, CheckoutCoordinatorConfig{Builder: builder})
+
+	cycle := coordinatorReconcile(t, c)
+	if !cycle.CommitBuilt || !cycle.DirtyBuilt {
+		t.Fatalf("built commit=%v dirty=%v, want both", cycle.CommitBuilt, cycle.DirtyBuilt)
+	}
+	entries := logs.FilterMessage("indexer: full index started").All()
+	if len(entries) != 2 {
+		t.Fatalf("full-index starts = %d, want 2 for the commit and dirty layers", len(entries))
+	}
+	for _, entry := range entries {
+		fields := entry.ContextMap()
+		if fields["origin"] != "checkout_coordinator" || fields["repo"] != builderRepoPrefix {
+			t.Errorf("full-index start = %v, want origin checkout_coordinator and repo %s", fields, builderRepoPrefix)
+		}
+	}
 }
 
 // --- the debounce -------------------------------------------------------
