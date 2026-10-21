@@ -140,16 +140,24 @@ func TestPayloadQuantumPreemptionAfterEmptyProofsRollsBackHints(t *testing.T) {
 			require.NoError(t, err)
 			_, err = s.writerDB.ExecContext(t.Context(), `CREATE TRIGGER interrupt_quantum_walk BEFORE DELETE ON nodes WHEN OLD.view_gen=`+sqlInt64List([]int64{id})+` BEGIN SELECT gortex_test_quantum_walk(); END`)
 			require.NoError(t, err)
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			lifetime, stop := context.WithTimeout(t.Context(), 5*time.Second)
+			defer stop()
+			ctx, cancel := context.WithCancel(lifetime)
 			defer cancel()
 			entered := make(chan struct{})
 			allowSQL := make(chan struct{})
+			releaseSQL := sync.OnceFunc(func() { close(allowSQL) })
+			defer releaseSQL()
 			quantumWalkObserver.Store(&quantumWalkProbe{fire: func() {
-				close(entered)
-				select {
-				case <-allowSQL:
-				case <-ctx.Done():
+				if kind == "cancel" {
+					// Cancel at the actual SQL boundary, before reporting entry;
+					// scheduling the test goroutine cannot consume the quantum first.
+					cancel()
 				}
+				close(entered)
+				// The outer Done channel closes before cancellation reaches every
+				// derived SQL context. Only the test's completed witness releases SQL.
+				<-allowSQL
 			}})
 			defer quantumWalkObserver.Store(nil)
 			type result struct {
@@ -164,6 +172,7 @@ func TestPayloadQuantumPreemptionAfterEmptyProofsRollsBackHints(t *testing.T) {
 			joined := false
 			defer func() {
 				cancel()
+				releaseSQL()
 				if !joined {
 					select {
 					case <-done:
@@ -174,13 +183,14 @@ func TestPayloadQuantumPreemptionAfterEmptyProofsRollsBackHints(t *testing.T) {
 			}()
 			select {
 			case <-entered:
-			case <-ctx.Done():
+			case <-lifetime.Done():
 				t.Fatal("walker did not reach nodes after empty proofs")
 			}
 			writerDone := make(chan error, 1)
 			writerStarted, writerJoined := false, false
 			defer func() {
 				cancel()
+				releaseSQL()
 				if writerStarted && !writerJoined {
 					select {
 					case <-writerDone:
@@ -213,10 +223,11 @@ func TestPayloadQuantumPreemptionAfterEmptyProofsRollsBackHints(t *testing.T) {
 				}
 			}
 			if kind == "cancel" {
-				cancel()
-			} else {
-				close(allowSQL)
+				// Entry is signaled only after the callback's cancel has propagated
+				// to the quantum and SQL children; outer Done alone is not enough.
+				require.ErrorIs(t, ctx.Err(), context.Canceled)
 			}
+			releaseSQL()
 			var r result
 			select {
 			case r = <-done:
