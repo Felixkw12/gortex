@@ -254,3 +254,40 @@ func TestWholeFileWriteSourceAuthorityKeepsRefusalsAndExclusions(t *testing.T) {
 		})
 	}
 }
+
+// Catalog-only retired checkouts have no coordinator to activate. Optional
+// source admission must leave the ordinary route wait time to refuse clearly.
+func TestWholeFileWriteRetiredRouteRefusesBeforeToolDeadline(t *testing.T) {
+	for _, facade := range []bool{false, true} {
+		name := "legacy"
+		if facade {
+			name = "facade"
+		}
+		t.Run(name, func(t *testing.T) {
+			if facade {
+				t.Setenv("GORTEX_TOOLS", "facade-v1")
+			}
+			stack := newViewStack(t)
+			retireRoute(t, stack)
+			f := &realCheckoutMutationFixture{srv: stack.srv}
+			req, handler := wholeFileAuthorityRequest(f, facade, map[string]any{
+				"path": "repo/added.go", "content": "package repo\nfunc Never() {}\n",
+			})
+			ctx := routeRefusalContext(t, stack.worktreeRoot, req.Params.Name)
+			result, err := handler(ctx, req)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.True(t, result.IsError)
+			require.Contains(t, viewResultText(t, result), graphview.CodeViewBuilding)
+			require.NoError(t, ctx.Err(), "refusal must precede the transport deadline")
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok)
+			require.Greater(t, time.Until(deadline), mutationRouteWaitMargin/2,
+				"optional source admission consumed the ordinary refusal margin")
+			for _, root := range []string{stack.repoRoot, stack.worktreeRoot} {
+				_, err := os.Stat(filepath.Join(root, "added.go"))
+				require.True(t, os.IsNotExist(err), "refused write changed %s", root)
+			}
+		})
+	}
+}

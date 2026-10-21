@@ -133,6 +133,17 @@ func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, check
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// A retired route cannot authorize a byte handoff, even with a retained
+	// anchor: checkByteAuthority admits only active or pending routes. Decline
+	// this optional admission before activation can consume the caller's whole
+	// deadline; the ordinary route wait retains its bounded refusal margin.
+	initialRoute, found, err := l.catalog.GetCheckoutRoute(ctx, checkoutID)
+	if err != nil {
+		return nil, err
+	}
+	if found && initialRoute.State == store_sqlite.RouteRetired {
+		return nil, ErrCheckoutByteAnchorUnavailable
+	}
 	c, closing := l.awaitMutationCoordinator(ctx, checkoutID)
 	if c == nil || closing || !sameMutationRoot(c.root, root) || !c.admitSourceMutation() {
 		return nil, ErrCheckoutByteAnchorUnavailable

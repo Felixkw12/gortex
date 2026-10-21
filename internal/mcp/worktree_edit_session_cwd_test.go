@@ -236,6 +236,8 @@ func TestCWDBindingRouteNotReadyWriteAndEditSymbolRefuseLoudly(t *testing.T) {
 			"refusal must carry view_building, got: %s", text)
 		_, statErr := os.Stat(filepath.Join(stack.repoRoot, "added.go"))
 		require.True(t, os.IsNotExist(statErr), "the refused write still created the MAIN copy")
+		_, statErr = os.Stat(filepath.Join(stack.worktreeRoot, "added.go"))
+		require.True(t, os.IsNotExist(statErr), "the refused write still created the worktree copy")
 	})
 
 	t.Run("edit_symbol", func(t *testing.T) {
