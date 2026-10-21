@@ -67,20 +67,22 @@ func (m *Materializer) RouteAncestry(ctx context.Context, generations ...int64) 
 // PinCheckoutRoute holds precisely the accepted route's complete ancestry,
 // including generation zero only when the composed stack depends on it. It
 // performs the same retirement/route-race checks as materialization without
-// opening payloads or constructing a reader.
-func (m *Materializer) PinCheckoutRoute(ctx context.Context, checkoutID string, route store_sqlite.CheckoutRoute) (*Lease, error) {
+// opening payloads or constructing a reader. The moved result distinguishes an
+// exact route-reread mismatch from every other refusal; its error retains the
+// ordinary Building metadata. Callers must inspect moved before err.
+func (m *Materializer) PinCheckoutRoute(ctx context.Context, checkoutID string, route store_sqlite.CheckoutRoute) (*Lease, bool, error) {
 	if err := m.validate(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if ctx == nil || route.State != store_sqlite.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
-		return nil, NewViewError(CodeViewBuilding, "an active positive checkout route is required")
+		return nil, false, NewViewError(CodeViewBuilding, "an active positive checkout route is required")
 	}
 	lease, moved, err := m.pinCheckoutRoute(ctx, checkoutID, route, []int64{route.CommitGenerationID, route.DirtyGenerationID})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if moved {
-		return nil, NewViewError(CodeViewBuilding, "checkout route moved before ancestry pin")
+		return nil, true, NewViewError(CodeViewBuilding, "checkout route moved before ancestry pin")
 	}
-	return lease, nil
+	return lease, false, nil
 }

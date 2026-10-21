@@ -61,7 +61,12 @@ func (c *CheckoutCoordinator) captureByteAnchor(ctx context.Context, route store
 	if !headEvidence.Unchanged() || !c.routedCommitLayerFor(layers.commit, layers.base, head.TreeOID) {
 		return ErrCheckoutByteAnchorUnavailable
 	}
-	lease, err := c.baseViewMaterializer().PinCheckoutRoute(ctx, c.checkoutID, route)
+	lease, moved, err := c.baseViewMaterializer().PinCheckoutRoute(ctx, c.checkoutID, route)
+	if moved {
+		// Only the exact route reread mismatch is recoverable at optional
+		// admission. Keep the materializer's refusal metadata inspectable.
+		return fmt.Errorf("%w: %w", ErrCheckoutMutationRouteMoved, err)
+	}
 	if err != nil {
 		return err
 	}
