@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/indexer"
 )
 
 func TestPlainByteEditUsesSourceAuthorityAcrossPendingPublication(t *testing.T) {
@@ -199,4 +202,33 @@ func TestRejectedByteEditResumesEarlierPendingPublication(t *testing.T) {
 	require.Contains(t, string(disk), "LifecycleBlocked")
 	require.NotContains(t, string(disk), "MustNotWrite")
 	f.awaitMutation(t, f.worktree, prior)
+}
+
+func TestByteEditReselectionRefusesDeadCallerOtherErrorsAndAdmittedLease(t *testing.T) {
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	deadline, stop := context.WithDeadline(t.Context(), time.Time{})
+	defer stop()
+	for _, tc := range []struct {
+		name     string
+		ctx      context.Context
+		mutation *indexer.CheckoutMutation
+		err      error
+		want     bool
+	}{
+		{name: "wrapped route motion before admission", ctx: t.Context(), err: fmt.Errorf("catalog: %w", indexer.ErrCheckoutMutationRouteMoved), want: true},
+		{name: "canceled caller", ctx: canceled, err: indexer.ErrCheckoutMutationRouteMoved},
+		{name: "expired deadline", ctx: deadline, err: indexer.ErrCheckoutMutationRouteMoved},
+		{name: "generic stale", ctx: t.Context(), err: indexer.ErrCheckoutMutationStale},
+		{name: "disk motion", ctx: t.Context(), err: indexer.ErrCheckoutMutationDiskMoved},
+		{name: "permanent failure", ctx: t.Context(), err: errors.New("catalog read failure")},
+		{name: "cancellation", ctx: t.Context(), err: context.Canceled},
+		{name: "deadline error", ctx: t.Context(), err: context.DeadlineExceeded},
+		{name: "admitted lease", ctx: t.Context(), mutation: &indexer.CheckoutMutation{}, err: indexer.ErrCheckoutMutationRouteMoved},
+		{name: "successful admission", ctx: t.Context(), mutation: &indexer.CheckoutMutation{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, byteEditAdmissionCanReselect(tc.ctx, tc.mutation, tc.err))
+		})
+	}
 }

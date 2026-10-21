@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
@@ -75,6 +76,81 @@ func TestFirstEditAfterTheCommittedBasePublishesLands(t *testing.T) {
 			fixture.awaitMutation(t, fixture.worktree, written)
 		})
 	}
+}
+
+// The optional byte path must not turn catalog motion into a terminal refusal.
+// Publishing a real primary base leaves the checkout's still-active route over
+// its old base. The original whole-view admission can recompose that route.
+func TestGuardedByteEditAfterCommittedBasePublicationReselects(t *testing.T) {
+	fixture, publisher, prefix := newBasePublishingMutationFixture(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	target := filepath.Join(fixture.worktree, "edit.go")
+	original, err := os.ReadFile(target)
+	require.NoError(t, err)
+	primaryPath := filepath.Join(fixture.primary, "edit.go")
+	primaryBefore, err := os.ReadFile(primaryPath)
+	require.NoError(t, err)
+	before, found, err := fixture.store.Catalog().GetCheckoutRoute(ctx, fixture.checkoutID)
+	require.NoError(t, err)
+	require.True(t, found)
+	checkout, found, err := fixture.store.Catalog().GetCheckout(ctx, fixture.checkoutID)
+	require.NoError(t, err)
+	require.True(t, found)
+	out := publisher.PublishRepo(ctx, prefix)
+	require.NoError(t, out.Err)
+	require.Empty(t, out.Skipped)
+	require.Positive(t, out.GenerationID)
+
+	// Establish the precise failed optional-admission premise, without a lease
+	// or handler. Its defers must release custody before ordinary recomposition.
+	mutation, err := fixture.srv.lifecycle.BeginCheckoutByteMutation(ctx, fixture.checkoutID, fixture.worktree, checkout.Incarnation)
+	require.Nil(t, mutation)
+	require.ErrorIs(t, err, indexer.ErrCheckoutMutationRouteMoved)
+	unchanged, found, err := fixture.store.Catalog().GetCheckoutRoute(ctx, fixture.checkoutID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, before, unchanged)
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, original, data)
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "edit_file"
+	req.Params.Arguments = map[string]any{
+		"path": "repo/edit.go", "old_string": "func New() {}", "new_string": "func AfterThePublication() {}",
+		"base_sha": gitBlobSHA(original), "expected_occurrences": 1, "format": "json",
+	}
+	_, eligible := fixture.srv.byteEditRequest(&req, requestFreshness{}, capabilityRequest{})
+	require.True(t, eligible, "the regression must enter optional byte admission")
+	ordinaryAdmissions := 0
+	previous := mutationBeforeAdmission
+	mutationBeforeAdmission = func(ctx context.Context) {
+		ordinaryAdmissions++
+		view := requestViewFromContext(ctx)
+		require.NotNil(t, view)
+		require.NotNil(t, view.materialized)
+		require.Empty(t, view.sourceScope, "failed optional admission must not leave source-only authority")
+		require.Nil(t, checkoutMutationFromContext(ctx))
+	}
+	t.Cleanup(func() { mutationBeforeAdmission = previous })
+	requestCtx := WithSessionCWD(WithSessionID(ctx, "byte-route-reselection"), fixture.worktree)
+	written, err := fixture.srv.wrapToolHandler(fixture.srv.handleEditFile)(requestCtx, req)
+	require.NoError(t, err)
+	require.NotNil(t, written)
+	require.False(t, written.IsError, viewResultText(t, written))
+	require.Positive(t, ordinaryAdmissions, "the failed acceleration must use original whole-view admission")
+	data, err = os.ReadFile(target)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "func AfterThePublication() {}")
+	primaryAfter, err := os.ReadFile(primaryPath)
+	require.NoError(t, err)
+	require.Equal(t, primaryBefore, primaryAfter)
+	after, found, err := fixture.store.Catalog().GetCheckoutRoute(ctx, fixture.checkoutID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NotEqual(t, before.RouteEpoch, after.RouteEpoch)
+	fixture.awaitMutation(t, fixture.worktree, written)
 }
 
 // newBasePublishingMutationFixture is newRealCheckoutMutationFixture with the

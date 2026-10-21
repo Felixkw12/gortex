@@ -77,7 +77,7 @@ func (s *Server) prepareByteEditAuthority(ctx context.Context, req *mcp.CallTool
 		return ctx, nil, noop, mcp.NewToolResultError(err.Error())
 	}
 	mutation, err := s.lifecycle.BeginCheckoutByteMutation(ctx, control.Checkout.CheckoutID, control.Checkout.RootPath, control.Checkout.Incarnation)
-	if errors.Is(err, indexer.ErrCheckoutByteAnchorUnavailable) {
+	if errors.Is(err, indexer.ErrCheckoutByteAnchorUnavailable) || byteEditAdmissionCanReselect(ctx, mutation, err) {
 		return ctx, nil, noop, nil
 	}
 	if err != nil {
@@ -114,4 +114,13 @@ func (s *Server) prepareByteEditAuthority(ctx context.Context, req *mcp.CallTool
 		return ctx, nil, noop, mcp.NewToolResultError(err.Error())
 	}
 	return ctx, view, mutation.Close, nil
+}
+
+// byteEditAdmissionCanReselect declines only the optional pre-handler admission.
+// BeginCheckoutByteMutation has returned without a lease, so its source admission,
+// ancestry pins, demand and cycle-lock cleanup has already completed. The ordinary
+// whole-view path retains its bounded reselection/recomposition and target guards.
+// An admitted mutation or a later Prepare/handler failure must never be replayed.
+func byteEditAdmissionCanReselect(ctx context.Context, mutation *indexer.CheckoutMutation, err error) bool {
+	return mutation == nil && ctx.Err() == nil && errors.Is(err, indexer.ErrCheckoutMutationRouteMoved)
 }
