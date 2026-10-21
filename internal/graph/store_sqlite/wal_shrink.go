@@ -153,12 +153,6 @@ func (s *Store) withWriterResetConnWithBusyTimeout(ctx context.Context, busyMill
 	return fn(conn)
 }
 
-// resetWALInPlaceLocked restarts the log at its first frame without shrinking
-// the file (see the file comment). The caller holds writeMu.
-func (s *Store) resetWALInPlaceLocked(ctx context.Context) (walCheckpointResult, error) {
-	return s.resetWALInPlaceLockedWithBusyTimeout(ctx, int64(walResetBusyMillis))
-}
-
 func (s *Store) resetWALInPlaceLockedWithBusyTimeout(ctx context.Context, busyMillis int64) (result walCheckpointResult, err error) {
 	if err := s.setWriterJournalLimitLocked(ctx, -1); err != nil {
 		return result, fmt.Errorf("wal in-place reset: lift the writer's journal_size_limit: %w", err)

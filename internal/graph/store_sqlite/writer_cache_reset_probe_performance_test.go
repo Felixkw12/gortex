@@ -365,3 +365,9 @@ func TestPerformanceAnEditDuringAnIdleResetWaitsAtMostTheHoldWithTheDaemonDefaul
 	require.Len(t, waits, rounds)
 	require.LessOrEqual(t, longest, walReclaimResetHold)
 }
+
+// resetWALInPlaceLocked restarts the log at its first frame without shrinking
+// the file (see the file comment). The caller holds writeMu.
+func (s *Store) resetWALInPlaceLocked(ctx context.Context) (walCheckpointResult, error) {
+	return s.resetWALInPlaceLockedWithBusyTimeout(ctx, int64(walResetBusyMillis))
+}
