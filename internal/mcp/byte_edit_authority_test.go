@@ -11,12 +11,52 @@ import (
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/pathkey"
 )
 
+func byteEditFixtureHeadProof(t *testing.T, f *realCheckoutMutationFixture, forceUnavailable bool) bool {
+	t.Helper()
+	if forceUnavailable {
+		// Git keeps its configured files ref store; only the optional stat proof
+		// declines this unsupported layout. The ordinary full sample still works.
+		require.NoError(t, os.Mkdir(filepath.Join(f.primary, ".git", "reftable"), 0o755))
+	}
+	sampler, err := gitstate.NewDirtySampler(f.worktree, "", "")
+	require.NoError(t, err)
+	usable := sampler.CaptureHeadEvidence().Usable()
+	if forceUnavailable {
+		require.False(t, usable)
+	}
+	return usable
+}
+
+func byteEditFixtureViewMatches(ctx context.Context, f *realCheckoutMutationFixture, headProof bool) bool {
+	view := requestViewFromContext(ctx)
+	if view == nil || checkoutMutationFromContext(ctx) == nil || !pathkey.EqualPaths(view.viewRoot, f.worktree) {
+		return false
+	}
+	if headProof {
+		return view.sourceScope == "file" && view.materialized == nil && view.sourceGraphPending
+	}
+	return view.sourceScope == "" && view.materialized != nil && !view.sourceGraphPending
+}
+
 func TestPlainByteEditUsesSourceAuthorityAcrossPendingPublication(t *testing.T) {
+	for _, forceUnavailable := range []bool{false, true} {
+		name := "actual HEAD capability"
+		if forceUnavailable {
+			name = "unavailable HEAD evidence"
+		}
+		t.Run(name, func(t *testing.T) { testPlainByteEditAcrossPendingPublication(t, forceUnavailable) })
+	}
+}
+
+func testPlainByteEditAcrossPendingPublication(t *testing.T, forceUnavailable bool) {
 	f, blocked := newBlockedLifecycleFixture(t)
+	headProof := byteEditFixtureHeadProof(t, f, forceUnavailable)
 	old := f.edit(t, f.worktree, map[string]any{"path": "repo/edit.go", "old_string": "func New() {}", "new_string": "func LifecycleBlocked() {}", "format": "json"})
 	require.False(t, old.IsError, viewResultText(t, old))
 	select {
@@ -35,9 +75,8 @@ func TestPlainByteEditUsesSourceAuthorityAcrossPendingPublication(t *testing.T) 
 	ctx := WithSessionCWD(WithSessionID(t.Context(), "plain-byte-handoff"), f.worktree)
 	go func() {
 		r, err := f.srv.wrapToolHandler(func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			view := requestViewFromContext(ctx)
-			if view == nil || view.sourceScope != "file" || view.materialized != nil || !view.sourceGraphPending || checkoutMutationFromContext(ctx) == nil {
-				return mcplib.NewToolResultError("missing distinct source-byte authority"), nil
+			if !byteEditFixtureViewMatches(ctx, f, headProof) {
+				return mcplib.NewToolResultError("wrong mutation authority for actual HEAD capability"), nil
 			}
 			close(entered)
 			return f.srv.handleEditFile(ctx, req)
@@ -74,8 +113,13 @@ func TestPlainByteEditUsesSourceAuthorityAcrossPendingPublication(t *testing.T) 
 	payload := decodeFileOpsResult(t, r)
 	require.Equal(t, "applied", payload["status"])
 	fresh := resultFreshness(t, r)
-	require.Equal(t, "file", fresh["freshness_scope"])
-	require.Equal(t, "pending", fresh["graph_freshness"])
+	if headProof {
+		require.Equal(t, "file", fresh["freshness_scope"])
+		require.Equal(t, "pending", fresh["graph_freshness"])
+	} else {
+		require.NotEqual(t, "file", fresh["freshness_scope"], "ordinary sampled admission must not claim source-only byte authority")
+	}
+	require.Equal(t, f.checkoutID, fresh["checkout_id"])
 	disk, err = os.ReadFile(target)
 	require.NoError(t, err)
 	require.Contains(t, string(disk), "ByteAfter")
@@ -86,7 +130,18 @@ func TestPlainByteEditUsesSourceAuthorityAcrossPendingPublication(t *testing.T) 
 }
 
 func TestByteEditAuthorityKeepsTargetGuardsAndExcludedShapes(t *testing.T) {
+	for _, forceUnavailable := range []bool{false, true} {
+		name := "actual HEAD capability"
+		if forceUnavailable {
+			name = "unavailable HEAD evidence"
+		}
+		t.Run(name, func(t *testing.T) { testByteEditTargetGuardsAndExcludedShapes(t, forceUnavailable) })
+	}
+}
+
+func testByteEditTargetGuardsAndExcludedShapes(t *testing.T, forceUnavailable bool) {
 	f := newRealCheckoutMutationFixture(t)
+	byteEditFixtureHeadProof(t, f, forceUnavailable)
 	original, err := os.ReadFile(filepath.Join(f.worktree, "edit.go"))
 	require.NoError(t, err)
 	args := func() map[string]any {
@@ -143,15 +198,32 @@ func TestByteEditAuthorityKeepsTargetGuardsAndExcludedShapes(t *testing.T) {
 }
 
 func TestByteEditFacadeUsesNormalizedGuardAndSelectedDisk(t *testing.T) {
+	for _, forceUnavailable := range []bool{false, true} {
+		name := "actual HEAD capability"
+		if forceUnavailable {
+			name = "unavailable HEAD evidence"
+		}
+		t.Run(name, func(t *testing.T) { testByteEditFacadeUsesNormalizedGuardAndSelectedDisk(t, forceUnavailable) })
+	}
+}
+
+func testByteEditFacadeUsesNormalizedGuardAndSelectedDisk(t *testing.T, forceUnavailable bool) {
 	t.Setenv("GORTEX_TOOLS", "facade-v1")
 	f := newRealCheckoutMutationFixture(t)
+	headProof := byteEditFixtureHeadProof(t, f, forceUnavailable)
 	before, err := os.ReadFile(filepath.Join(f.worktree, "edit.go"))
 	require.NoError(t, err)
 	primary, err := os.ReadFile(filepath.Join(f.primary, "edit.go"))
 	require.NoError(t, err)
 	r := f.facade(t, f.primary, "edit", map[string]any{"operation": "file", "target": map[string]any{"file": "repo/edit.go"}, "match": "func New() {}", "replacement": "func ByteFacade() {}", "guard": map[string]any{"base_sha": gitBlobSHA(before), "expected_occurrences": 1}, "view": map[string]any{"kind": "worktree", "path": f.worktree}, "format": "json"})
 	require.False(t, r.IsError, viewResultText(t, r))
-	require.Equal(t, "file", resultFreshness(t, r)["freshness_scope"])
+	fresh := resultFreshness(t, r)
+	if headProof {
+		require.Equal(t, "file", fresh["freshness_scope"])
+	} else {
+		require.NotEqual(t, "file", fresh["freshness_scope"])
+	}
+	require.Equal(t, f.checkoutID, fresh["checkout_id"])
 	disk, err := os.ReadFile(filepath.Join(f.worktree, "edit.go"))
 	require.NoError(t, err)
 	require.Contains(t, string(disk), "ByteFacade")
@@ -162,7 +234,18 @@ func TestByteEditFacadeUsesNormalizedGuardAndSelectedDisk(t *testing.T) {
 }
 
 func TestRejectedByteEditResumesEarlierPendingPublication(t *testing.T) {
+	for _, forceUnavailable := range []bool{false, true} {
+		name := "actual HEAD capability"
+		if forceUnavailable {
+			name = "unavailable HEAD evidence"
+		}
+		t.Run(name, func(t *testing.T) { testRejectedByteEditResumesEarlierPendingPublication(t, forceUnavailable) })
+	}
+}
+
+func testRejectedByteEditResumesEarlierPendingPublication(t *testing.T, forceUnavailable bool) {
 	f, blocked := newBlockedLifecycleFixture(t)
+	headProof := byteEditFixtureHeadProof(t, f, forceUnavailable)
 	prior := f.edit(t, f.worktree, map[string]any{"path": "repo/edit.go", "old_string": "func New() {}", "new_string": "func LifecycleBlocked() {}", "format": "json"})
 	require.False(t, prior.IsError, viewResultText(t, prior))
 	select {
@@ -177,8 +260,8 @@ func TestRejectedByteEditResumesEarlierPendingPublication(t *testing.T) {
 	result := make(chan *mcplib.CallToolResult, 1)
 	go func() {
 		r, err := f.srv.wrapToolHandler(func(ctx context.Context, r mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			if sourceRequestView(ctx) == nil || checkoutMutationFromContext(ctx) == nil {
-				return mcplib.NewToolResultError("missing byte authority"), nil
+			if !byteEditFixtureViewMatches(ctx, f, headProof) {
+				return mcplib.NewToolResultError("wrong rejected-edit authority for actual HEAD capability"), nil
 			}
 			return f.srv.handleEditFile(ctx, r)
 		})(ctx, req)

@@ -23,9 +23,85 @@ func byteFixtureIncarnation(t *testing.T, f *coordinatorFixture) string {
 	return row.Incarnation
 }
 
+// A byte anchor needs actual unchanged HEAD file evidence. Unsupported
+// filesystems retain ordinary sampled admission; exercise that path rather
+// than pretending a certificate exists or skipping the mutation contract.
+func byteFixtureSupportsAuthorityOrChecksFallback(t *testing.T, f *coordinatorFixture, c *CheckoutCoordinator, l *CheckoutLifecycle) bool {
+	t.Helper()
+	if c.sampler.CaptureHeadEvidence().Usable() {
+		return true
+	}
+	before := f.route()
+	path := filepath.Join(f.worktree, "helper.go")
+	original, err := os.ReadFile(path)
+	require.NoError(t, err)
+	primaryPath := filepath.Join(f.primary, "helper.go")
+	primary, err := os.ReadFile(primaryPath)
+	require.NoError(t, err)
+	held := f.leases.Held()
+	func() {
+		attempt, finish, ok := c.beginByteMutationAttempt(t.Context())
+		require.True(t, ok)
+		defer finish()
+		m, err := l.BeginCheckoutByteMutation(t.Context(), f.checkoutID, f.worktree, byteFixtureIncarnation(t, f))
+		if m != nil {
+			m.Close()
+		}
+		require.Nil(t, m)
+		require.ErrorIs(t, err, ErrCheckoutByteAnchorUnavailable)
+		require.NoError(t, attempt.Err(), "unsupported evidence must not preempt the registered attempt")
+	}()
+	require.Equal(t, before, f.route())
+	require.Equal(t, held, f.leases.Held())
+	c.byteMu.Lock()
+	demand := c.byteDemand
+	c.byteMu.Unlock()
+	require.Zero(t, demand)
+	c.mu.Lock()
+	admissions := c.sourceMutations
+	c.mu.Unlock()
+	require.Zero(t, admissions)
+	// Ordinary mutation still samples, selects the actual worktree, writes and
+	// publishes its exact ticket. No unsupported fast-path claim is made.
+	m, err := l.BeginCheckoutMutation(t.Context(), f.checkoutID, f.worktree, before.RouteEpoch)
+	require.NoError(t, err)
+	defer m.Close()
+	require.NoError(t, m.Prepare(t.Context()))
+	next := string(original) + "\n// ordinary mutation without HEAD file evidence\n"
+	builderWriteFile(t, f.worktree, "helper.go", next)
+	ticket, err := m.EnqueueRefresh(t.Context(), path)
+	require.NoError(t, err)
+	m.Close()
+	c.cycle(t.Context())
+	result := awaitCheckoutRefresh(t, ticket)
+	require.NoError(t, result.Err)
+	require.True(t, result.Reindexed)
+	disk, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, next, string(disk))
+	untouched, err := os.ReadFile(primaryPath)
+	require.NoError(t, err)
+	require.Equal(t, primary, untouched)
+	sample, err := c.sampler.Sample(t.Context())
+	require.NoError(t, err)
+	row, found := f.generation(f.route().DirtyGenerationID)
+	require.True(t, found)
+	require.Equal(t, sample.Fingerprint, row.LowerViewFingerprint)
+	return false
+}
+
+func TestByteMutationUnavailableEvidenceKeepsOrdinaryMutationSafe(t *testing.T) {
+	f, c, l := newCheckoutMutationFixture(t)
+	forceSampledMutationAdmission(t, f, c)
+	require.False(t, byteFixtureSupportsAuthorityOrChecksFallback(t, f, c, l))
+}
+
 func TestByteMutationHandoffDrainsAttemptAndPreservesExactTickets(t *testing.T) {
 	t.Setenv("GORTEX_ENRICH_MIN_NODES", "0")
 	f, c, l := newCheckoutMutationFixture(t)
+	if !byteFixtureSupportsAuthorityOrChecksFallback(t, f, c, l) {
+		return
+	}
 	p := newMotionContextProvider(t, c)
 	old := queueCheckoutSourceEdit(t, f, l, "package fixture\nfunc FirstHelper() {}\n")
 	done := semanticMotionCycle(t, c, t.Context(), p)
@@ -102,7 +178,10 @@ func TestByteMutationHandoffDrainsAttemptAndPreservesExactTickets(t *testing.T) 
 func TestByteMutationAuthorityRefusesMotionAndRouteABA(t *testing.T) {
 	for _, kind := range []string{"disk", "route", "head", "incarnation"} {
 		t.Run(kind, func(t *testing.T) {
-			f, _, l := newCheckoutMutationFixture(t)
+			f, c, l := newCheckoutMutationFixture(t)
+			if !byteFixtureSupportsAuthorityOrChecksFallback(t, f, c, l) {
+				return
+			}
 			m, err := l.BeginCheckoutByteMutation(t.Context(), f.checkoutID, f.worktree, byteFixtureIncarnation(t, f))
 			require.NoError(t, err)
 			defer m.Close()
@@ -129,6 +208,9 @@ func TestByteMutationAuthorityRefusesMotionAndRouteABA(t *testing.T) {
 
 func TestByteMutationRequiresAcceptedAnchorAndReleasesAncestry(t *testing.T) {
 	f, c, l := newCheckoutMutationFixture(t)
+	if !byteFixtureSupportsAuthorityOrChecksFallback(t, f, c, l) {
+		return
+	}
 	route := f.route()
 	require.NoError(t, c.captureByteAnchor(t.Context(), route))
 	old := c.byteAnchor
@@ -189,6 +271,9 @@ func TestByteMutationAttemptCommitWinsAndErrorsStayIndependent(t *testing.T) {
 
 func TestByteMutationPreemptsOwnGateQueueWithoutTakingOtherCheckoutLane(t *testing.T) {
 	f, c, l := newCheckoutMutationFixture(t)
+	if !byteFixtureSupportsAuthorityOrChecksFallback(t, f, c, l) {
+		return
+	}
 	old := queueCheckoutSourceEdit(t, f, l, "package fixture\nfunc QueuedHelper(){}\n")
 	release, err := c.gate.Acquire(t.Context(), ViewBuildInteractive)
 	require.NoError(t, err)
@@ -211,6 +296,9 @@ func TestByteMutationPreemptsOwnGateQueueWithoutTakingOtherCheckoutLane(t *testi
 func TestByteMutationNoPrepareCloseResumesDrainedOldWork(t *testing.T) {
 	t.Setenv("GORTEX_ENRICH_MIN_NODES", "0")
 	f, c, l := newCheckoutMutationFixture(t)
+	if !byteFixtureSupportsAuthorityOrChecksFallback(t, f, c, l) {
+		return
+	}
 	p := newMotionContextProvider(t, c)
 	old := queueCheckoutSourceEdit(t, f, l, "package fixture\nfunc PreservedHelper(){}\n")
 	done := semanticMotionCycle(t, c, t.Context(), p)

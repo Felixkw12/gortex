@@ -34,6 +34,9 @@ func (c *byteAnchorRereadContext) Done() <-chan struct{} {
 
 func TestByteAnchorPinMotionRetainsTypedCauseAndReleasesCustody(t *testing.T) {
 	f, c, l := newCheckoutMutationFixture(t)
+	if !byteFixtureSupportsAuthorityOrChecksFallback(t, f, c, l) {
+		return
+	}
 	c.closeByteAnchor()
 	require.Zero(t, f.leases.Held(), "the reread barrier requires an unheld legacy base")
 	before := f.route()
