@@ -470,6 +470,12 @@ type CheckoutCycle struct {
 // reconciliation reports an accessible automatic checkout, and closed when
 // that checkout leaves.
 type CheckoutCoordinator struct {
+	byteMu       sync.Mutex
+	byteAttempt  *byteMutationAttempt
+	byteDemand   int
+	byteAnchorMu sync.Mutex
+	byteAnchor   *checkoutByteAnchor
+
 	// racyHeal tracks the start-time index refresh (checkout_racy_index.go).
 	racyHeal racyHealState
 	// prewarmCommitGeneration is the commit generation whose stack was last
@@ -1064,7 +1070,11 @@ func (c *CheckoutCoordinator) CloseContext(ctx context.Context) error {
 		// A follow-up was canceled with the lifetime; its goroutine ends at
 		// its next step.
 		c.waitEnrichmentFollowups()
-		return c.waitSourceMutations(ctx)
+		if err := c.waitSourceMutations(ctx); err != nil {
+			return err
+		}
+		c.closeByteAnchor()
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -1240,6 +1250,12 @@ func (c *CheckoutCoordinator) cycle(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, finishByteAttempt, admittedByteAttempt := c.beginByteMutationAttempt(ctx)
+	if !admittedByteAttempt {
+		c.deferCycle()
+		return
+	}
+	defer finishByteAttempt()
 	through := c.checkoutRefreshHighWater()
 	// Taken after through: every ticket at or below it was admitted before
 	// this instant, which is what lets the cycle's steps share one sample.
@@ -1315,6 +1331,7 @@ func (c *CheckoutCoordinator) cycle(ctx context.Context) {
 	}
 	if out, settled := preflight(preCtx); settled {
 		out.cycleStarted = cycleStarted
+		out = byteMutationCycleOutcome(ctx, out)
 		recordCoordinatorCycle(out)
 		c.reportCheckoutCycle(ctx, through, out)
 		return
@@ -1354,6 +1371,7 @@ func (c *CheckoutCoordinator) cycle(ctx context.Context) {
 			return
 		}
 		out := CheckoutCycle{Err: err}
+		out = byteMutationCycleOutcome(ctx, out)
 		recordCoordinatorCycle(out)
 		c.reportCheckoutCycle(ctx, through, out)
 		return
@@ -1383,6 +1401,7 @@ func (c *CheckoutCoordinator) cycle(ctx context.Context) {
 			return
 		}
 		out := CheckoutCycle{Err: fmt.Errorf("indexer: wait for checkout build admission: %w", err)}
+		out = byteMutationCycleOutcome(ctx, out)
 		recordCoordinatorCycle(out)
 		c.reportCheckoutCycle(ctx, through, out)
 		return
@@ -1478,12 +1497,15 @@ func (c *CheckoutCoordinator) cycle(ctx context.Context) {
 	if err := ctx.Err(); err != nil {
 		out := CheckoutCycle{Err: err}
 		switch {
+		case byteMutationOwnCancellation(ctx, out.Err):
+			out = byteMutationCycleOutcome(ctx, out)
 		case laneYield.Yielded():
 			out = c.yieldedCycle(out, admission)
 		case treeMove.Yielded():
 			out = c.treeMovedCycle(out, admission, "watcher")
 		}
 		c.notePublicationOutcome(out, time.Now())
+		out = byteMutationCycleOutcome(ctx, out)
 		recordCoordinatorCycle(out)
 		c.reportCheckoutCycle(ctx, through, out)
 		return
@@ -1509,6 +1531,8 @@ func (c *CheckoutCoordinator) cycle(ctx context.Context) {
 	// through the quiet window, not failed: it published nothing, and the
 	// state it would have built is already gone.
 	switch {
+	case byteMutationOwnCancellation(ctx, out.Err):
+		out = byteMutationCycleOutcome(ctx, out)
 	case laneYield.Yielded() && out.Err != nil:
 		out = c.yieldedCycle(out, admission)
 	case treeMove.Yielded() && out.Err != nil:
@@ -1533,6 +1557,7 @@ func (c *CheckoutCoordinator) cycle(ctx context.Context) {
 	}
 	foreground = foreground || out.DirtyBuilt
 	c.notePublicationOutcome(out, time.Now())
+	out = byteMutationCycleOutcome(ctx, out)
 	recordCoordinatorCycle(out)
 	c.logSlowAdmission(reason, through, admission)
 	if out.CompactionScheduled {
@@ -3069,6 +3094,7 @@ func (c *CheckoutCoordinator) moveCommitSlot(
 	route *store_sqlite.CheckoutRoute,
 	generationID int64,
 ) error {
+	_ = c.captureByteAnchor(ctx, *route)
 	if route.DirtyGenerationID <= 0 {
 		return c.flip(ctx, route, store_sqlite.RouteSlotCommit, generationID)
 	}
@@ -3111,6 +3137,9 @@ func (c *CheckoutCoordinator) moveCommitSlot(
 // or a slot-at-a-time flip from another surface. The rebuild that follows
 // would serve that pair for its whole duration, so the slot goes first.
 func (c *CheckoutCoordinator) clearDirtySlot(ctx context.Context, route *store_sqlite.CheckoutRoute) error {
+	// Acceleration is optional; an uncertain anchor leaves byte edits on the
+	// ordinary route path. Capture before the active route loses its reference.
+	_ = c.captureByteAnchor(ctx, *route)
 	var admissionErr error
 	ctx, admissionErr = resumeImportBuildLane(ctx, false)
 	if admissionErr != nil {
@@ -4319,6 +4348,7 @@ func (c *CheckoutCoordinator) DrainRetirements() []int64 {
 	if c == nil {
 		return nil
 	}
+	c.closeByteAnchor()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make([]int64, 0, len(c.backlog)+len(c.retained)+len(c.retainedDirty)+1)

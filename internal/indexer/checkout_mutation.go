@@ -50,6 +50,9 @@ var ErrCheckoutMutationBusy = errors.New("indexer: checkout mutation lane is bus
 // Callers must Close it on every exit, including dry runs. It never writes
 // source itself and must not be used to update the primary corpus.
 type CheckoutMutation struct {
+	byteAnchor      *checkoutByteAnchor
+	byteSnapshot    *gitstate.DirtySnapshot
+	byteRelease     func()
 	mu              sync.Mutex
 	coordinator     *CheckoutCoordinator
 	checkout        store_sqlite.Checkout
@@ -322,10 +325,12 @@ func (m *CheckoutMutation) Prepare(ctx context.Context) error {
 	// parent, or the build that follows would find no routed top and go
 	// direct.
 	withdrawn := m.coordinator.holdWithdrawnDirty(ctx, m.route)
-	if err := m.coordinator.clearDirtySlot(ctx, &m.route); err != nil {
-		m.coordinator.releaseCheckoutRefreshReservation()
-		m.refreshReserved = false
-		return fmt.Errorf("%w: withdraw dirty route: %w", ErrCheckoutMutationStale, err)
+	if m.route.DirtyGenerationID > 0 {
+		if err := m.coordinator.clearDirtySlot(ctx, &m.route); err != nil {
+			m.coordinator.releaseCheckoutRefreshReservation()
+			m.refreshReserved = false
+			return fmt.Errorf("%w: withdraw dirty route: %w", ErrCheckoutMutationStale, err)
+		}
 	}
 	m.coordinator.setPreferredDirtyParent(withdrawn, "withdrawn by a checkout mutation")
 	m.prepared = true
@@ -481,6 +486,9 @@ func (m *CheckoutMutation) Close() {
 	// later.
 	m.settleReceipt()
 	m.coordinator.cycleMu.Unlock()
+	if m.byteRelease != nil {
+		m.byteRelease()
+	}
 	m.coordinator.releaseSourceMutation()
 }
 
@@ -540,6 +548,9 @@ func (m *CheckoutMutation) validateSnapshot(ctx context.Context, since time.Time
 		return fmt.Errorf("%w: sample checkout: %w", ErrCheckoutMutationStale, err)
 	}
 	StampPublicationPhase(ctx, PublicationWriteSampled)
+	if m.byteAnchor != nil {
+		return m.checkByteAuthority(ctx, sample)
+	}
 	if err := c.checkRoutedSnapshot(ctx, m.route, sample); err != nil {
 		return err
 	}

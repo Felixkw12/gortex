@@ -439,6 +439,19 @@ func (c *CheckoutCoordinator) checkoutRefreshHighWater() uint64 {
 }
 
 func (c *CheckoutCoordinator) reportCheckoutCycle(ctx context.Context, through uint64, out CheckoutCycle) {
+	if a, _ := ctx.Value(byteMutationAttemptKey{}).(*byteMutationAttempt); a != nil {
+		out = a.outcome(out)
+	}
+	if out.Err == nil && !out.Rescheduled && !out.Deferred && out.DirtyGenerationID > 0 {
+		c.byteAnchorMu.Lock()
+		hasAnchor := c.byteAnchor != nil
+		c.byteAnchorMu.Unlock()
+		if hasAnchor {
+			if route, found, err := c.catalog.GetCheckoutRoute(ctx, c.checkoutID); err == nil && found && route.State == store_sqlite.RouteActive && route.CommitGenerationID == out.CommitGenerationID && route.DirtyGenerationID == out.DirtyGenerationID {
+				_ = c.captureByteAnchor(ctx, route)
+			}
+		}
+	}
 	c.completeCheckoutRefreshTickets(ctx, through, out)
 	finishObservedChangeRecord(ctx, out)
 	if c.cycleDone != nil {

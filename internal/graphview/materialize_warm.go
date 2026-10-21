@@ -1,6 +1,9 @@
 package graphview
 
-import "context"
+import (
+	"context"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
+)
 
 // WarmRoute loads, ahead of any request, what materializing a checkout route
 // naming generations (commit first, then the working-tree layer) would load
@@ -59,4 +62,25 @@ func (m *Materializer) RouteAncestry(ctx context.Context, generations ...int64) 
 	}
 	ancestry, _, err := m.generationAncestry(ctx, generations)
 	return ancestry, err
+}
+
+// PinCheckoutRoute holds precisely the accepted route's complete ancestry,
+// including generation zero only when the composed stack depends on it. It
+// performs the same retirement/route-race checks as materialization without
+// opening payloads or constructing a reader.
+func (m *Materializer) PinCheckoutRoute(ctx context.Context, checkoutID string, route store_sqlite.CheckoutRoute) (*Lease, error) {
+	if err := m.validate(); err != nil {
+		return nil, err
+	}
+	if ctx == nil || route.State != store_sqlite.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
+		return nil, NewViewError(CodeViewBuilding, "an active positive checkout route is required")
+	}
+	lease, moved, err := m.pinCheckoutRoute(ctx, checkoutID, route, []int64{route.CommitGenerationID, route.DirtyGenerationID})
+	if err != nil {
+		return nil, err
+	}
+	if moved {
+		return nil, NewViewError(CodeViewBuilding, "checkout route moved before ancestry pin")
+	}
+	return lease, nil
 }

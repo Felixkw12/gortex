@@ -234,8 +234,14 @@ func (s *Server) wrapToolHandlerMode(h mcpserver.ToolHandlerFunc, injectOverlay 
 		ctx, releaseWriteIntent := s.withSourceMutationWriteIntent(ctx, req.Params.Name)
 		defer releaseWriteIntent()
 		ctx = s.withMutationPublicationStamps(ctx, req.Params.Name)
-		var view *requestView
-		if !viewless {
+		byteCtx, byteView, releaseByte, byteRefusal := s.prepareByteEditAuthority(ctx, &req, selector, freshness, capabilities)
+		if byteRefusal != nil {
+			return byteRefusal, nil
+		}
+		ctx = byteCtx
+		defer releaseByte()
+		view := byteView
+		if !viewless && view == nil {
 			var viewErr error
 			view, viewErr = s.resolveSourceRequestView(ctx, selector, &req, legacyName, freshness, capabilities)
 			if view == nil && viewErr == nil {
