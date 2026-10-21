@@ -2582,7 +2582,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			return nil
 		})
 	} else {
-		err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
+		err = idx.walkDisk(absRoot, absRoot, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				if !os.IsNotExist(err) && !idx.shouldExclude(path, absRoot, d != nil && d.IsDir()) {
 					recordFileOutcome(path, err)
@@ -2591,9 +2591,6 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				return nil
 			}
 			if d.IsDir() {
-				if idx.admitWalkEntry(absRoot, path, -1, true).pruneDir {
-					return filepath.SkipDir
-				}
 				recordFileOutcome(path, nil)
 				return nil
 			}
@@ -2626,7 +2623,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				}
 				return nil
 			}
-			if adm.lang == "" && idx.isIncrementalContractManifest(path) && !idx.shouldExclude(path, absRoot, false) {
+			if adm.manifest {
 				idx.captureColdManifest(&coldManifests, ctx, path, nil)
 			}
 			if !adm.admit {
@@ -2806,6 +2803,13 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 	if err != nil {
 		return nil, err
 	}
+	// Logged after both admissions so a request cancelled while it waits
+	// is not reported as a started index.
+	idx.logger.Info("indexer: full index started",
+		zap.String("repo", idx.RepoPrefix()),
+		zap.Bool("first_index", firstIndex),
+		zap.Bool("shadow", shadowTaken),
+		zap.String("origin", indexOrigin(ctx)))
 	var releaseIndexMemoryAdmission func(reason string)
 	if memoryLease != nil {
 		memoryAdmittedAt := time.Now()
@@ -5660,13 +5664,19 @@ func (idx *Indexer) perFolderIgnores(root string) *excludes.Hierarchical {
 }
 
 func shouldExcludeRules(path, root string, isDir bool, flat *excludes.Matcher, perFolder *excludes.Hierarchical) bool {
+	rel, relErr := filepath.Rel(root, path)
+	// Git's own data is never source, whatever the ignore rules say: no
+	// re-include reaches into a .git folder. See warnGitNegations.
+	if relErr == nil && inGitDir(rel) {
+		return true
+	}
 	// .claude/ and .kiro/ are Builtin-excluded wholesale, but may hold an
 	// MCP server config the MCP-config-as-graph feature targets
 	// (.kiro/settings/mcp.json). Only the folders where an agent keeps that
 	// config stay open, and only the MCP config files in them are admitted;
 	// agent state such as the checkouts under .claude/worktrees/ never
 	// reaches the graph or the watcher.
-	if rel, err := filepath.Rel(root, path); err == nil && excludes.InAgentConfigDir(rel) {
+	if relErr == nil && excludes.InAgentConfigDir(rel) {
 		open := excludes.IsAgentConfigMCPFile(rel)
 		if isDir {
 			open = excludes.IsAgentConfigMCPDir(rel)
@@ -5810,6 +5820,11 @@ func (idx *Indexer) shouldPruneDir(path, root string) bool {
 }
 
 func shouldPruneDir(path, root string, flat *excludes.Matcher, perFolder *excludes.Hierarchical, anchoredOnly bool) bool {
+	// Checked before the negation checks below, which keep an excluded
+	// folder open whenever a re-include might reach into it.
+	if rel, err := filepath.Rel(root, path); err == nil && inGitDir(rel) {
+		return true
+	}
 	if !shouldExcludeRules(path, root, true, flat, perFolder) {
 		return false
 	}
@@ -5837,6 +5852,21 @@ func shouldPruneDir(path, root string, flat *excludes.Matcher, perFolder *exclud
 	return true
 }
 
+// inGitDir reports whether a root-relative path names a .git folder or
+// lies inside one, at any depth and in any letter case: case-insensitive
+// filesystems resolve ".Git" to the same folder.
+func inGitDir(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	for rel != "" {
+		seg, rest, _ := strings.Cut(rel, "/")
+		if strings.EqualFold(seg, ".git") {
+			return true
+		}
+		rel = rest
+	}
+	return false
+}
+
 // dirIgnoreMatcher returns the per-directory ignore matcher, built lazily
 // against the repo root the index walk is anchored at.
 func (idx *Indexer) dirIgnoreMatcher(root string) *excludes.Hierarchical {
@@ -5855,9 +5885,35 @@ func (idx *Indexer) excludeMatcher() *excludes.Matcher {
 	if m := idx.excludes.Load(); m != nil {
 		return m
 	}
-	m := excludes.New(effectiveExcludePatterns(idx.config.Exclude))
+	m := idx.newExcludeMatcher(idx.config.Exclude)
 	idx.excludes.Store(m)
 	return m
+}
+
+// newExcludeMatcher compiles the effective ignore list and warns about
+// re-includes the hard .git rule in shouldExcludeRules overrides.
+func (idx *Indexer) newExcludeMatcher(patterns []string) *excludes.Matcher {
+	patterns = effectiveExcludePatterns(patterns)
+	idx.warnGitNegations(patterns)
+	return excludes.New(patterns)
+}
+
+// warnGitNegations logs each re-include ("!") pattern that names a .git
+// folder. Such a pattern once indexed files under .git; the walks now skip
+// every .git folder, so its files would leave the graph without notice.
+func (idx *Indexer) warnGitNegations(patterns []string) {
+	if idx.logger == nil {
+		return
+	}
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if !strings.HasPrefix(p, "!") || !inGitDir(strings.Trim(p[1:], "/")) {
+			continue
+		}
+		idx.logger.Warn("indexer: ignoring a re-include under .git; Git's own data is never indexed",
+			zap.String("repo", idx.repoPrefix),
+			zap.String("pattern", p))
+	}
 }
 
 // SetExcludePatterns installs a new effective ignore list on a live
@@ -5870,7 +5926,7 @@ func (idx *Indexer) SetExcludePatterns(patterns []string) {
 	idx.excludeMu.Lock()
 	defer idx.excludeMu.Unlock()
 	idx.config.Exclude = patterns
-	idx.excludes.Store(excludes.New(effectiveExcludePatterns(patterns)))
+	idx.excludes.Store(idx.newExcludeMatcher(patterns))
 }
 
 // effectiveExcludePatterns falls back to the builtin baseline when the
@@ -6252,7 +6308,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 		}
 
 		if info.IsDir() {
-			walkErr := filepath.WalkDir(absPath, func(path string, d os.DirEntry, err error) error {
+			walkErr := idx.walkDisk(absRoot, absPath, func(path string, d os.DirEntry, err error) error {
 				if err != nil {
 					if !os.IsNotExist(err) && !idx.shouldExclude(path, absRoot, d != nil && d.IsDir()) {
 						idx.noteFileIndexFailure(path, err)
@@ -6261,9 +6317,6 @@ func (idx *Indexer) incrementalReindexPathsMode(
 					return nil
 				}
 				if d.IsDir() {
-					if idx.admitWalkEntry(absRoot, path, -1, true).pruneDir {
-						return filepath.SkipDir
-					}
 					idx.noteFileIndexFailure(path, nil)
 					walkedDirs = append(walkedDirs, path)
 					return nil
@@ -9038,20 +9091,16 @@ func (idx *Indexer) HasChangesSinceMtimes(root string) bool {
 
 	diskFiles := make(map[string]bool)
 	errStop := errors.New("stop-walk")
-	walkErr := filepath.WalkDir(absRoot, func(path string, d os.DirEntry, werr error) error {
+	walkErr := idx.walkDisk(absRoot, absRoot, func(path string, d os.DirEntry, werr error) error {
 		if werr != nil {
 			return nil
 		}
 		if d.IsDir() {
-			if idx.shouldPruneDir(path, absRoot) {
-				return filepath.SkipDir
-			}
 			return nil
 		}
-		if _, ok := idx.effectiveLanguage(path, nil); !ok {
-			return nil
-		}
-		if idx.shouldExclude(path, absRoot, false) {
+		// Same file set as the census, root go.mod and go.work included.
+		adm := idx.admitWalkFileKnownType(absRoot, path, -1, d.Type())
+		if !adm.admit && !adm.manifest {
 			return nil
 		}
 		rel := idx.relKey(path)
@@ -9186,23 +9235,18 @@ func (idx *Indexer) changedSinceMtimesCensus(root string) (
 
 	diskFiles := make(map[string]bool)
 	projectionCandidates := make([]string, 0, 1)
-	walkErr := filepath.WalkDir(absRoot, func(path string, d os.DirEntry, werr error) error {
+	walkErr := idx.walkDisk(absRoot, absRoot, func(path string, d os.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
 		}
 		if d.IsDir() {
-			if idx.shouldPruneDir(path, absRoot) {
-				return filepath.SkipDir
-			}
 			return nil
 		}
-		lang, supported := idx.effectiveLanguage(path, nil)
-		if !supported && !idx.isIncrementalContractManifest(path) {
+		adm := idx.admitWalkFileKnownType(absRoot, path, -1, d.Type())
+		if !adm.admit && !adm.manifest {
 			return nil
 		}
-		if idx.shouldExclude(path, absRoot, false) {
-			return nil
-		}
+		lang, supported := adm.lang, adm.admit
 		rel := idx.relKey(path)
 		diskFiles[rel] = true
 		if filepath.Base(filepath.FromSlash(rel)) == "parser.c" {

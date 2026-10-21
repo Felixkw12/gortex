@@ -458,7 +458,8 @@ func (l *CheckoutLifecycle) Register(
 		}
 	}
 
-	result, err := l.mi.TrackRepoCtx(ctx, entry)
+	// The source tells a config reload's re-registration from a user's track.
+	result, err := l.mi.TrackRepoCtx(WithIndexOrigin(ctx, "checkout_register_"+string(source)), entry)
 	if err != nil {
 		return RegisterResult{}, err
 	}
@@ -484,7 +485,7 @@ func (l *CheckoutLifecycle) Register(
 
 	l.attachWatcher(out.Prefix)
 	l.saveConfig("track")
-	l.reconcileFamilyNow(ctx, out.FamilyID, absPath)
+	_ = l.reconcileFamilyNow(ctx, out.FamilyID, absPath)
 	l.notifyTrackedSetChanged()
 	return out, nil
 }
@@ -515,7 +516,7 @@ func (l *CheckoutLifecycle) RecordImplicit(ctx context.Context, root string) err
 
 	identity, err := l.recordCheckout(ctx, prefix, root, TrackSourceImplicit, false)
 	l.attachWatcherContext(ctx, prefix)
-	l.reconcileFamilyNow(ctx, identity.familyID, root)
+	_ = l.reconcileFamilyNow(ctx, identity.familyID, root)
 	l.notifyTrackedSetChanged()
 	return err
 }
@@ -1273,7 +1274,7 @@ func (l *CheckoutLifecycle) Sweep(ctx context.Context) (SweepReport, error) {
 	if err := l.rec.Resume(ctx); err != nil {
 		errs = append(errs, err)
 	}
-	if err := l.resumeModeTransitions(ctx); err != nil {
+	if _, err := l.resumeModeTransitions(ctx); err != nil {
 		errs = append(errs, err)
 	}
 	for _, fam := range l.knownFamilies(ctx) {
@@ -1412,15 +1413,15 @@ func familyReportRemoved(report reconcile.FamilyReport) bool {
 // reconcileFamilyNow reconciles one family and applies its coordinator
 // dispositions immediately. Failures stay best-effort for registration and
 // startup; the next topology event or scheduled sweep asks again.
-func (l *CheckoutLifecycle) reconcileFamilyNow(ctx context.Context, familyID, fallbackDir string) {
+func (l *CheckoutLifecycle) reconcileFamilyNow(ctx context.Context, familyID, fallbackDir string) error {
 	if l == nil || l.rec == nil || familyID == "" {
-		return
+		return errors.New("checkout lifecycle: family reconciliation is not wired")
 	}
 	report, err := l.rec.ReconcileFamily(ctx, familyID, l.probeDirFor(ctx, familyID, fallbackDir))
 	if err != nil {
 		l.logger.Debug("checkout lifecycle: could not reconcile the family",
 			zap.String("family", familyID), zap.Error(err))
-		return
+		return err
 	}
 	l.applyCoordinators(ctx, report)
 	l.scheduleFamilyRetry(report)
@@ -1428,6 +1429,7 @@ func (l *CheckoutLifecycle) reconcileFamilyNow(ctx context.Context, familyID, fa
 		l.saveConfig("reconcile")
 		l.notifyTrackedSetChanged()
 	}
+	return nil
 }
 
 // familyProbe is one family and the directory to read its inventory from.
@@ -2259,7 +2261,30 @@ func (l *CheckoutLifecycle) sweepRetirements(ctx context.Context) int {
 		return l.leases.InUse(generationID) || l.store.PayloadBuildFlightActive(generationID)
 	}
 	for _, generationID := range owed {
+		started := time.Now()
+		var generation store_sqlite.ViewGeneration
+		prefix := ""
+		if l.catalog != nil {
+			generation, _, _ = l.catalog.GetViewGeneration(ctx, generationID)
+			if graph, found, _ := l.catalog.GetDedicatedGraph(ctx, generation.GraphID); found {
+				prefix = graph.RepoPrefix
+			}
+		}
 		err := l.store.RetirePayloadGeneration(ctx, generationID, inUse)
+		elapsed := time.Since(started)
+		if l.logger != nil {
+			log := l.logger.Debug
+			if elapsed > 5*time.Second {
+				log = l.logger.Info
+			}
+			log("checkout lifecycle generation retirement completed",
+				zap.String("repo", prefix),
+				zap.String("graph", generation.GraphID),
+				zap.String("checkout", generation.CheckoutID),
+				zap.Int64("generation_id", generationID),
+				zap.Float64("elapsed_seconds", elapsed.Seconds()),
+				zap.Error(err))
+		}
 		if err != nil && !errors.Is(err, store_sqlite.ErrCatalogNotFound) {
 			continue
 		}
@@ -2536,8 +2561,26 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 	if l == nil {
 		return nil
 	}
+	logger := l.logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	stageCompleted := func(stage string, started time.Time, stageErr error, fields ...zap.Field) {
+		outcome := "success"
+		if stageErr != nil {
+			outcome = "error"
+			fields = append(fields, zap.Error(stageErr))
+		}
+		fields = append(fields,
+			zap.String("stage", stage),
+			zap.Float64("elapsed_seconds", time.Since(started).Seconds()),
+			zap.String("outcome", outcome))
+		logger.Info("checkout lifecycle seed stage completed", fields...)
+	}
 	if l.rec == nil {
-		l.sweepRetirements(ctx)
+		started := time.Now()
+		retired := l.sweepRetirements(ctx)
+		stageCompleted("sweep_retirements", started, nil, zap.Int("retired_generations", retired))
 		return nil
 	}
 	var errs []error
@@ -2546,14 +2589,22 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 	// demotion may have flipped modes and journalled graph retirement while its
 	// stale config entry was still on disk; seeding that entry first would
 	// recreate the intent and graph the cleanup is about to remove.
-	if err := l.rec.Resume(ctx); err != nil {
+	started := time.Now()
+	err := l.rec.Resume(ctx)
+	stageCompleted("resume_reconciler", started, err)
+	if err != nil {
 		errs = append(errs, err)
 	}
 	// A crash can leave a populated generation in building state before any
 	// cleanup journal exists. Drain prior-process residue during boot instead
 	// of leaving it for the hourly janitor.
-	l.sweepRetirements(ctx)
+	started = time.Now()
+	retired := l.sweepRetirements(ctx)
+	stageCompleted("sweep_retirements", started, nil, zap.Int("retired_generations", retired))
 
+	started = time.Now()
+	recorded := 0
+	var recordErrs []error
 	seeded := map[string]string{}
 	if l.cfgMgr != nil {
 		for _, entry := range l.cfgMgr.Global().Repos {
@@ -2570,7 +2621,11 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 			}
 			identity, err := l.recordCheckout(ctx, prefix, abs, TrackSourceConfig, true)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("seed %s: %w", abs, err))
+				seedErr := fmt.Errorf("seed %s: %w", abs, err)
+				errs = append(errs, seedErr)
+				recordErrs = append(recordErrs, seedErr)
+			} else {
+				recorded++
 			}
 			if identity.familyID != "" {
 				if _, present := seeded[identity.familyID]; !present {
@@ -2579,7 +2634,11 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 			}
 		}
 	}
-	if err := l.resumeModeTransitions(ctx); err != nil {
+	stageCompleted("record_checkout", started, errors.Join(recordErrs...), zap.Int("recorded_checkouts", recorded))
+	started = time.Now()
+	resumed, err := l.resumeModeTransitions(ctx)
+	stageCompleted("resume_mode_transitions", started, err, zap.Int("resumed_transitions", resumed))
+	if err != nil {
 		errs = append(errs, err)
 	}
 	// The seeded families are reconciled once here rather than at the janitor's
@@ -2587,9 +2646,21 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 	// the boot rather than within the hour. An automatic worktree that was not
 	// being served stays dormant until it is selected again — its route is what
 	// marks it worth resuming across the restart.
+	started = time.Now()
+	reconciled := 0
+	var reconcileErr error
 	for familyID, probeDir := range seeded {
-		l.reconcileFamilyNow(ctx, familyID, probeDir)
+		if err := l.reconcileFamilyNow(ctx, familyID, probeDir); err != nil {
+			if reconcileErr == nil {
+				reconcileErr = fmt.Errorf("family %s: %w", familyID, err)
+			}
+			continue
+		}
+		reconciled++
 	}
+	stageCompleted("reconcile_family", started, reconcileErr,
+		zap.Int("families", len(seeded)), zap.Int("reconciled_families", reconciled),
+		zap.Int("failed_families", len(seeded)-reconciled))
 	return errors.Join(errs...)
 }
 

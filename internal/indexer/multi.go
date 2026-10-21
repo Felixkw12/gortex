@@ -2207,7 +2207,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 					// the loop via the shared global-pass pipeline.
 					idx.SetDeferResolve(true)
 
-					result, err := idx.indexCtxRaw(context.Background(), r.absPath)
+					result, err := idx.indexCtxRaw(WithIndexOrigin(context.Background(), "index_all"), r.absPath)
 					if err != nil {
 						idx.Close()
 						resultCh <- repoResult{prefix: r.prefix, err: fmt.Errorf("indexing %s: %w", r.absPath, err)}
@@ -2405,7 +2405,7 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 	idx.SetWorkspaceID(resolveWorkspaceID(entry, cfg, repoPrefix))
 	idx.SetProjectID(resolveProjectID(entry, cfg, repoPrefix))
 
-	result, err := idx.indexCtxRaw(context.Background(), meta.RootPath)
+	result, err := idx.indexCtxRaw(WithIndexOrigin(context.Background(), "index_repo"), meta.RootPath)
 	if err != nil {
 		return nil, fmt.Errorf("indexing %s: %w", meta.RootPath, err)
 	}
@@ -3092,9 +3092,10 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		// is reserved for cases where scoped replacement is not worth it: churn is
 		// a large fraction of the repo, or an operator forced it via
 		// GORTEX_WARMUP_FULL_RETRACK. A failed census falls back to the preserving
-		// full-root incremental path. A repo with zero changes returns directly
-		// from an authoritative non-Merkle census instead of repeating the same
-		// full-tree walk in the incremental pipeline.
+		// full-root incremental path. A repo with zero changes and a current
+		// extractor-version snapshot returns directly from an authoritative
+		// non-Merkle census instead of repeating the same full-tree walk in the
+		// incremental pipeline.
 		var (
 			receipt *graph.MutationReceipt
 			batch   *reparsePendingEnrichmentBatch
@@ -3138,13 +3139,17 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		case forceFull:
 			route = "full_retrack"
 			result, err = fullRetrack()
-		case churn == 0 && !idx.merkleEnabled():
+		case churn == 0 && !idx.merkleEnabled() && len(idx.extractorVersionStaleLangSet()) == 0:
 			route = "census_noop"
 			result, err = idx.cleanCensusResult(ctx, detected, start)
 		case churn == 0:
 			// The mtime census cannot prove a Merkle-enabled repository clean:
 			// a missing baseline or extractor-salt change still requires the
-			// content-addressed full-tree incremental check.
+			// content-addressed full-tree incremental check. A non-Merkle
+			// repository lands here only when its persisted extractor
+			// versions (or post-extraction policy epoch) are behind the
+			// running binary: the full-tree pass restages the stale
+			// languages and re-stamps the snapshot, so it fires once per bump.
 			route = "incremental"
 			result, receipt, batch, err = idx.incrementalReindexPathsWithReceipt(absPath, nil, true)
 		case manifestOnly && idx.merkleEnabled():

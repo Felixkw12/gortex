@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
@@ -67,14 +69,30 @@ func TestCheckoutRemovalRunsThroughAnUnbindableCWD(t *testing.T) {
 
 	// The gate is real and stays real: a graph read through the same cwd is
 	// still refused rather than answered off the parent's corpus.
+	//
+	// Binding the cwd runs automatic discovery, and a request waits only its
+	// 250ms slice for it while the coalesced Git work continues. Where Git
+	// startup alone spends that slice (Windows runners), the first answer is
+	// the documented retryable view_building refusal; the settled answer this
+	// test pins arrives on a retry, exactly as a client would see it.
 	readRan := false
-	res, err := stack.callWithView(t, nested, "get_symbol", nil,
-		func(context.Context) (*mcplib.CallToolResult, error) {
-			readRan = true
-			return mcplib.NewToolResultText(`{}`), nil
-		})
-	require.NoError(t, err)
-	require.False(t, readRan, "get_symbol reached its handler through an unbindable cwd")
+	var res *mcplib.CallToolResult
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var err error
+		res, err = stack.callWithView(t, nested, "get_symbol", nil,
+			func(context.Context) (*mcplib.CallToolResult, error) {
+				readRan = true
+				return mcplib.NewToolResultText(`{}`), nil
+			})
+		require.NoError(t, err)
+		require.False(t, readRan, "get_symbol reached its handler through an unbindable cwd")
+		if !res.IsError || !strings.Contains(viewResultText(t, res), graphview.CodeViewBuilding) {
+			break
+		}
+		require.True(t, time.Now().Before(deadline), "checkout discovery never settled: %s", viewResultText(t, res))
+		time.Sleep(10 * time.Millisecond)
+	}
 	assertToolError(t, res, graphview.CodeCheckoutInaccessible)
 
 	for _, call := range viewlessCalls(nested) {

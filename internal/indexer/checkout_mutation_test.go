@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -247,6 +248,11 @@ func TestCheckoutMutationAdmissionCancellationReleasesResources(t *testing.T) {
 }
 
 func TestCheckoutMutationAdmissionPanicReleasesResources(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The fault below is a recovered nil dereference, which can corrupt
+		// the Go heap on some Windows runners (golang/go#81238).
+		t.Skip("recovering a nil dereference can corrupt the heap on Windows")
+	}
 	f, c, l := newCheckoutMutationFixture(t)
 	// A backend panic recovered by MCP must not strand the checkout route lock,
 	// and admission must not have touched the shared build gate at all. A

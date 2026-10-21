@@ -768,7 +768,7 @@ func (m *RefViewManager) runBuild(
 	resolved gitstate.ResolvedSelector,
 	identity GenerationIdentity,
 ) (RefViewResult, error) {
-	generationID, report, buildErr := m.builder.BuildCommitLayer(ctx, CommitLayerRequest{
+	generationID, report, buildErr := m.builder.BuildCommitLayer(WithIndexOrigin(ctx, "ref_view"), CommitLayerRequest{
 		Identity:      identity,
 		Base:          m.store.AtGeneration(base.generationID),
 		RepoDir:       req.RepoDir,

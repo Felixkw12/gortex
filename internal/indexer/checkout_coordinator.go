@@ -1164,7 +1164,7 @@ func (c *CheckoutCoordinator) resolveCommitLayer(
 		return cached, true, nil
 	}
 	started := time.Now()
-	generationID, report, err := c.builder.BuildCommitLayer(ctx, CommitLayerRequest{
+	generationID, report, err := c.builder.BuildCommitLayer(WithIndexOrigin(ctx, "checkout_coordinator"), CommitLayerRequest{
 		Identity:      identity,
 		Base:          c.store.AtGeneration(base.generationID),
 		RepoDir:       c.root,
@@ -1375,7 +1375,7 @@ func (c *CheckoutCoordinator) buildDirtyLayerOver(
 	identity := c.dirtyIdentity(graphID, commitGeneration)
 	for attempt := 0; attempt < 2; attempt++ {
 		started := time.Now()
-		generationID, _, err := c.builder.BuildDirtyLayer(ctx, DirtyLayerRequest{
+		generationID, _, err := c.builder.BuildDirtyLayer(WithIndexOrigin(ctx, "checkout_coordinator"), DirtyLayerRequest{
 			Identity:     identity,
 			Base:         dirtyBase,
 			CheckoutRoot: c.root,

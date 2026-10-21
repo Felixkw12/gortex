@@ -45,6 +45,7 @@ var extractorVersions = map[string]int{
 	"go":     3,                                      // generic instantiations are marked so indexing a func value cannot bind (was: generic calls emit call edges)
 	"cpp":    2,                                      // templated and namespace-qualified calls emit call edges
 	"swift":  2,                                      // generic calls and ordinary member calls emit call edges
+	"sql":    2,                                      // dollar-quoted bodies are blanked before parsing so a plpgsql body the grammar cannot read no longer drops its CREATE FUNCTION; CREATE PROCEDURE is indexed
 	"julia":  3,                                      // callee and macro decoding from CST children (chained/parametric callees, Base.@time, Base.:(==)), macro/operator exports, member_of for module consts and nested modules, @doc and public metadata (was: bespoke tree-sitter extractor replaced the regex extractor)
 }
 
@@ -97,6 +98,7 @@ var extractorSaltExtLang = map[string]string{
 	".sh":     "bash",
 	".bash":   "bash",
 	".jl":     "julia",
+	".sql":    "sql",
 }
 
 // ExtractorLangForFile returns the extractor-staleness language key for a

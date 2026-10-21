@@ -106,8 +106,9 @@ func runCodex(data []byte, port int, selected ...CodexMode) {
 	case peek.HookEventName == "Stop":
 		// Codex uses the same stop_hook_active and last_assistant_message
 		// fields as the shared Stop handler. Unsupported/older hosts omit the
-		// message and therefore fail open in runPostTask.
-		runPostTask(data, port)
+		// message and therefore fail open in runPostTask. The briefing rides
+		// Codex's Stop envelope, which rejects hookSpecificOutput (#779).
+		runPostTaskWith(data, port, codexStopBriefing)
 	case peek.HookEventName == "SessionStart":
 		runSessionStart(data, port)
 	case peek.HookEventName == "PreToolUse" && peek.ToolName == "Bash":
@@ -481,9 +482,24 @@ func runCodexPostToolUse(data []byte, port int, mode CodexMode) {
 	if input.HookEventName != "PostToolUse" {
 		return
 	}
+	// Doctor counts PostToolUse records as hook runs, so every dispatched
+	// invocation must land exactly one — including the shapes this hook has
+	// nothing to say about (a non-search Bash command, a localization tool
+	// call without a terminal receipt). Otherwise a hook Codex demonstrably
+	// ran reads as "configured but never ran" (#832). Paths that record their
+	// own outcome set recorded; the fallback does no daemon I/O, so it
+	// leaves reachability unknown rather than faking a sample.
+	recorded := false
+	defer func() {
+		if !recorded {
+			logHookEffectivenessUnknown("PostToolUse", false, 0, time.Since(started))
+		}
+	}()
 	if localizationNavigationTool(input.ToolName) {
 		if terminal, observed := observeLocalizationTerminal(data); observed {
-			_ = emitLocalizationTerminalContext(terminal)
+			// Same accounting as the Claude Code path (runPostToolUse).
+			recorded = true
+			localizationTerminalTelemetry("observed", emitLocalizationTerminalContext(terminal), started)
 		}
 		return
 	}
@@ -500,6 +516,7 @@ func runCodexPostToolUse(data []byte, port int, mode CodexMode) {
 			})
 		}
 		emitted := ctx != ""
+		recorded = true
 		logHookEffectiveness("PostToolUse", emitted, daemonUp, 0, time.Since(started))
 		if !emitted {
 			return
@@ -539,6 +556,8 @@ func runCodexPostToolUse(data []byte, port int, mode CodexMode) {
 		return
 	}
 	if mode != CodexModeSuppress {
+		// runPostToolUse records its own run.
+		recorded = true
 		runPostToolUse(normalized)
 		return
 	}
@@ -550,6 +569,7 @@ func runCodexPostToolUse(data []byte, port int, mode CodexMode) {
 		ctx = postToolContext(input)
 	}
 	emitted := ctx != ""
+	recorded = true
 	logHookEffectiveness("PostToolUse", emitted, daemonUp, 0, time.Since(started))
 	if emitted {
 		emitPostToolContext(ctx, true)
