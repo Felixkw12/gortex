@@ -151,6 +151,14 @@ func (s *Server) resolveSourceRequestView(ctx context.Context, selector graphvie
 			view.declared[graphview.CapSearchSymbols] = graphview.StateComplete
 		}
 	}
+	// An in-scope read of an unrouted checkout is a selection, as on the graph
+	// lane: kick its coordinator so later requests leave the source scan. Fire
+	// and forget; the answer and what it proves are unchanged. Pending paths on
+	// an active route are not a reason, and a retired route declines as byte
+	// admission does.
+	if route := control.Route; route == nil || (route.State != store_sqlite.RouteRetired && !graphview.RouteReady(*route)) {
+		s.activateSelectedCheckout(checkout.CheckoutID, "source read of an unrouted checkout")
+	}
 	if freshness.requested() {
 		view.freshness = &requestFreshnessOutcome{deadline: freshness.effectiveDeadline(time.Now(), ctx)}
 	}
