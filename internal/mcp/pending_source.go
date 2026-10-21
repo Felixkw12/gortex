@@ -13,6 +13,15 @@ import (
 type pendingSourceRegistry struct {
 	mu       sync.Mutex
 	versions map[string]*mutationCommitRecord
+	// freshCommits is the highest commitSeq per checkout/incarnation/path whose
+	// bytes reached a fresh publication. It outlives the fresh version only
+	// while another version of that key is registered, so it is bounded by
+	// the registry.
+	freshCommits map[pendingSourceKey]uint64
+}
+
+type pendingSourceKey struct {
+	checkoutID, incarnation, path string
 }
 
 func (p *pendingSourceRegistry) register(record *mutationCommitRecord) {
@@ -31,20 +40,52 @@ func (s *Server) pendingSourcePaths(checkoutID, incarnation string) []string {
 	p := &s.pendingSourceFiles
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	paths := make(map[string]struct{})
+	if p.freshCommits == nil {
+		p.freshCommits = make(map[pendingSourceKey]uint64)
+	}
+	survivors := make(map[string]mutationCommitSnapshot, len(p.versions))
 	for id, record := range p.versions {
 		s.refreshPendingSourceRecord(record)
 		snap := record.snapshot()
 		record.mu.RLock()
 		recovered := record.pendingSourceRecovered
 		record.mu.RUnlock()
+		if snap.DiskStatus == mutationDiskCommitted && snap.GraphStatus == mutationGraphFresh {
+			key := pendingSourceKey{snap.CheckoutID, snap.CheckoutIncarnation, filepath.Clean(record.absPath)}
+			if snap.CommitSeq > p.freshCommits[key] {
+				p.freshCommits[key] = snap.CommitSeq
+			}
+		}
 		if recovered || snap.DiskStatus == mutationDiskNotApplied || snap.DiskStatus == mutationDiskFailed ||
 			(snap.DiskStatus == mutationDiskCommitted && snap.GraphStatus == mutationGraphFresh) {
 			delete(p.versions, id)
 			continue
 		}
+		survivors[id] = snap
+	}
+	paths := make(map[string]struct{})
+	live := make(map[pendingSourceKey]struct{}, len(survivors))
+	for id, snap := range survivors {
+		path := filepath.Clean(p.versions[id].absPath)
+		key := pendingSourceKey{snap.CheckoutID, snap.CheckoutIncarnation, path}
+		// A fresh publication of a later commit to the same checkout
+		// incarnation and path read bytes that replaced this version's, so
+		// this version's own ticket outcome (e.g. a superseded refresh) no
+		// longer decides whether the path is pending.
+		if snap.DiskStatus == mutationDiskCommitted && snap.CommitSeq != 0 && snap.CommitSeq < p.freshCommits[key] {
+			delete(p.versions, id)
+			continue
+		}
+		live[key] = struct{}{}
 		if snap.CheckoutID == checkoutID && (incarnation == "" || snap.CheckoutIncarnation == incarnation) {
-			paths[filepath.Clean(record.absPath)] = struct{}{}
+			paths[path] = struct{}{}
+		}
+	}
+	// Uncommitted versions take a later commitSeq, so a watermark only matters
+	// while an older version of its key is registered.
+	for key := range p.freshCommits {
+		if _, ok := live[key]; !ok {
+			delete(p.freshCommits, key)
 		}
 	}
 	result := make([]string, 0, len(paths))

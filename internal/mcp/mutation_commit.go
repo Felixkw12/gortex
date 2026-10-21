@@ -87,6 +87,12 @@ const mutationIDParamDescription = "Optional idempotency key. Retrying with the 
 
 var mutationCommitSequence atomic.Uint64
 
+// mutationDiskCommitSequence orders disk commits. It is stamped after the
+// rename and before the commit's refresh ticket is admitted, so a fresh
+// publication of a larger value captured the path after the smaller one's
+// bytes landed.
+var mutationDiskCommitSequence atomic.Uint64
+
 // errMutationNotApplied is returned by commitFileMutation when the request was
 // cancelled before the disk commit. Callers surface it as a terminal refusal so
 // the client knows retrying is safe.
@@ -109,6 +115,9 @@ type mutationCommitRecord struct {
 
 	disk  string
 	graph string
+	// commitSeq is the mutationDiskCommitSequence value of the disk commit,
+	// zero until committed.
+	commitSeq uint64
 	// graphRecorded says whether graph carries an outcome or is still the
 	// seed beginMutationCommit wrote. The status string cannot answer that on
 	// its own: "stale" means both "the reindex reported without confirming an
@@ -146,6 +155,7 @@ type mutationCommitSnapshot struct {
 	// on. Ordering matters for the listing: it is filled from the same
 	// snapshot the flag is derived from, so the two cannot disagree.
 	GraphRecorded       bool   `json:"-"`
+	CommitSeq           uint64 `json:"-"`
 	NewSHA              string `json:"new_sha,omitempty"`
 	BytesWritten        int    `json:"bytes_written,omitempty"`
 	Error               string `json:"error,omitempty"`
@@ -169,6 +179,7 @@ func (r *mutationCommitRecord) snapshot() mutationCommitSnapshot {
 		DiskStatus:          r.disk,
 		GraphStatus:         r.graph,
 		GraphRecorded:       r.graphRecorded,
+		CommitSeq:           r.commitSeq,
 		NewSHA:              r.newSHA,
 		BytesWritten:        r.bytesWritten,
 		Error:               r.errText,
@@ -219,6 +230,9 @@ func (r *mutationCommitRecord) markCommitted(newSHA string, bytesWritten int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.disk = mutationDiskCommitted
+	if r.commitSeq == 0 {
+		r.commitSeq = mutationDiskCommitSequence.Add(1)
+	}
 	r.newSHA = newSHA
 	r.bytesWritten = bytesWritten
 	r.committedAt = time.Now()
