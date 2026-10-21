@@ -632,14 +632,15 @@ func TestCheckoutRefreshCannotCertifyPublishedOtherBytesAfterRestore(t *testing.
 			builderWriteFile(t, f.worktree, "helper.go", wanted)
 			path := filepath.Join(f.worktree, "helper.go")
 			var ticket *CheckoutRefreshTicket
-			if mode == "batch_absent" {
+			switch mode {
+			case "batch_absent":
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
 				}
 				ticket, err = m.EnqueueBatchRefresh(t.Context(), []CheckoutBatchFile{{Path: path, Absent: true}})
-			} else if mode == "batch_present" {
+			case "batch_present":
 				ticket, err = m.EnqueueBatchRefresh(t.Context(), []CheckoutBatchFile{{Path: path, SHA256: checkoutBatchHash(t, path)}})
-			} else {
+			default:
 				ticket, err = m.EnqueueRefresh(t.Context(), path)
 			}
 			if err != nil {
