@@ -38,9 +38,12 @@ func byteEditFixtureViewMatches(ctx context.Context, f *realCheckoutMutationFixt
 	if view == nil || checkoutMutationFromContext(ctx) == nil || !pathkey.EqualPaths(view.viewRoot, f.worktree) {
 		return false
 	}
-	if headProof {
-		return view.sourceScope == "file" && view.materialized == nil && view.sourceGraphPending
+	if headProof && view.sourceScope == "file" {
+		return view.materialized == nil && view.sourceGraphPending
 	}
+	// These MCP fixtures release the old parser immediately after starting the
+	// request. If publication wins selection, ready-idle admission is ordinary;
+	// strict pending/attempt handoff is separately held by indexer barriers.
 	return view.sourceScope == "" && view.materialized != nil && !view.sourceGraphPending
 }
 
@@ -113,8 +116,7 @@ func testPlainByteEditAcrossPendingPublication(t *testing.T, forceUnavailable bo
 	payload := decodeFileOpsResult(t, r)
 	require.Equal(t, "applied", payload["status"])
 	fresh := resultFreshness(t, r)
-	if headProof {
-		require.Equal(t, "file", fresh["freshness_scope"])
+	if headProof && fresh["freshness_scope"] == "file" {
 		require.Equal(t, "pending", fresh["graph_freshness"])
 	} else {
 		require.NotEqual(t, "file", fresh["freshness_scope"], "ordinary sampled admission must not claim source-only byte authority")
@@ -210,19 +212,30 @@ func TestByteEditFacadeUsesNormalizedGuardAndSelectedDisk(t *testing.T) {
 func testByteEditFacadeUsesNormalizedGuardAndSelectedDisk(t *testing.T, forceUnavailable bool) {
 	t.Setenv("GORTEX_TOOLS", "facade-v1")
 	f := newRealCheckoutMutationFixture(t)
-	headProof := byteEditFixtureHeadProof(t, f, forceUnavailable)
+	byteEditFixtureHeadProof(t, f, forceUnavailable)
 	before, err := os.ReadFile(filepath.Join(f.worktree, "edit.go"))
 	require.NoError(t, err)
 	primary, err := os.ReadFile(filepath.Join(f.primary, "edit.go"))
 	require.NoError(t, err)
+	// The ready idle facade must enter the real ordinary materialized
+	// admission, rather than manufacture a source-only freshness certificate.
+	priorHook := mutationBeforeAdmission
+	defer func() { mutationBeforeAdmission = priorHook }()
+	ordinary := false
+	mutationBeforeAdmission = func(ctx context.Context) {
+		view := requestViewFromContext(ctx)
+		require.NotNil(t, view)
+		require.NotNil(t, view.materialized)
+		require.Empty(t, view.sourceScope)
+		require.False(t, view.sourceGraphPending)
+		require.Equal(t, f.checkoutID, view.rider.CheckoutID)
+		ordinary = true
+	}
 	r := f.facade(t, f.primary, "edit", map[string]any{"operation": "file", "target": map[string]any{"file": "repo/edit.go"}, "match": "func New() {}", "replacement": "func ByteFacade() {}", "guard": map[string]any{"base_sha": gitBlobSHA(before), "expected_occurrences": 1}, "view": map[string]any{"kind": "worktree", "path": f.worktree}, "format": "json"})
 	require.False(t, r.IsError, viewResultText(t, r))
 	fresh := resultFreshness(t, r)
-	if headProof {
-		require.Equal(t, "file", fresh["freshness_scope"])
-	} else {
-		require.NotEqual(t, "file", fresh["freshness_scope"])
-	}
+	require.True(t, ordinary, "ready idle facade must use ordinary whole-view authority")
+	require.NotEqual(t, "file", fresh["freshness_scope"])
 	require.Equal(t, f.checkoutID, fresh["checkout_id"])
 	disk, err := os.ReadFile(filepath.Join(f.worktree, "edit.go"))
 	require.NoError(t, err)

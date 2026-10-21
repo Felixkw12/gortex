@@ -115,6 +115,18 @@ func (c *CheckoutCoordinator) closeByteAnchor() {
 // source admission, drains the old unpublished attempt under cycleMu, and binds
 // a fresh WHOLE checkout sample. It never certifies the anchored graph as fresh.
 func (l *CheckoutLifecycle) BeginCheckoutByteMutation(ctx context.Context, checkoutID, root, incarnation string) (*CheckoutMutation, error) {
+	return l.beginCheckoutByteMutation(ctx, checkoutID, root, incarnation, false)
+}
+
+// BeginCheckoutByteHandoff is the optional edit admission: a ready idle route
+// keeps ordinary whole-view mutation admission. Pending routes and actual
+// coordinator work retain byte handoff. The decision is advisory only; a cycle
+// racing an idle decline still meets all ordinary route/source/target checks.
+func (l *CheckoutLifecycle) BeginCheckoutByteHandoff(ctx context.Context, checkoutID, root, incarnation string) (*CheckoutMutation, error) {
+	return l.beginCheckoutByteMutation(ctx, checkoutID, root, incarnation, true)
+}
+
+func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, checkoutID, root, incarnation string, ordinaryWhenIdle bool) (*CheckoutMutation, error) {
 	if l == nil || l.catalog == nil || checkoutID == "" || root == "" || incarnation == "" {
 		return nil, ErrCheckoutByteAnchorUnavailable
 	}
@@ -138,6 +150,17 @@ func (l *CheckoutLifecycle) BeginCheckoutByteMutation(ctx context.Context, check
 	route, found, err := c.catalog.GetCheckoutRoute(waitCtx, checkoutID)
 	if err != nil {
 		return nil, err
+	}
+	if ordinaryWhenIdle && found && route.State == store_sqlite.RouteActive && route.CommitGenerationID > 0 && route.DirtyGenerationID > 0 {
+		c.byteMu.Lock()
+		idle := c.byteAttempt == nil && c.byteDemand == 0
+		c.byteMu.Unlock()
+		if idle {
+			if err := waitCtx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, ErrCheckoutByteAnchorUnavailable
+		}
 	}
 	if found && route.State == store_sqlite.RouteActive && route.DirtyGenerationID > 0 {
 		if err := c.captureByteAnchor(waitCtx, route); err != nil {

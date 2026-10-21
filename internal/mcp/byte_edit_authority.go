@@ -76,7 +76,7 @@ func (s *Server) prepareByteEditAuthority(ctx context.Context, req *mcp.CallTool
 	if _, err := s.familyPrimary(ctx, control.Checkout.FamilyID); err != nil {
 		return ctx, nil, noop, mcp.NewToolResultError(err.Error())
 	}
-	mutation, err := s.lifecycle.BeginCheckoutByteMutation(ctx, control.Checkout.CheckoutID, control.Checkout.RootPath, control.Checkout.Incarnation)
+	mutation, err := s.lifecycle.BeginCheckoutByteHandoff(ctx, control.Checkout.CheckoutID, control.Checkout.RootPath, control.Checkout.Incarnation)
 	if errors.Is(err, indexer.ErrCheckoutByteAnchorUnavailable) || byteEditAdmissionCanReselect(ctx, mutation, err) {
 		return ctx, nil, noop, nil
 	}

@@ -118,7 +118,7 @@ func TestByteMutationHandoffDrainsAttemptAndPreservesExactTickets(t *testing.T) 
 	got := make(chan admission, 1)
 	incarnation := byteFixtureIncarnation(t, f)
 	go func() {
-		m, err := l.BeginCheckoutByteMutation(t.Context(), f.checkoutID, f.worktree, incarnation)
+		m, err := l.BeginCheckoutByteHandoff(t.Context(), f.checkoutID, f.worktree, incarnation)
 		got <- admission{m, err}
 	}()
 	semanticMotionReceive(t, p.canceled)
@@ -281,7 +281,7 @@ func TestByteMutationPreemptsOwnGateQueueWithoutTakingOtherCheckoutLane(t *testi
 	done := make(chan struct{})
 	go func() { defer close(done); c.cycle(t.Context()) }()
 	require.Eventually(t, func() bool { return c.gate.Stats().InteractiveQueued > 0 }, 10*time.Second, time.Millisecond)
-	m, err := l.BeginCheckoutByteMutation(t.Context(), f.checkoutID, f.worktree, byteFixtureIncarnation(t, f))
+	m, err := l.BeginCheckoutByteHandoff(t.Context(), f.checkoutID, f.worktree, byteFixtureIncarnation(t, f))
 	require.NoError(t, err)
 	defer m.Close()
 	semanticMotionReceive(t, done)
@@ -307,7 +307,7 @@ func TestByteMutationNoPrepareCloseResumesDrainedOldWork(t *testing.T) {
 	admitted := make(chan *CheckoutMutation, 1)
 	fail := make(chan error, 1)
 	go func() {
-		m, err := l.BeginCheckoutByteMutation(t.Context(), f.checkoutID, f.worktree, incarnation)
+		m, err := l.BeginCheckoutByteHandoff(t.Context(), f.checkoutID, f.worktree, incarnation)
 		if err != nil {
 			fail <- err
 			return
