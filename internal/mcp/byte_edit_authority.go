@@ -76,7 +76,9 @@ func (s *Server) prepareByteEditAuthority(ctx context.Context, req *mcp.CallTool
 	if _, err := s.familyPrimary(ctx, control.Checkout.FamilyID); err != nil {
 		return ctx, nil, noop, mcp.NewToolResultError(err.Error())
 	}
-	mutation, err := s.lifecycle.BeginCheckoutByteHandoff(ctx, control.Checkout.CheckoutID, control.Checkout.RootPath, control.Checkout.Incarnation)
+	mutation, err := beginByteEditAdmission(ctx, func(ctx context.Context) (*indexer.CheckoutMutation, error) {
+		return s.lifecycle.BeginCheckoutByteHandoff(ctx, control.Checkout.CheckoutID, control.Checkout.RootPath, control.Checkout.Incarnation)
+	})
 	if errors.Is(err, indexer.ErrCheckoutByteAnchorUnavailable) || byteEditAdmissionCanReselect(ctx, mutation, err) {
 		return ctx, nil, noop, nil
 	}
@@ -124,4 +126,16 @@ func (s *Server) prepareByteEditAuthority(ctx context.Context, req *mcp.CallTool
 // An admitted mutation or a later Prepare/handler failure must never be replayed.
 func byteEditAdmissionCanReselect(ctx context.Context, mutation *indexer.CheckoutMutation, err error) bool {
 	return mutation == nil && ctx.Err() == nil && (errors.Is(err, indexer.ErrCheckoutMutationRouteMoved) || errors.Is(err, indexer.ErrCheckoutMutationDiskMoved))
+}
+
+// beginByteEditAdmission repeats only an exact pre-admission ancestry-pin race.
+// Each complete call has released its per-call custody before returning nil.
+// Reenter the whole admission with the original context; Prepare and the edit
+// handler are outside this helper and must never be replayed.
+func beginByteEditAdmission(ctx context.Context, begin func(context.Context) (*indexer.CheckoutMutation, error)) (*indexer.CheckoutMutation, error) {
+	mutation, err := begin(ctx)
+	if mutation == nil && ctx.Err() == nil && errors.Is(err, indexer.ErrCheckoutMutationRouteMoved) && errors.Is(err, graphview.ErrViewBuilding) {
+		return begin(ctx)
+	}
+	return mutation, err
 }
