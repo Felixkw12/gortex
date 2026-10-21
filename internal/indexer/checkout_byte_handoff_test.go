@@ -156,7 +156,11 @@ func TestByteMutationHandoffDrainsAttemptAndPreservesExactTickets(t *testing.T) 
 	require.NoError(t, latest.Err)
 	require.True(t, latest.Reindexed)
 	previous := awaitCheckoutRefresh(t, old)
-	require.ErrorIs(t, previous.Err, ErrCheckoutRefreshSuperseded)
+	// The later mutation changed byte.go, while this ticket's helper.go bytes
+	// survived into the same published sample. Both exact writes are proven.
+	require.NoError(t, previous.Err)
+	require.True(t, previous.Reindexed)
+	require.Equal(t, latest.AppliedGeneration, previous.AppliedGeneration)
 	require.NotErrorIs(t, previous.Err, context.Canceled)
 	require.Equal(t, old.Ticket.Generation, previous.RequestedGeneration)
 	failed, found := f.generation(failedID)
