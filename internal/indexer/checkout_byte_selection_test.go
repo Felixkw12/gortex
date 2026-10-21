@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/graphview"
 )
 
 func TestByteHandoffReadyIdleKeepsOrdinaryAuthority(t *testing.T) {
@@ -19,16 +21,25 @@ func TestByteHandoffReadyIdleKeepsOrdinaryAuthority(t *testing.T) {
 	c.byteAnchorMu.Lock()
 	anchor := c.byteAnchor
 	c.byteAnchorMu.Unlock()
-	held := f.leases.Held()
 	m, err := l.BeginCheckoutByteHandoff(t.Context(), f.checkoutID, f.worktree, byteFixtureIncarnation(t, f))
-	require.Nil(t, m)
-	require.ErrorIs(t, err, ErrCheckoutByteAnchorUnavailable)
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	defer m.Close()
+	require.Nil(t, m.byteAnchor)
+	require.Nil(t, m.byteSnapshot)
+	require.NotNil(t, m.Receipt())
+	if c.cycleMu.TryLock() {
+		c.cycleMu.Unlock()
+		t.Fatal("ordinary grant did not retain cycle lock")
+	}
+	for _, id := range []int64{graphview.BaseCorpusGeneration, before.CommitGenerationID, before.DirtyGenerationID} {
+		require.True(t, f.leases.InUse(id), "ordinary file authority must hold full ancestry")
+	}
 	require.Equal(t, before, f.route())
-	require.Equal(t, held, f.leases.Held())
 	c.byteAnchorMu.Lock()
 	unchangedAnchor := anchor == c.byteAnchor
 	c.byteAnchorMu.Unlock()
-	require.True(t, unchangedAnchor, "an idle decline must not capture an anchor")
+	require.True(t, unchangedAnchor, "an ordinary grant must not capture a byte anchor")
 	c.byteMu.Lock()
 	attempt, demand := c.byteAttempt, c.byteDemand
 	c.byteMu.Unlock()
@@ -37,17 +48,13 @@ func TestByteHandoffReadyIdleKeepsOrdinaryAuthority(t *testing.T) {
 	c.mu.Lock()
 	admissions := c.sourceMutations
 	c.mu.Unlock()
-	require.Zero(t, admissions)
+	require.Equal(t, 1, admissions)
 
-	// The decline grants nothing: ordinary authority still checks the exact
-	// route and fresh whole checkout before a real selected-WT mutation.
+	// No graph reader was needed to grant ordinary authority; its original
+	// fresh whole-checkout/route checks still run before this real WT write.
 	path := filepath.Join(f.worktree, "helper.go")
 	primary, err := os.ReadFile(filepath.Join(f.primary, "helper.go"))
 	require.NoError(t, err)
-	m, err = l.BeginCheckoutMutation(t.Context(), f.checkoutID, f.worktree, before.RouteEpoch)
-	require.NoError(t, err)
-	defer m.Close()
-	require.Nil(t, m.byteAnchor)
 	require.NoError(t, m.Prepare(t.Context()))
 	builderWriteFile(t, f.worktree, "helper.go", "package fixture\nfunc IdleOrdinaryHelper() {}\n")
 	ticket, err := m.EnqueueRefresh(t.Context(), path)
@@ -151,34 +158,51 @@ func TestByteHandoffRetainsPendingAttemptAndDemand(t *testing.T) {
 	}
 }
 
-func TestByteHandoffIdleDecisionDoesNotCancelALaterCycle(t *testing.T) {
-	t.Setenv("GORTEX_ENRICH_MIN_NODES", "0")
+func TestAtomicReadyMutationSerializesLaterCycle(t *testing.T) {
 	f, c, l := newCheckoutMutationFixture(t)
-	before := f.route()
 	m, err := l.BeginCheckoutByteHandoff(t.Context(), f.checkoutID, f.worktree, byteFixtureIncarnation(t, f))
-	require.Nil(t, m)
-	require.ErrorIs(t, err, ErrCheckoutByteAnchorUnavailable)
-	p := newMotionContextProvider(t, c)
-	ticket := queueCheckoutSourceEdit(t, f, l, "package fixture\nfunc RacedOrdinaryHelper() {}\n")
-	done := semanticMotionCycle(t, c, t.Context(), p)
-	semanticMotionReceive(t, p.started)
-	// Work started after the advisory decline. The unchanged ordinary guard
-	// refuses the withdrawn old route; it never treats the idle observation as
-	// freshness or interrupts the later cycle.
-	m, err = l.BeginCheckoutMutation(t.Context(), f.checkoutID, f.worktree, before.RouteEpoch)
-	if m != nil {
-		m.Close()
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	defer m.Close()
+	require.Nil(t, m.byteAnchor)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	c.cyclePreflight = func(context.Context) (CheckoutCycle, bool) {
+		close(entered)
+		<-release
+		return CheckoutCycle{}, false
 	}
-	require.Nil(t, m)
-	require.ErrorIs(t, err, ErrCheckoutMutationRouteMoved)
-	select {
-	case <-p.canceled:
-		t.Fatal("ordinary fallback canceled a later cycle")
-	default:
+	done := make(chan struct{})
+	go func() { defer close(done); c.cycle(t.Context()) }()
+	defer func() { m.Close(); unblock(); semanticMotionReceive(t, done); c.cyclePreflight = nil }()
+	semanticMotionReceive(t, entered)
+	// A real cycle registered after the atomic grant. It may preflight, but
+	// cannot obtain the cycle lock or publish over this admitted mutation.
+	if c.cycleMu.TryLock() {
+		c.cycleMu.Unlock()
+		t.Fatal("later cycle found an unowned mutation lock")
 	}
-	p.unblock()
+	unblock()
+	require.NoError(t, m.Prepare(t.Context()))
+	builderWriteFile(t, f.worktree, "helper.go", "package fixture\nfunc AtomicOrdinaryHelper() {}\n")
+	ticket, err := m.EnqueueRefresh(t.Context(), filepath.Join(f.worktree, "helper.go"))
+	require.NoError(t, err)
+	require.Equal(t, store_sqlite.RoutePending, f.route().State)
+	// A new ticket may legitimately preempt the background preflight; even
+	// then it cannot publish while this mutation owns the cycle lock.
+	m.Close()
 	semanticMotionReceive(t, done)
+	c.cyclePreflight = nil
+	// A ticket admitted after the earlier cycle's watermark may need the
+	// original next cycle; do not manufacture completion on that earlier one.
+	c.cycle(t.Context())
 	result := awaitCheckoutRefresh(t, ticket)
 	require.NoError(t, result.Err)
 	require.True(t, result.Reindexed)
+	sample, err := c.sampler.Sample(t.Context())
+	require.NoError(t, err)
+	row, found := f.generation(f.route().DirtyGenerationID)
+	require.True(t, found)
+	require.Equal(t, sample.Fingerprint, row.LowerViewFingerprint)
 }

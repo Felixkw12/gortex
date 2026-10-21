@@ -11,6 +11,7 @@ import (
 
 	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/pathkey"
 )
 
@@ -172,22 +173,39 @@ func (l *CheckoutLifecycle) BeginCheckoutMutation(ctx context.Context, checkoutI
 		}
 	}()
 	StampPublicationPhase(ctx, PublicationMutationLocked)
-	m := &CheckoutMutation{coordinator: c, checkout: checkout, rootInfo: rootInfo}
-	if err := m.validateCheckout(waitCtx); err != nil {
+	m, err := l.admitCheckoutMutationLocked(waitCtx, c, checkout, rootInfo, expectedRouteEpoch, nil)
+	if err != nil {
 		return nil, err
 	}
-	route, found, err := c.catalog.GetCheckoutRoute(waitCtx, checkoutID)
+	admitted, cycleOwned = false, false // Close now owns every acquired resource.
+	return m, nil
+}
+
+// admitCheckoutMutationLocked is the ordinary mutation's unchanged checked
+// admission after cycleMu is owned. A nonnil selected route is the file-only
+// caller's exact selection and requires ancestry custody previously supplied by
+// a materialized view. The caller owns source admission and cycleMu on error;
+// a returned mutation owns both until Close.
+func (l *CheckoutLifecycle) admitCheckoutMutationLocked(ctx context.Context, c *CheckoutCoordinator, checkout store_sqlite.Checkout, rootInfo os.FileInfo, expectedRouteEpoch int64, selected *store_sqlite.CheckoutRoute) (*CheckoutMutation, error) {
+	m := &CheckoutMutation{coordinator: c, checkout: checkout, rootInfo: rootInfo}
+	if err := m.validateCheckout(ctx); err != nil {
+		return nil, err
+	}
+	route, found, err := c.catalog.GetCheckoutRoute(ctx, checkout.CheckoutID)
 	if err == nil && (!found || route.State != store_sqlite.RouteActive || route.RouteEpoch != expectedRouteEpoch || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0) {
 		err = fmt.Errorf("%w: checkout route changed; read the current exact view and retry", ErrCheckoutMutationRouteMoved)
 	}
 	if err != nil {
 		return nil, err
 	}
+	if selected != nil && route != *selected {
+		return nil, ErrCheckoutMutationRouteMoved
+	}
 	m.route = route
 	// Catalog motion is retryable regardless of whether this layout can pin
 	// HEAD without git. Refuse it before sampling; the fallback sample checks
 	// the layers again to cover a base publication racing that sample.
-	if _, err := c.checkRouteLayers(waitCtx, route); err != nil {
+	if _, err := c.checkRouteLayers(ctx, route); err != nil {
 		return nil, err
 	}
 	// When HEAD's file identities are usable, admission needs no working-copy
@@ -204,8 +222,24 @@ func (l *CheckoutLifecycle) BeginCheckoutMutation(ctx context.Context, checkoutI
 	if !m.admittedHead.Usable() {
 		// HEAD cannot be pinned without git on this layout: sample now, so
 		// the write's sample is compared with a HEAD read at admission.
-		since := freshRequestSince(waitCtx, time.Now())
-		if err := m.validateSnapshot(waitCtx, since); err != nil {
+		since := freshRequestSince(ctx, time.Now())
+		if err := m.validateSnapshot(ctx, since); err != nil {
+			return nil, err
+		}
+	}
+	// Ordinary whole-view callers already hold these pins in their materialized
+	// view. The file-only caller must hold the same ancestry/base-owner custody
+	// without opening graph readers. Pin before issuing the output receipt.
+	var releaseRoute func()
+	defer func() {
+		if releaseRoute != nil {
+			releaseRoute()
+		}
+	}()
+	if selected != nil {
+		var err error
+		releaseRoute, err = c.pinMutationRoute(ctx, route)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -213,7 +247,7 @@ func (l *CheckoutLifecycle) BeginCheckoutMutation(ctx context.Context, checkoutI
 	// DIRTY generation, the one Prepare withdraws and Refresh republishes. The
 	// receipt is opened last, under the cycle lock, so its issue order is the
 	// order edits are admitted for this checkout; Close settles it.
-	receipt, err := lifecycleOutputAuthority(l).Begin(waitCtx, OutputEntryCheckoutSourceMutation, OutputMutationTarget{
+	receipt, err := lifecycleOutputAuthority(l).Begin(ctx, OutputEntryCheckoutSourceMutation, OutputMutationTarget{
 		Kind:        OutputGenerationCheckout,
 		OwnerKey:    "checkout:" + checkout.CheckoutID,
 		CheckoutID:  checkout.CheckoutID,
@@ -224,9 +258,28 @@ func (l *CheckoutLifecycle) BeginCheckoutMutation(ctx context.Context, checkoutI
 		return nil, err
 	}
 	m.receipt = receipt
-	admitted, cycleOwned = false, false // Close now owns every acquired resource.
+	m.byteRelease = releaseRoute
+	releaseRoute = nil // Close owns route/base custody only after the receipt exists.
 	StampPublicationPhase(ctx, PublicationMutationAdmitted)
 	return m, nil
+}
+
+func (c *CheckoutCoordinator) pinMutationRoute(ctx context.Context, route store_sqlite.CheckoutRoute) (func(), error) {
+	lease, moved, err := c.baseViewMaterializer().PinCheckoutRoute(ctx, c.checkoutID, route)
+	if moved {
+		return nil, fmt.Errorf("%w: %w", ErrCheckoutMutationRouteMoved, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	var basePin *graphview.BasePin
+	for _, id := range lease.IDs() {
+		if id == graphview.BaseCorpusGeneration {
+			basePin = c.leases.AcquireBaseCorpus(c.repoPrefix)
+			break
+		}
+	}
+	return func() { lease.Release(); basePin.Release() }, nil
 }
 
 // Receipt reports this lease's output-generation receipt, nil once Close has

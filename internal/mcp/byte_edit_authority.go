@@ -119,8 +119,9 @@ func (s *Server) prepareByteEditAuthority(ctx context.Context, req *mcp.CallTool
 // byteEditAdmissionCanReselect declines only the optional pre-handler admission.
 // BeginCheckoutByteMutation has returned without a lease, so its source admission,
 // ancestry pins, demand and cycle-lock cleanup has already completed. The ordinary
-// whole-view path retains its bounded reselection/recomposition and target guards.
+// whole-view path retains its bounded route/disk reselection/recomposition and
+// target guards, including sampled ordinary admission on unsupported HEAD layouts.
 // An admitted mutation or a later Prepare/handler failure must never be replayed.
 func byteEditAdmissionCanReselect(ctx context.Context, mutation *indexer.CheckoutMutation, err error) bool {
-	return mutation == nil && ctx.Err() == nil && errors.Is(err, indexer.ErrCheckoutMutationRouteMoved)
+	return mutation == nil && ctx.Err() == nil && (errors.Is(err, indexer.ErrCheckoutMutationRouteMoved) || errors.Is(err, indexer.ErrCheckoutMutationDiskMoved))
 }

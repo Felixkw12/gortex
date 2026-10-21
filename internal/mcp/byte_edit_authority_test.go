@@ -33,16 +33,17 @@ func byteEditFixtureHeadProof(t *testing.T, f *realCheckoutMutationFixture, forc
 	return usable
 }
 
-func byteEditFixtureViewMatches(ctx context.Context, f *realCheckoutMutationFixture, headProof bool) bool {
+func byteEditFixtureViewMatches(ctx context.Context, f *realCheckoutMutationFixture) bool {
 	view := requestViewFromContext(ctx)
 	if view == nil || checkoutMutationFromContext(ctx) == nil || !pathkey.EqualPaths(view.viewRoot, f.worktree) {
 		return false
 	}
-	if headProof && view.sourceScope == "file" {
+	if view.sourceScope == "file" {
 		return view.materialized == nil && view.sourceGraphPending
 	}
 	// These MCP fixtures release the old parser immediately after starting the
-	// request. If publication wins selection, ready-idle admission is ordinary;
+	// request. Ready ordinary grants and pending byte handoffs both use checked
+	// file carriers; an unavailable optional path may still materialize a view;
 	// strict pending/attempt handoff is separately held by indexer barriers.
 	return view.sourceScope == "" && view.materialized != nil && !view.sourceGraphPending
 }
@@ -59,7 +60,7 @@ func TestPlainByteEditUsesSourceAuthorityAcrossPendingPublication(t *testing.T) 
 
 func testPlainByteEditAcrossPendingPublication(t *testing.T, forceUnavailable bool) {
 	f, blocked := newBlockedLifecycleFixture(t)
-	headProof := byteEditFixtureHeadProof(t, f, forceUnavailable)
+	byteEditFixtureHeadProof(t, f, forceUnavailable)
 	old := f.edit(t, f.worktree, map[string]any{"path": "repo/edit.go", "old_string": "func New() {}", "new_string": "func LifecycleBlocked() {}", "format": "json"})
 	require.False(t, old.IsError, viewResultText(t, old))
 	select {
@@ -78,7 +79,7 @@ func testPlainByteEditAcrossPendingPublication(t *testing.T, forceUnavailable bo
 	ctx := WithSessionCWD(WithSessionID(t.Context(), "plain-byte-handoff"), f.worktree)
 	go func() {
 		r, err := f.srv.wrapToolHandler(func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			if !byteEditFixtureViewMatches(ctx, f, headProof) {
+			if !byteEditFixtureViewMatches(ctx, f) {
 				return mcplib.NewToolResultError("wrong mutation authority for actual HEAD capability"), nil
 			}
 			close(entered)
@@ -116,7 +117,7 @@ func testPlainByteEditAcrossPendingPublication(t *testing.T, forceUnavailable bo
 	payload := decodeFileOpsResult(t, r)
 	require.Equal(t, "applied", payload["status"])
 	fresh := resultFreshness(t, r)
-	if headProof && fresh["freshness_scope"] == "file" {
+	if fresh["freshness_scope"] == "file" {
 		require.Equal(t, "pending", fresh["graph_freshness"])
 	} else {
 		require.NotEqual(t, "file", fresh["freshness_scope"], "ordinary sampled admission must not claim source-only byte authority")
@@ -217,25 +218,18 @@ func testByteEditFacadeUsesNormalizedGuardAndSelectedDisk(t *testing.T, forceUna
 	require.NoError(t, err)
 	primary, err := os.ReadFile(filepath.Join(f.primary, "edit.go"))
 	require.NoError(t, err)
-	// The ready idle facade must enter the real ordinary materialized
-	// admission, rather than manufacture a source-only freshness certificate.
+	// The ready grant owns ordinary checked mutation authority without
+	// materializing a graph reader. No later whole-view admission is needed.
 	priorHook := mutationBeforeAdmission
 	defer func() { mutationBeforeAdmission = priorHook }()
-	ordinary := false
-	mutationBeforeAdmission = func(ctx context.Context) {
-		view := requestViewFromContext(ctx)
-		require.NotNil(t, view)
-		require.NotNil(t, view.materialized)
-		require.Empty(t, view.sourceScope)
-		require.False(t, view.sourceGraphPending)
-		require.Equal(t, f.checkoutID, view.rider.CheckoutID)
-		ordinary = true
-	}
+	materialized := false
+	mutationBeforeAdmission = func(context.Context) { materialized = true }
 	r := f.facade(t, f.primary, "edit", map[string]any{"operation": "file", "target": map[string]any{"file": "repo/edit.go"}, "match": "func New() {}", "replacement": "func ByteFacade() {}", "guard": map[string]any{"base_sha": gitBlobSHA(before), "expected_occurrences": 1}, "view": map[string]any{"kind": "worktree", "path": f.worktree}, "format": "json"})
 	require.False(t, r.IsError, viewResultText(t, r))
 	fresh := resultFreshness(t, r)
-	require.True(t, ordinary, "ready idle facade must use ordinary whole-view authority")
-	require.NotEqual(t, "file", fresh["freshness_scope"])
+	require.False(t, materialized, "ready file grant must not re-enter materialized admission")
+	require.Equal(t, "file", fresh["freshness_scope"])
+	require.Equal(t, "pending", fresh["graph_freshness"])
 	require.Equal(t, f.checkoutID, fresh["checkout_id"])
 	disk, err := os.ReadFile(filepath.Join(f.worktree, "edit.go"))
 	require.NoError(t, err)
@@ -258,7 +252,7 @@ func TestRejectedByteEditResumesEarlierPendingPublication(t *testing.T) {
 
 func testRejectedByteEditResumesEarlierPendingPublication(t *testing.T, forceUnavailable bool) {
 	f, blocked := newBlockedLifecycleFixture(t)
-	headProof := byteEditFixtureHeadProof(t, f, forceUnavailable)
+	byteEditFixtureHeadProof(t, f, forceUnavailable)
 	prior := f.edit(t, f.worktree, map[string]any{"path": "repo/edit.go", "old_string": "func New() {}", "new_string": "func LifecycleBlocked() {}", "format": "json"})
 	require.False(t, prior.IsError, viewResultText(t, prior))
 	select {
@@ -273,7 +267,7 @@ func testRejectedByteEditResumesEarlierPendingPublication(t *testing.T, forceUna
 	result := make(chan *mcplib.CallToolResult, 1)
 	go func() {
 		r, err := f.srv.wrapToolHandler(func(ctx context.Context, r mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-			if !byteEditFixtureViewMatches(ctx, f, headProof) {
+			if !byteEditFixtureViewMatches(ctx, f) {
 				return mcplib.NewToolResultError("wrong rejected-edit authority for actual HEAD capability"), nil
 			}
 			return f.srv.handleEditFile(ctx, r)
@@ -316,7 +310,10 @@ func TestByteEditReselectionRefusesDeadCallerOtherErrorsAndAdmittedLease(t *test
 		{name: "canceled caller", ctx: canceled, err: indexer.ErrCheckoutMutationRouteMoved},
 		{name: "expired deadline", ctx: deadline, err: indexer.ErrCheckoutMutationRouteMoved},
 		{name: "generic stale", ctx: t.Context(), err: indexer.ErrCheckoutMutationStale},
-		{name: "disk motion", ctx: t.Context(), err: indexer.ErrCheckoutMutationDiskMoved},
+		{name: "wrapped disk motion before admission", ctx: t.Context(), err: fmt.Errorf("sample: %w", indexer.ErrCheckoutMutationDiskMoved), want: true},
+		{name: "disk motion with canceled caller", ctx: canceled, err: indexer.ErrCheckoutMutationDiskMoved},
+		{name: "disk motion with expired caller", ctx: deadline, err: indexer.ErrCheckoutMutationDiskMoved},
+		{name: "disk motion after admission", ctx: t.Context(), mutation: &indexer.CheckoutMutation{}, err: indexer.ErrCheckoutMutationDiskMoved},
 		{name: "permanent failure", ctx: t.Context(), err: errors.New("catalog read failure")},
 		{name: "cancellation", ctx: t.Context(), err: context.Canceled},
 		{name: "deadline error", ctx: t.Context(), err: context.DeadlineExceeded},
@@ -327,4 +324,67 @@ func TestByteEditReselectionRefusesDeadCallerOtherErrorsAndAdmittedLease(t *test
 			require.Equal(t, tc.want, byteEditAdmissionCanReselect(tc.ctx, tc.mutation, tc.err))
 		})
 	}
+}
+
+// Without optional HEAD evidence, admission must either recompose the unrelated
+// save or use a route a concurrent real coordinator poll already published.
+// Exact DiskMoved refusal and its cleanup are proved by the parked indexer test;
+// this public integration retains both legitimate authority branches.
+func TestGuardedReadyByteEditAfterUnrelatedSaveUsesCheckedAuthority(t *testing.T) {
+	f := newRealCheckoutMutationFixture(t)
+	byteEditFixtureHeadProof(t, f, true)
+	target := filepath.Join(f.worktree, "edit.go")
+	original, err := os.ReadFile(target)
+	require.NoError(t, err)
+	primaryBefore, err := os.ReadFile(filepath.Join(f.primary, "edit.go"))
+	require.NoError(t, err)
+	unrelated := []byte("package repo\nfunc ConcurrentBeforeAdmission() {}\n")
+	require.NoError(t, os.WriteFile(filepath.Join(f.worktree, "concurrent.go"), unrelated, 0600))
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "edit_file"
+	req.Params.Arguments = map[string]any{"path": "repo/edit.go", "old_string": "func New() {}", "new_string": "func AfterSampledMotion() {}", "base_sha": gitBlobSHA(original), "expected_occurrences": 1, "format": "json"}
+	_, eligible := f.srv.byteEditRequest(&req, requestFreshness{}, capabilityRequest{})
+	require.True(t, eligible)
+	ordinaryAdmissions := 0
+	previous := mutationBeforeAdmission
+	mutationBeforeAdmission = func(ctx context.Context) {
+		ordinaryAdmissions++
+		view := requestViewFromContext(ctx)
+		require.NotNil(t, view)
+		require.NotNil(t, view.materialized)
+		require.Empty(t, view.sourceScope)
+		require.Nil(t, checkoutMutationFromContext(ctx))
+	}
+	t.Cleanup(func() { mutationBeforeAdmission = previous })
+	ctx := WithSessionCWD(WithSessionID(t.Context(), "ready-sampled-disk-motion"), f.worktree)
+	handlerCalls := 0
+	result, err := f.srv.wrapToolHandler(func(handlerCtx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		handlerCalls++
+		require.True(t, byteEditFixtureViewMatches(handlerCtx, f))
+		view := requestViewFromContext(handlerCtx)
+		if view.sourceScope == "file" {
+			require.Zero(t, ordinaryAdmissions, "the ready grant never re-enters materialized admission")
+			require.Nil(t, view.materialized)
+			require.True(t, view.sourceGraphPending)
+		} else {
+			require.Positive(t, ordinaryAdmissions, "fallback uses original materialized admission")
+			require.NotNil(t, view.materialized)
+		}
+		return f.srv.handleEditFile(handlerCtx, request)
+	})(ctx, req)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.IsError, viewResultText(t, result))
+	require.Equal(t, 1, handlerCalls, "pre-admission reselection must never replay the handler")
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "func AfterSampledMotion() {}")
+	data, err = os.ReadFile(filepath.Join(f.worktree, "concurrent.go"))
+	require.NoError(t, err)
+	require.Equal(t, unrelated, data)
+	data, err = os.ReadFile(filepath.Join(f.primary, "edit.go"))
+	require.NoError(t, err)
+	require.Equal(t, primaryBefore, data)
+	f.awaitMutation(t, f.worktree, result)
 }

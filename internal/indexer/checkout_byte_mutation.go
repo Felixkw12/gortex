@@ -118,10 +118,10 @@ func (l *CheckoutLifecycle) BeginCheckoutByteMutation(ctx context.Context, check
 	return l.beginCheckoutByteMutation(ctx, checkoutID, root, incarnation, false)
 }
 
-// BeginCheckoutByteHandoff is the optional edit admission: a ready idle route
-// keeps ordinary whole-view mutation admission. Pending routes and actual
-// coordinator work retain byte handoff. The decision is advisory only; a cycle
-// racing an idle decline still meets all ordinary route/source/target checks.
+// BeginCheckoutByteHandoff grants ordinary checked mutation authority when a
+// ready idle route's cycle lock can be taken immediately. It keeps that lock
+// through the mutation, without a later whole-view selection/reacquisition.
+// Pending or busy checkouts retain the authenticated byte handoff.
 func (l *CheckoutLifecycle) BeginCheckoutByteHandoff(ctx context.Context, checkoutID, root, incarnation string) (*CheckoutMutation, error) {
 	return l.beginCheckoutByteMutation(ctx, checkoutID, root, incarnation, true)
 }
@@ -153,13 +153,35 @@ func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, check
 	}
 	if ordinaryWhenIdle && found && route.State == store_sqlite.RouteActive && route.CommitGenerationID > 0 && route.DirtyGenerationID > 0 {
 		c.byteMu.Lock()
-		idle := c.byteAttempt == nil && c.byteDemand == 0
+		// TryLock never waits while holding byteMu. A winning admission owns
+		// cycleMu before a new attempt can register, and keeps it until Close.
+		ready := c.byteAttempt == nil && c.byteDemand == 0 && c.cycleMu.TryLock()
 		c.byteMu.Unlock()
-		if idle {
-			if err := waitCtx.Err(); err != nil {
+		if ready {
+			cycleOwned := true
+			defer func() {
+				if cycleOwned {
+					c.cycleMu.Unlock()
+				}
+			}()
+			checkout, present, err := c.catalog.GetCheckout(waitCtx, checkoutID)
+			if err != nil {
 				return nil, err
 			}
-			return nil, ErrCheckoutByteAnchorUnavailable
+			if !present || checkout.Incarnation != incarnation || !sameMutationRoot(checkout.RootPath, root) {
+				return nil, fmt.Errorf("%w: checkout identity changed", ErrCheckoutMutationStale)
+			}
+			rootInfo, err := checkoutRootFileInfo(root)
+			if err != nil || !rootInfo.IsDir() {
+				return nil, fmt.Errorf("%w: checkout root is unavailable", ErrCheckoutMutationStale)
+			}
+			StampPublicationPhase(ctx, PublicationMutationLocked)
+			m, err := l.admitCheckoutMutationLocked(waitCtx, c, checkout, rootInfo, route.RouteEpoch, &route)
+			if err != nil {
+				return nil, err
+			}
+			admitted, cycleOwned = false, false
+			return m, nil
 		}
 	}
 	if found && route.State == store_sqlite.RouteActive && route.DirtyGenerationID > 0 {
