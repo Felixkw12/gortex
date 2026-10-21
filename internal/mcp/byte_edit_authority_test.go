@@ -170,7 +170,7 @@ func testByteEditTargetGuardsAndExcludedShapes(t *testing.T, forceUnavailable bo
 			require.Equal(t, original, disk)
 		})
 	}
-	for _, kind := range []string{"no_sha", "dry_run", "symbol", "batch", "write", "fresh", "capability"} {
+	for _, kind := range []string{"no_sha", "dry_run", "symbol", "batch", "fresh", "capability"} {
 		t.Run(kind, func(t *testing.T) {
 			req := mcplib.CallToolRequest{}
 			req.Params.Name = "edit_file"
@@ -187,8 +187,6 @@ func testByteEditTargetGuardsAndExcludedShapes(t *testing.T, forceUnavailable bo
 				req.Params.Name = "edit_symbol"
 			case "batch":
 				req.Params.Name = "batch_edit"
-			case "write":
-				req.Params.Name = "write_file"
 			case "fresh":
 				freshness.requireFresh = true
 			case "capability":

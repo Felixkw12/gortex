@@ -14,8 +14,9 @@ import (
 )
 
 // byteEditRequest is deliberately narrower than generic edit dispatch. Unknown
-// shapes retain graph admission. base_sha guards the target; the lifecycle's
-// whole-checkout sample, not this SHA, establishes checkout source authority.
+// shapes retain graph admission. Replacements require target guards; whole-file
+// writes preserve their existing optional base_sha and unconditional overwrite
+// semantics. The lifecycle sample establishes checkout source authority.
 func (s *Server) byteEditRequest(req *mcp.CallToolRequest, freshness requestFreshness, caps capabilityRequest) (*mcp.CallToolRequest, bool) {
 	if s == nil || s.lifecycle == nil || req == nil || freshness.requireFresh || freshness.hasDeadline || caps.requireComplete {
 		return nil, false
@@ -28,20 +29,31 @@ func (s *Server) byteEditRequest(req *mcp.CallToolRequest, freshness requestFres
 	lowered := *req
 	if isFacadeToolName(req.Params.Name) {
 		spec, ok := s.viewFacadeOperation(req)
-		if !ok || spec.Legacy != "edit_file" {
+		if !ok || (spec.Legacy != "edit_file" && spec.Legacy != "write_file") {
 			return nil, false
 		}
 		lowered.Params.Name = spec.Legacy
 		lowered.Params.Arguments = normalizeFacadeArguments(spec, req.GetArguments())
-	} else if req.Params.Name != "edit_file" {
+	} else if req.Params.Name != "edit_file" && req.Params.Name != "write_file" {
 		return nil, false
 	}
 	path := lowered.GetString("path", "")
+	if path == "" || len(path) > 4096 || strings.ContainsAny(path, "\x00*?[]{}\n\r") || strings.Contains(path, "::") || lowered.GetBool("dry_run", false) {
+		return nil, false
+	}
+	if lowered.Params.Name == "write_file" {
+		// The handler still owns path serialization, optional SHA/idempotency,
+		// parse and evidence checks. Whole-file bytes need no graph ranges.
+		if _, err := lowered.RequireString("content"); err != nil {
+			return nil, false
+		}
+		return &lowered, true
+	}
 	old := lowered.GetString("old_string", "")
 	next := lowered.GetString("new_string", "")
 	sha := normalizeExpectedSHA(lowered.GetString("base_sha", ""))
 	raw, err := hex.DecodeString(sha)
-	if err != nil || len(raw) != 20 || len(sha) != 40 || path == "" || len(path) > 4096 || strings.ContainsAny(path, "\x00*?[]{}\n\r") || strings.Contains(path, "::") || old == "" || old == next || lowered.GetInt("expected_occurrences", 0) <= 0 || lowered.GetBool("dry_run", false) {
+	if err != nil || len(raw) != 20 || len(sha) != 40 || old == "" || old == next || lowered.GetInt("expected_occurrences", 0) <= 0 {
 		return nil, false
 	}
 	return &lowered, true
