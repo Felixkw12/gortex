@@ -537,13 +537,7 @@ func (m *CheckoutMutation) validateSnapshot(ctx context.Context, since time.Time
 	// The edit's own sample: served before, and never queued behind, a
 	// background sample of this checkout (gitstate.WithUrgentSample).
 	ctx = gitstate.WithUrgentSample(ctx)
-	var sample gitstate.DirtySnapshot
-	var err error
-	if since.IsZero() {
-		sample, err = c.sampler.Sample(ctx)
-	} else {
-		sample, err = c.sampler.SampleSince(ctx, since)
-	}
+	sample, err := sampleMutationAdmission(ctx, c.sampler, since)
 	if err != nil {
 		return fmt.Errorf("%w: sample checkout: %w", ErrCheckoutMutationStale, err)
 	}
@@ -657,7 +651,7 @@ func (c *CheckoutCoordinator) refuseStaleAdmission(ctx context.Context, expected
 	if _, err := c.checkRouteLayers(ctx, route); err != nil {
 		return err
 	}
-	sample, err := c.sampler.Sample(ctx)
+	sample, err := sampleMutationAdmission(ctx, c.sampler, time.Time{})
 	if err != nil {
 		// A deadline that runs out inside the git call is the caller's
 		// budget ending during admission, not a stale tree: report it the way

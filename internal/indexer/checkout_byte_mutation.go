@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
@@ -202,7 +203,7 @@ func (l *CheckoutLifecycle) BeginCheckoutByteMutation(ctx context.Context, check
 	if err := m.validateCheckout(waitCtx); err != nil {
 		return nil, err
 	}
-	sample, err := c.sampler.Sample(gitstate.WithUrgentSample(waitCtx))
+	sample, err := sampleMutationAdmission(gitstate.WithUrgentSample(waitCtx), c.sampler, time.Time{})
 	if err != nil {
 		return nil, fmt.Errorf("%w: byte admission sample: %w", ErrCheckoutMutationStale, err)
 	}
