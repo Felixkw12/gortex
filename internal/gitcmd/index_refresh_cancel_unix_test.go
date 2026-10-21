@@ -79,11 +79,10 @@ func TestIndexRefreshCancellationLetsGitRemoveItsOwnLock(t *testing.T) {
 		done <- err
 	}()
 	pid, joined := 0, false
-	t.Cleanup(func() {
+	refreshEntered := func() bool {
 		// The lock is created before Git installs its tempfile signal handler.
 		// Actual refresh entry follows that registration; lock existence alone
 		// could pause Git in the unprotected open-to-registration window.
-		refreshEntered := false
 		trace, _ := os.ReadFile(tracePath)
 		for _, line := range bytes.Split(trace, []byte{'\n'}) {
 			var event struct {
@@ -92,11 +91,13 @@ func TestIndexRefreshCancellationLetsGitRemoveItsOwnLock(t *testing.T) {
 				Label    string `json:"label"`
 			}
 			if json.Unmarshal(line, &event) == nil && event.Event == "region_enter" && event.Category == "index" && event.Label == "refresh" {
-				refreshEntered = true
-				break
+				return true
 			}
 		}
-		if pid > 0 && refreshEntered {
+		return false
+	}
+	t.Cleanup(func() {
+		if pid > 0 && refreshEntered() {
 			_ = syscall.Kill(pid, syscall.SIGCONT)
 		}
 		cancel()
@@ -122,7 +123,7 @@ func TestIndexRefreshCancellationLetsGitRemoveItsOwnLock(t *testing.T) {
 		if readErr == nil {
 			pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
 		}
-		if pid > 0 {
+		if pid > 0 && refreshEntered() {
 			if _, err := os.Lstat(lock); err == nil {
 				if err := syscall.Kill(pid, 0); err != nil {
 					t.Fatalf("lock without live owned Git: %v", err)
@@ -140,13 +141,13 @@ func TestIndexRefreshCancellationLetsGitRemoveItsOwnLock(t *testing.T) {
 		select {
 		case err := <-done:
 			joined = true
-			t.Fatalf("refresh ended before lock witness: %v", err)
+			t.Fatalf("refresh ended before protected refresh-entry and lock witness: %v", err)
 		default:
 		}
 		time.Sleep(500 * time.Microsecond)
 	}
 	if !qualified {
-		t.Fatal("no positively witnessed live Git refresh with new lock")
+		t.Fatal("no positively witnessed live Git refresh entry with new lock")
 	}
 	started := time.Now()
 	cancel()
