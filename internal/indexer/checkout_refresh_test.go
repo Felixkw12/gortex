@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
@@ -229,7 +230,7 @@ func TestCheckoutRefreshOldCycleCannotFailNewAdmission(t *testing.T) {
 	}
 }
 
-func TestCheckoutRefreshSupersededContentAndSnapshotNeverClaimFresh(t *testing.T) {
+func TestCheckoutRefreshBindsCommittedContentAcrossOtherEdits(t *testing.T) {
 	for _, differentFile := range []bool{false, true} {
 		t.Run(map[bool]string{false: "target_changed", true: "unrelated_snapshot_changed"}[differentFile], func(t *testing.T) {
 			f, c, l := newCheckoutMutationFixture(t)
@@ -241,7 +242,11 @@ func TestCheckoutRefreshSupersededContentAndSnapshotNeverClaimFresh(t *testing.T
 			builderWriteFile(t, f.worktree, path, "package fixture\nfunc DifferentHelper() {}\n")
 			c.cycle(t.Context())
 			result := awaitCheckoutRefresh(t, ticket)
-			if !errors.Is(result.Err, ErrCheckoutRefreshSuperseded) || result.Reindexed || result.AppliedGeneration != 0 {
+			if differentFile {
+				if result.Err != nil || !result.Reindexed || result.AppliedGeneration != uint64(f.route().DirtyGenerationID) {
+					t.Fatalf("same committed bytes were not published: %+v", result)
+				}
+			} else if !errors.Is(result.Err, ErrCheckoutRefreshSuperseded) || result.Reindexed || result.AppliedGeneration != 0 {
 				t.Fatalf("false exact success: %+v", result)
 			}
 			recovery, err := l.RequestCheckoutRefresh(t.Context(), f.checkoutID, f.worktree)
@@ -280,17 +285,13 @@ func TestCheckoutRefreshNeverAdoptsAnExternalBranchSwitch(t *testing.T) {
 				builderGit(t, f.worktree, "switch", "-c", "external-same-commit")
 			}
 			ticket, err := m.EnqueueRefresh(t.Context(), filepath.Join(f.worktree, "helper.go"))
-			if stage == "before_enqueue" {
-				if !errors.Is(err, ErrCheckoutRefreshSuperseded) || ticket != nil {
-					t.Fatalf("post-commit branch was adopted: ticket=%+v err=%v", ticket, err)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			m.Close()
-			builderGit(t, f.worktree, "switch", "-c", "external-same-commit")
+			if stage == "after_enqueue" {
+				builderGit(t, f.worktree, "switch", "-c", "external-same-commit")
+			}
 			c.cycle(t.Context())
 			if result := awaitCheckoutRefresh(t, ticket); !errors.Is(result.Err, ErrCheckoutRefreshSuperseded) || result.Reindexed {
 				t.Fatalf("post-admission branch was adopted: %+v", result)
@@ -511,4 +512,237 @@ func BenchmarkCheckoutRefreshAdmission(b *testing.B) {
 		}
 		c.finishCheckoutRefresh(request, 0, ErrCheckoutRefreshSuperseded)
 	}
+}
+
+// A postcommit receipt must own its reserved ticket even when the whole-tree
+// sampling lane cannot currently make progress. The coordinator takes that
+// sample after the lease is released, and must then publish these same bytes.
+func TestCheckoutRefreshCommittedAdmissionDoesNotSample(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("batch=%v", batch), func(t *testing.T) {
+			f, c, l := newCheckoutMutationFixture(t)
+			m, err := l.BeginCheckoutMutation(t.Context(), f.checkoutID, f.worktree, f.route().RouteEpoch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			if err = m.Prepare(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			builderWriteFile(t, f.worktree, "helper.go", "package fixture\nfunc OwnedCommittedHelper() {}\n")
+			path := filepath.Join(f.worktree, "helper.go")
+			original := c.refreshSample
+			c.refreshSample = func(context.Context, time.Time) (gitstate.DirtySnapshot, time.Time, error) {
+				t.Error("postcommit admission invoked whole-checkout sampler")
+				return gitstate.DirtySnapshot{}, time.Time{}, context.DeadlineExceeded
+			}
+			record := &PublicationPhaseRecord{}
+			ctx, cancel := context.WithCancel(WithPublicationRecord(t.Context(), record))
+			cancel()
+			var ticket *CheckoutRefreshTicket
+			if batch {
+				ticket, err = m.EnqueueBatchRefresh(ctx, []CheckoutBatchFile{{Path: path, SHA256: checkoutBatchHash(t, path)}})
+			} else {
+				ticket, err = m.EnqueueRefresh(ctx, path)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.refreshSample = original
+			assertCheckoutRefreshPending(t, ticket)
+			c.refreshMu.Lock()
+			request := c.refreshWaiters[ticket.Ticket.Generation]
+			reserved := c.refreshReserved
+			c.refreshMu.Unlock()
+			if request == nil || request.record != record || !request.bindAtCompletion || request.headUnbound || reserved != 0 {
+				t.Fatalf("ticket did not take publication ownership: request=%+v reserved=%d", request, reserved)
+			}
+			m.Close()
+			c.cycle(t.Context())
+			result := awaitCheckoutRefresh(t, ticket)
+			if result.Err != nil || !result.Reindexed {
+				t.Fatalf("committed bytes did not publish: %+v", result)
+			}
+			if nodes := f.store.AtGeneration(int64(result.AppliedGeneration)).FindNodesByName("OwnedCommittedHelper"); len(nodes) != 1 {
+				t.Fatalf("ticket generation lacks committed symbol: %+v", nodes)
+			}
+		})
+	}
+}
+
+func TestCheckoutRefreshCompletionRejectsReplacedIdentity(t *testing.T) {
+	for _, replacement := range []string{"incarnation", "root"} {
+		t.Run(replacement, func(t *testing.T) {
+			f, c, l := newCheckoutMutationFixture(t)
+			ticket := queueCheckoutSourceEdit(t, f, l, "package fixture\nfunc IdentityBoundHelper() {}\n")
+			through := c.checkoutRefreshHighWater()
+			out := c.reconcile(t.Context())
+			if out.Err != nil || out.DirtyGenerationID == 0 {
+				t.Fatalf("build: %+v", out)
+			}
+			published, started, err := c.refreshSampleSince(t.Context(), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.refreshSample = func(context.Context, time.Time) (gitstate.DirtySnapshot, time.Time, error) {
+				return published, started, nil
+			}
+
+			if replacement == "incarnation" {
+				row, found, err := f.catalog.GetCheckout(t.Context(), f.checkoutID)
+				if err != nil || !found {
+					t.Fatalf("checkout: found=%v err=%v", found, err)
+				}
+				row.Incarnation += "-replacement"
+				if err := f.catalog.UpsertCheckout(t.Context(), row); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				original := f.worktree + "-original"
+				if err := os.Rename(f.worktree, original); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(f.worktree); _ = os.Rename(original, f.worktree) })
+				if err := os.Mkdir(f.worktree, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c.completeCheckoutRefreshTickets(t.Context(), through, out)
+			result := awaitCheckoutRefresh(t, ticket)
+			if !errors.Is(result.Err, ErrCheckoutRefreshSuperseded) || result.Reindexed {
+				t.Fatalf("replacement inherited committed publication: %+v", result)
+			}
+		})
+	}
+}
+
+func TestCheckoutRefreshCannotCertifyPublishedOtherBytesAfterRestore(t *testing.T) {
+	for _, mode := range []string{"source", "batch_present", "batch_absent"} {
+		t.Run(mode, func(t *testing.T) {
+			f, c, l := newCheckoutMutationFixture(t)
+			m, err := l.BeginCheckoutMutation(t.Context(), f.checkoutID, f.worktree, f.route().RouteEpoch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			if err := m.Prepare(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			wanted := "package fixture\nfunc WantedHelper() {}\n"
+			builderWriteFile(t, f.worktree, "helper.go", wanted)
+			path := filepath.Join(f.worktree, "helper.go")
+			var ticket *CheckoutRefreshTicket
+			if mode == "batch_absent" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				ticket, err = m.EnqueueBatchRefresh(t.Context(), []CheckoutBatchFile{{Path: path, Absent: true}})
+			} else if mode == "batch_present" {
+				ticket, err = m.EnqueueBatchRefresh(t.Context(), []CheckoutBatchFile{{Path: path, SHA256: checkoutBatchHash(t, path)}})
+			} else {
+				ticket, err = m.EnqueueRefresh(t.Context(), path)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Close()
+			builderWriteFile(t, f.worktree, "helper.go", "package fixture\nfunc OtherHelper() {}\n")
+			through := c.checkoutRefreshHighWater()
+			out := c.reconcile(t.Context())
+			if out.Err != nil || out.DirtyGenerationID == 0 {
+				t.Fatalf("build other bytes: %+v", out)
+			}
+			sample, started, err := c.refreshSampleSince(t.Context(), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "batch_absent" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				builderWriteFile(t, f.worktree, "helper.go", wanted)
+			}
+			c.refreshSample = func(context.Context, time.Time) (gitstate.DirtySnapshot, time.Time, error) {
+				return sample, started, nil
+			}
+			c.completeCheckoutRefreshTickets(t.Context(), through, out)
+			result := awaitCheckoutRefresh(t, ticket)
+			if !errors.Is(result.Err, ErrCheckoutRefreshSuperseded) || result.Reindexed || result.AppliedGeneration != 0 {
+				t.Fatalf("restored bytes certified another publication: %+v", result)
+			}
+		})
+	}
+}
+
+func TestCheckoutRefreshPublicationProofUsesSampleHEADForCleanPaths(t *testing.T) {
+	f, c, _ := newCheckoutMutationFixture(t)
+	path := filepath.Join(f.worktree, "helper.go")
+	// Restore this path to HEAD so it is omitted from the dirty manifest.
+	builderGit(t, f.worktree, "restore", "--source=HEAD", "--worktree", "--", "helper.go")
+	sample, _, err := c.refreshSampleSince(t.Context(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range sample.Contents {
+		if content.Path == "helper.go" {
+			t.Fatalf("clean HEAD path unexpectedly has manifest entry: %+v", content)
+		}
+	}
+
+	var blob string
+	_, raw, err := checkoutRefreshFileHash(t.Context(), f.worktree, mustCheckoutRootInfo(t, f.worktree), path, &blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkoutSampleContainsFile(t.Context(), f.worktree, sample, CheckoutBatchFile{Path: path, SHA256: raw}, blob); err != nil {
+		t.Fatalf("HEAD bytes: %v", err)
+	}
+	if err := checkoutSampleContainsFile(t.Context(), f.worktree, sample, CheckoutBatchFile{Path: path, SHA256: "different"}, blob); !errors.Is(err, ErrCheckoutRefreshSuperseded) {
+		t.Fatalf("other bytes inherited HEAD: %v", err)
+	}
+	if err := checkoutSampleContainsFile(t.Context(), f.worktree, sample, CheckoutBatchFile{Path: path, Absent: true}, ""); !errors.Is(err, ErrCheckoutRefreshSuperseded) {
+		t.Fatalf("present HEAD certified absent: %v", err)
+	}
+	if err := checkoutSampleContainsFile(t.Context(), f.worktree, sample, CheckoutBatchFile{Path: filepath.Join(f.worktree, "never-existed.go"), Absent: true}, ""); err != nil {
+		t.Fatalf("HEAD absence: %v", err)
+	}
+	alias := filepath.Join(t.TempDir(), "checkout-alias")
+	if err := os.Symlink(f.worktree, alias); err != nil {
+		t.Fatal(err)
+	}
+	aliasPath := filepath.Join(alias, "helper.go")
+	if err := checkoutSampleContainsFile(t.Context(), f.worktree, sample, CheckoutBatchFile{Path: aliasPath, SHA256: raw}, blob); err != nil {
+		t.Fatalf("alias HEAD bytes: %v", err)
+	}
+	if err := checkoutSampleContainsFile(t.Context(), f.worktree, sample, CheckoutBatchFile{Path: aliasPath, Absent: true}, ""); !errors.Is(err, ErrCheckoutRefreshSuperseded) {
+		t.Fatalf("alias certified present HEAD path absent: %v", err)
+	}
+	if err := checkoutSampleContainsFile(t.Context(), f.worktree, sample, CheckoutBatchFile{Path: filepath.Join(t.TempDir(), "outside.go"), Absent: true}, ""); !errors.Is(err, ErrCheckoutRefreshSuperseded) {
+		t.Fatalf("outside path certified absent: %v", err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	deleted, _, err := c.refreshSampleSince(t.Context(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkoutSampleContainsFile(t.Context(), f.worktree, deleted, CheckoutBatchFile{Path: path, Absent: true}, ""); err != nil {
+		t.Fatalf("sample deletion: %v", err)
+	}
+	if err := checkoutSampleContainsFile(t.Context(), f.worktree, deleted, CheckoutBatchFile{Path: path, SHA256: raw}, blob); !errors.Is(err, ErrCheckoutRefreshSuperseded) {
+		t.Fatalf("deleted sample certified present: %v", err)
+	}
+
+}
+
+func mustCheckoutRootInfo(t *testing.T, root string) os.FileInfo {
+	t.Helper()
+	info, err := checkoutRootFileInfo(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
 }

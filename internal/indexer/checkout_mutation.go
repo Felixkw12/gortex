@@ -360,8 +360,9 @@ func (m *CheckoutMutation) Prepare(ctx context.Context) error {
 	// The lease's one working-copy sample before the write, taken fresh: a
 	// tree that was stale at admission, or an external writer between
 	// admission and the disk commit (while the caller computed its edit from
-	// the routed view), is refused before any byte is written. The ticket's
-	// sample is the serving cycle's first after the write (EnqueueRefresh).
+	// the routed view), is refused before any byte is written. The ticket
+	// transfers the lease's HEAD and committed bytes to the serving cycle,
+	// which takes the first sample after the write.
 	// Any sample begun from here on will do, so one another caller starts
 	// while this one waits for the sampling lease is shared, not repeated.
 	if err := m.validateSnapshot(ctx, time.Now()); err != nil {

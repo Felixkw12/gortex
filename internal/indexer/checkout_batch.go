@@ -42,7 +42,7 @@ func validateCheckoutBatchFiles(ctx context.Context, root string, rootInfo os.Fi
 	return nil
 }
 
-// EnqueueBatchRefresh captures one snapshot for the complete transaction.
+// EnqueueBatchRefresh transfers the complete transaction to an owned ticket.
 func (m *CheckoutMutation) EnqueueBatchRefresh(ctx context.Context, files []CheckoutBatchFile) (*CheckoutRefreshTicket, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -65,16 +65,8 @@ func (m *CheckoutMutation) EnqueueBatchRefresh(ctx context.Context, files []Chec
 	if err := validateCheckoutBatchFiles(ctx, m.checkout.RootPath, m.rootInfo, files); err != nil {
 		return nil, err
 	}
-	request, err := m.coordinator.captureCheckoutRefresh(gitstate.WithUrgentSample(ctx), m.checkout, m.rootInfo, "")
-	if err != nil {
-		return nil, err
-	}
-	if request.headRef != m.headRef || request.headCommit != m.headCommit || request.headTree != m.headTree {
-		return nil, ErrCheckoutRefreshSuperseded
-	}
-	if err := validateCheckoutBatchFiles(ctx, m.checkout.RootPath, m.rootInfo, files); err != nil {
-		return nil, err
-	}
+	request := m.committedRefreshRequest(ctx, m.checkout.RootPath)
+	StampPublicationPhase(ctx, PublicationTicketCaptured)
 	if err := m.receiptStillCurrent(); err != nil {
 		return nil, err
 	}

@@ -16,6 +16,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/zzet/gortex/internal/gitcmd"
 	"github.com/zzet/gortex/internal/gitstate"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/pathkey"
@@ -117,27 +118,41 @@ func (m *CheckoutMutation) EnqueueRefresh(ctx context.Context, path string) (*Ch
 	if err := m.validateCheckout(ctx); err != nil {
 		return nil, err
 	}
-	// The capture sample binds the exact post-commit snapshot (an unrelated
-	// edit or a branch switch after it supersedes the ticket). It is also the
-	// serving cycle's decision sample: it began after the disk commit, which
-	// is all that cycle needs of it (freshAfter, cycleSample), so the edit
-	// pays for one working-copy sample between its write and its build.
-	// The capture sample is on the edit's path to its ticket: urgent, like
-	// the lease's pre-write sample.
-	request, err := m.coordinator.captureCheckoutRefresh(gitstate.WithUrgentSample(ctx), m.checkout, m.rootInfo, path)
+	// The prepared lease already pins checkout identity and HEAD. Bind only
+	// the committed file here; sampling the entire working copy belongs to
+	// the coordinator after this reserved ticket owns publication. A slow
+	// sampler must never strand a committed write before ticket admission.
+	canonical, hash, err := checkoutRefreshFileHash(ctx, m.checkout.RootPath, m.rootInfo, path)
 	if err != nil {
 		return nil, err
 	}
+	request := m.committedRefreshRequest(ctx, canonical)
+	request.contentHash, request.ticket.ContentHash = hash, hash
 	StampPublicationPhase(ctx, PublicationTicketCaptured)
-	if request.headRef != m.headRef || request.headCommit != m.headCommit || request.headTree != m.headTree {
-		return nil, ErrCheckoutRefreshSuperseded
-	}
+
 	ticket, err := m.coordinator.enqueueCheckoutRefresh(request, true)
 	m.refreshReserved = false
 	if err == nil {
 		m.refreshQueued = true
 	}
 	return ticket, err
+}
+
+// committedRefreshRequest transfers the prepared lease's authority to a
+// completion-bound ticket. The coordinator must publish a sample begun after
+// admission, with this HEAD and these bytes, before completing it successfully.
+func (m *CheckoutMutation) committedRefreshRequest(ctx context.Context, path string) *checkoutRefreshRequest {
+	done := make(chan MutationResult, 1)
+	return &checkoutRefreshRequest{
+		checkout: m.checkout, rootInfo: m.rootInfo,
+		headRef: m.headRef, headCommit: m.headCommit, headTree: m.headTree,
+		bindAtCompletion: true, record: publicationRecordFrom(ctx), done: done,
+		ticket: &CheckoutRefreshTicket{
+			CheckoutID: m.checkout.CheckoutID, Incarnation: m.checkout.Incarnation,
+			Root: m.checkout.RootPath, RepoPrefix: m.coordinator.repoPrefix,
+			Ticket: &MutationTicket{Path: path, Done: done},
+		},
+	}
 }
 
 // RequestCheckoutRefresh explicitly retries an automatic checkout whose route
@@ -656,7 +671,8 @@ func (c *CheckoutCoordinator) completeCheckoutRefreshTickets(ctx context.Context
 	}
 	// A coalesced cycle hashes each requested file at most once, even when many
 	// callers are waiting for the same content.
-	hashes := make(map[string]string)
+	type fileHashes struct{ raw, blob string }
+	hashes := make(map[string]fileHashes)
 	for _, request := range requests {
 		if current.Incarnation != request.checkout.Incarnation || !os.SameFile(request.rootInfo, rootInfo) {
 			c.finishCheckoutRefresh(request, 0, ErrCheckoutRefreshSuperseded)
@@ -666,12 +682,9 @@ func (c *CheckoutCoordinator) completeCheckoutRefreshTickets(ctx context.Context
 			c.finishCheckoutRefresh(request, 0, ErrCheckoutRefreshSuperseded)
 			continue
 		}
-		// The graph's persisted publication fingerprint, not a later disk hash
-		// alone, must identify the state admitted by this ticket. Until the
-		// builder exposes per-file publication receipts, even an unrelated
-		// intervening edit explicitly supersedes this exact-snapshot promise.
-		// A ticket bound at completion promised the first state a sample
-		// begun after its admission shows, which is this one.
+		// Snapshot-bound recovery requires its entire captured fingerprint.
+		// Completion-bound edits instead prove their committed paths against
+		// this publication sample below; unrelated edits may coalesce.
 		if !request.bindAtCompletion && request.fingerprint != dirty.LowerViewFingerprint {
 			c.finishCheckoutRefresh(request, 0, ErrCheckoutRefreshSuperseded)
 			continue
@@ -680,15 +693,19 @@ func (c *CheckoutCoordinator) completeCheckoutRefreshTickets(ctx context.Context
 			path := request.ticket.Ticket.Path
 			hash, ok := hashes[path]
 			if !ok {
-				_, hash, err = checkoutRefreshFileHash(ctx, current.RootPath, rootInfo, path)
+				_, hash.raw, err = checkoutRefreshFileHash(ctx, current.RootPath, rootInfo, path, &hash.blob)
 				if err != nil {
 					c.finishCheckoutRefresh(request, 0, fmt.Errorf("%w: %v", ErrCheckoutRefreshSuperseded, err))
 					continue
 				}
 				hashes[path] = hash
 			}
-			if hash != request.contentHash {
+			if hash.raw != request.contentHash {
 				c.finishCheckoutRefresh(request, 0, ErrCheckoutRefreshSuperseded)
+				continue
+			}
+			if err := checkoutSampleContainsFile(ctx, current.RootPath, sample, CheckoutBatchFile{Path: path, SHA256: request.contentHash}, hash.blob); err != nil {
+				c.finishCheckoutRefresh(request, 0, err)
 				continue
 			}
 		}
@@ -696,6 +713,25 @@ func (c *CheckoutCoordinator) completeCheckoutRefreshTickets(ctx context.Context
 			c.finishCheckoutRefresh(request, 0, err)
 			continue
 		}
+		var batchErr error
+		for _, file := range request.batchFiles {
+			var blob string
+			if !file.Absent {
+				_, raw, err := checkoutRefreshFileHash(ctx, current.RootPath, rootInfo, file.Path, &blob)
+				if err != nil || raw != file.SHA256 {
+					batchErr = ErrCheckoutRefreshSuperseded
+					break
+				}
+			}
+			if batchErr = checkoutSampleContainsFile(ctx, current.RootPath, sample, file, blob); batchErr != nil {
+				break
+			}
+		}
+		if batchErr != nil {
+			c.finishCheckoutRefresh(request, 0, batchErr)
+			continue
+		}
+
 		if request.record != nil && request.ticket.Ticket.Generation > through {
 			// Association follows verification, not admission. Keep the real
 			// cycle timestamps even when publication preceded ticket enqueue;
@@ -771,10 +807,72 @@ func (c *CheckoutCoordinator) closeCheckoutRefreshTickets() {
 	}
 }
 
+// checkoutSampleContainsFile proves the publication sample itself contains the
+// committed bytes (or absence). A later disk restoration cannot certify an
+// older generation built from different bytes. Unreported paths equal the
+// sample's immutable HEAD tree, so only that exact tree supplies the fallback.
+func checkoutSampleContainsFile(ctx context.Context, root string, sample gitstate.DirtySnapshot, file CheckoutBatchFile, blob string) error {
+	root = pathkey.CanonicalExistingRoot(root)
+	path := pathkey.CanonicalPath(file.Path)
+	if !filepath.IsAbs(path) || !pathkey.HasPathPrefix(path, root) || pathkey.EqualPaths(path, root) {
+		return ErrCheckoutRefreshSuperseded
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return ErrCheckoutRefreshSuperseded
+	}
+	rel = filepath.ToSlash(rel)
+	for _, content := range sample.Contents {
+		if content.Path != rel {
+			continue
+		}
+		if file.Absent && content.State == gitstate.DirtyContentAbsent {
+			return nil
+		}
+		if !file.Absent && content.State == gitstate.DirtyContentPresent && content.Mode != "120000" && content.SHA256 == blob {
+			return nil
+		}
+		return ErrCheckoutRefreshSuperseded
+	}
+	if sample.HeadTree == "" {
+		if file.Absent {
+			return nil
+		}
+		return ErrCheckoutRefreshSuperseded
+	}
+	entry, err := gitcmd.RunNoLazy(ctx, root, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", sample.HeadTree, "--", rel)
+	if err != nil {
+		return err
+	}
+	if len(entry) == 0 {
+		if file.Absent {
+			return nil
+		}
+		return ErrCheckoutRefreshSuperseded
+	}
+	if file.Absent {
+		return ErrCheckoutRefreshSuperseded
+	}
+	metadata, _, ok := strings.Cut(string(entry), "\t")
+	fields := strings.Fields(metadata)
+	if !ok || len(fields) != 3 || fields[1] != "blob" || fields[0] == "120000" {
+		return ErrCheckoutRefreshSuperseded
+	}
+	data, err := gitcmd.RunNoLazy(ctx, root, "cat-file", "blob", fields[2])
+	if err != nil {
+		return err
+	}
+	hash := sha256.Sum256(data)
+	if hex.EncodeToString(hash[:]) != file.SHA256 {
+		return ErrCheckoutRefreshSuperseded
+	}
+	return nil
+}
+
 // checkoutRefreshFileHash confines ticket content reads to the captured physical
 // checkout, including aliases and case-normalized paths. os.Root keeps a later
 // symlink swap from escaping the selected working copy.
-func checkoutRefreshFileHash(ctx context.Context, root string, rootInfo os.FileInfo, path string) (string, string, error) {
+func checkoutRefreshFileHash(ctx context.Context, root string, rootInfo os.FileInfo, path string, blobHash ...*string) (string, string, error) {
 	root = pathkey.CanonicalExistingRoot(root)
 	path = pathkey.CanonicalPath(path)
 	if !filepath.IsAbs(path) || !pathkey.HasPathPrefix(path, root) || pathkey.EqualPaths(path, root) {
@@ -826,6 +924,8 @@ func checkoutRefreshFileHash(ctx context.Context, root string, rootInfo os.FileI
 		return "", "", fmt.Errorf("checkout refresh target is not a regular file: %q", path)
 	}
 	hash := sha256.New()
+	blob := sha256.New()
+	_, _ = fmt.Fprintf(blob, "blob %d\x00", before.Size())
 	buffer := make([]byte, 32*1024)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -834,6 +934,7 @@ func checkoutRefreshFileHash(ctx context.Context, root string, rootInfo os.FileI
 		n, readErr := file.Read(buffer)
 		if n > 0 {
 			_, _ = hash.Write(buffer[:n])
+			_, _ = blob.Write(buffer[:n])
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
@@ -848,6 +949,9 @@ func checkoutRefreshFileHash(ctx context.Context, root string, rootInfo os.FileI
 	}
 	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		return "", "", ErrCheckoutRefreshSuperseded
+	}
+	if len(blobHash) > 0 && blobHash[0] != nil {
+		*blobHash[0] = hex.EncodeToString(blob.Sum(nil))
 	}
 	return path, hex.EncodeToString(hash.Sum(nil)), nil
 }
