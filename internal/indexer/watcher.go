@@ -3239,13 +3239,33 @@ func (w *Watcher) isExcluded(path string) bool {
 	if root == "" {
 		return m.MatchRel(filepath.Base(path))
 	}
-	// The watcher shares the indexer's per-folder matcher: one read and one
-	// cache per ignore file, and the same content-source condition.
-	perFolder := w.indexer.perFolderIgnores(root)
+	// The watcher shares the registered indexer's per-folder matcher: one
+	// read and one cache per ignore file, and the same content-source
+	// condition.
+	perFolder := w.perFolderIgnores()
 	if err == nil && info.IsDir() {
 		return shouldPruneDir(path, root, m, perFolder, true)
 	}
 	return shouldExcludeRules(path, root, false, m, perFolder)
+}
+
+// perFolderIgnores returns the per-folder ignore matcher of the registered
+// Indexer. Every Indexer caches its own ignore rules and a MultiWatcher
+// outlives IndexRepo replacement, so the watcher checks and forgets the cache
+// the current Indexer's walks read, its folder rescans among them: forgetting
+// the retired construction-time Indexer's cache would leave them on stale
+// rules. A repository no longer registered falls back to the
+// construction-time Indexer. Nil means per-folder rules do not apply.
+func (w *Watcher) perFolderIgnores() *excludes.Hierarchical {
+	idx := w.currentMutationIndexer()
+	if idx == nil {
+		idx = w.indexer
+	}
+	root := idx.rootPath
+	if root == "" {
+		root = w.indexer.rootPath
+	}
+	return idx.perFolderIgnores(root)
 }
 
 // currentExcludeMatcher refreshes only when ConfigManager's immutable merged
@@ -3281,7 +3301,7 @@ func (w *Watcher) currentExcludeMatcher() *excludes.Matcher {
 // into its place gets its own rules and short-lived build folders do not
 // pile up.
 func (w *Watcher) forgetDirIgnores(path string, types []fswatcher.EventType) {
-	perFolder := w.indexer.perFolderIgnores(w.indexer.rootPath)
+	perFolder := w.perFolderIgnores()
 	if perFolder == nil {
 		return
 	}
