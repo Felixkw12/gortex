@@ -2631,7 +2631,7 @@ func (mi *MultiIndexer) RefreshRepoConfigs() int {
 		idx := mi.indexers[prefix]
 		mi.mu.RUnlock()
 		if idx != nil {
-			idx.SetExcludePatterns(cfg.Index.Exclude)
+			idx.SetIgnorePatterns(cfg.Index.Exclude, cfg.Index.Include)
 		}
 	}
 	return len(roots)
