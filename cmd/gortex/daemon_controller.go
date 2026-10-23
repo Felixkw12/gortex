@@ -890,13 +890,21 @@ func (c *realController) Probe(ctx context.Context) (daemon.ProbeResponse, error
 			return
 		}
 		seen[path] = true
-		resp.TrackedRepos = append(resp.TrackedRepos, daemon.ProbeRepo{
+		repo := daemon.ProbeRepo{
 			Path:      path,
 			Prefix:    config.ResolvePrefix(e),
 			Name:      e.Name,
 			Workspace: e.Workspace,
 			Project:   e.Project,
-		})
+		}
+		// The load state is a lock-free snapshot, so it keeps this call's
+		// no-mutex, no-store contract; it is never read from the registry,
+		// whose lock topology mutations hold.
+		if rec, ok := c.multiIndexer.RepoLoadFor(path); ok {
+			repo.State = publicRepoState(rec.State)
+			repo.StateReason = rec.Reason
+		}
+		resp.TrackedRepos = append(resp.TrackedRepos, repo)
 	}
 	for _, e := range gc.Repos {
 		add(e)

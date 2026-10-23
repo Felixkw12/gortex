@@ -410,6 +410,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		return ready, phase
 	}
 	disp := newMCPDispatcher(state.mcpServer, state.multiIndexer, logger)
+	installRepoLoadTracking(state, disp)
 	// The local executor + the dispatcher's SetRouter are handed to the
 	// controller so ControlProxy can build/publish/tear-down the router
 	// live (gortex proxy on/off/add/remove) without a daemon restart.
@@ -617,11 +618,11 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 
 	// Warmup runs in the background: re-index tracked repos, extract
 	// contracts, attach file watchers. The daemon is already reachable
-	// on the socket at this point, so clients can connect and start
-	// issuing queries while this work continues. Queries against
-	// not-yet-re-indexed repos are served from the persisted store — they
-	// just won't reflect files that changed since the daemon last shut
-	// down until warmup gets to that repo.
+	// on the socket at this point, so clients can connect while this work
+	// continues. A repository is served once warmup registers it; until
+	// then a session whose cwd is in it gets repo_loading (retryable, with
+	// progress) for graph calls, and its tools start working in place when
+	// the repository registers — see installRepoLoadTracking.
 	go func() {
 		runtimeactivity.Begin("warmup")
 		defer func() {
@@ -631,6 +632,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 
 		start := time.Now()
 		logger.Info("daemon: warmup starting")
+		announceConfiguredRepos(state)
 		// Bring the checkout catalog in line with the configured repos
 		// before anything re-indexes them. It is the migration path for an
 		// installation that predates the catalog and the restart path for

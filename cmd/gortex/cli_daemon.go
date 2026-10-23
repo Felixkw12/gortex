@@ -117,7 +117,13 @@ func extractToolResult(resp []byte) (json.RawMessage, error) {
 			Code    int    `json:"code"`
 			Message string `json:"message"`
 			Data    struct {
-				ErrorCode string `json:"error_code"`
+				ErrorCode  string `json:"error_code"`
+				Repo       string `json:"repo"`
+				RepoPath   string `json:"repo_path"`
+				Phase      string `json:"phase"`
+				Percent    int    `json:"percent"`
+				Reason     string `json:"reason"`
+				Suggestion string `json:"suggestion"`
 			} `json:"data"`
 		} `json:"error"`
 	}
@@ -125,8 +131,19 @@ func extractToolResult(resp []byte) (json.RawMessage, error) {
 		return nil, fmt.Errorf("decode daemon response: %w", err)
 	}
 	if rpc.Error != nil {
-		if rpc.Error.Data.ErrorCode == "repo_not_tracked" {
+		data := rpc.Error.Data
+		switch data.ErrorCode {
+		case "repo_not_tracked":
 			return nil, ErrRepoNotTracked
+		case string(gortexmcp.ErrCodeRepoLoading):
+			repo := data.Repo
+			if repo == "" {
+				repo = data.RepoPath
+			}
+			return nil, &repoLoadingError{repo: repo, phase: data.Phase, percent: data.Percent}
+		case string(gortexmcp.ErrCodeRepoUnavailable):
+			return nil, fmt.Errorf("the gortex daemon could not load %s after its restart (%s). %s",
+				data.RepoPath, data.Reason, data.Suggestion)
 		}
 		return nil, errors.New(rpc.Error.Message)
 	}
@@ -243,7 +260,10 @@ func daemonOwnsRepo(abs string) bool {
 // holding the lock. Proceeding to the MCP path costs nothing to be wrong
 // about: that path does not need the controller mutex, and a genuinely
 // untracked repo comes back as repo_not_tracked, which surfaces the same
-// message this probe would have produced.
+// message this probe would have produced. A configured repo the daemon is
+// still loading after a restart reads as ours here (the probe lists the
+// config) and comes back from the MCP path as repo_loading, never as "not
+// tracked".
 func probeCWDReach(abs string) cwdVerdict {
 	c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"})
 	if err != nil {
@@ -275,6 +295,13 @@ func probeCWDReach(abs string) cwdVerdict {
 	// query cannot be served, but the caller must not be told to track it.
 	if fam, ok := linkedWorktreeAt(abs); ok {
 		if repo := familyRepoIn(st, fam); repo != "" {
+			// While the family's repository is still loading after a restart
+			// no worktree can be bound, and reconciling would not change
+			// that. The daemon answers the worktree with repo_loading, which
+			// is the truthful message.
+			if trackedRepoLoading(st, repo) {
+				return cwdVerdict{reach: reachDaemon}
+			}
 			return cwdVerdict{reach: reachUnboundWorktree, family: fam, familyRepo: repo}
 		}
 	}
@@ -477,6 +504,7 @@ func trackedReposOf(c *daemon.Client) (daemon.StatusResponse, trackedReposAnswer
 		for _, repo := range probe.TrackedRepos {
 			st.TrackedRepos = append(st.TrackedRepos, daemon.TrackedRepoStatus{
 				Prefix: repo.Prefix, Path: repo.Path, Name: repo.Name,
+				Loading: repo.State == daemon.RepoStateLoading,
 			})
 		}
 		return st, trackedReposKnown

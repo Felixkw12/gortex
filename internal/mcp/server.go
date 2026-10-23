@@ -1638,6 +1638,19 @@ func (s *Server) stateAwareInstructionsWithBase(cwd, base string) string {
 		_, _, _, inside := s.multiIndexer.ScopeForCWD(cwd)
 		_, _, contains := s.multiIndexer.ContainedReposScope(cwd)
 		if !inside && !contains {
+			// A configured repository the registry does not hold yet is not
+			// untracked: telling it to track itself and reconnect is the
+			// advice that made agents re-track or stop on every restart.
+			if rec, pending := s.multiIndexer.PendingRepoForPath(cwd); pending {
+				if !rec.State.Loading() {
+					return ServerInstructionsUnavailable(rec.Root, rec.Reason)
+				}
+				// The ordinary instructions follow the loading preamble: the
+				// client reads them once, and they must still be right after
+				// the repository is ready.
+				phase, percent := s.WarmupProgress()
+				return ServerInstructionsLoading(rec.Label(), phase, percent) + "\n\n" + base
+			}
 			roots := s.trackedRepoRoots()
 			if agents.PendingAutomaticCheckout(cwd, roots) {
 				return ServerInstructionsPendingAutomaticCheckout(cwd, roots...)
@@ -2358,6 +2371,14 @@ func (s *Server) sessionScope(ctx context.Context) (workspaceID, projectID strin
 	// dispatcher rejects unreachable cwds before dispatch, so this is
 	// defensive: the sentinel matches no node, so the session sees
 	// nothing rather than the whole global graph.
+	//
+	// A cwd in a configured repository that is still loading resolves here
+	// too, but only for now. Caching the sentinel would leave the session
+	// blind after the repository registers, so it is not cached: the next
+	// call resolves again.
+	if rec, pending := s.multiIndexer.PendingRepoForPath(cwd); pending && rec.State.Loading() {
+		ss.scopeResolved = false
+	}
 	ss.scopeWorkspaceID = unresolvedWorkspacePrefix + cwd
 	return ss.scopeWorkspaceID, ss.scopeProjectID, true
 }

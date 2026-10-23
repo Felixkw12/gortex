@@ -296,7 +296,27 @@ type ProbeRepo struct {
 	Name      string `json:"name,omitempty"`
 	Workspace string `json:"workspace,omitempty"`
 	Project   string `json:"project,omitempty"`
+	// State is where the repo stands since the daemon started: one of
+	// RepoStateLoading, RepoStateReady, RepoStateFailed or RepoStateMissing.
+	// Empty for an entry warmup never loads (a repo listed only under a
+	// project) and from a daemon that predates the field.
+	State string `json:"state,omitempty"`
+	// StateReason explains a failed or missing repo.
+	StateReason string `json:"state_reason,omitempty"`
 }
+
+// Per-repo states a probe or coverage reply reports.
+const (
+	// RepoStateLoading: configured, and the daemon has not registered it
+	// since it started. Graph calls answer repo_loading until it is ready.
+	RepoStateLoading = "loading"
+	// RepoStateReady: registered; graph calls answer.
+	RepoStateReady = "ready"
+	// RepoStateFailed: its load ended without registering it.
+	RepoStateFailed = "failed"
+	// RepoStateMissing: the configured path does not exist.
+	RepoStateMissing = "missing"
+)
 
 // StatusResponse is the payload returned under Result on a successful
 // ControlStatus call.
@@ -982,6 +1002,13 @@ type FileCoverageResult struct {
 	// indexer could answer.
 	Excluded    bool `json:"excluded,omitempty"`
 	Unindexable bool `json:"unindexable,omitempty"`
+	// RepoState is RepoStateLoading when Path belongs to a configured repo
+	// the daemon has not registered since it started, and empty otherwise.
+	// Graph calls for such a repo answer repo_loading, so a coverage verdict
+	// read from its persisted rows must not turn into a deny of the native
+	// tool: the agent would have no read path at all. Repo names it.
+	RepoState string `json:"repo_state,omitempty"`
+	Repo      string `json:"repo,omitempty"`
 }
 
 // DirCoverageParams is the payload for ControlDirCoverage. Path is the
@@ -1009,6 +1036,9 @@ type DirCoverageResult struct {
 	// Indexable reports that the walk found a file it would claim. Without
 	// HasSource that is mid-walk, not excluded — never "no source here".
 	Indexable bool `json:"indexable,omitempty"`
+	// RepoState and Repo mean what they mean on FileCoverageResult.
+	RepoState string `json:"repo_state,omitempty"`
+	Repo      string `json:"repo,omitempty"`
 }
 
 // EnrichChurnParams is the payload for ControlEnrichChurn.

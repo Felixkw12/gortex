@@ -568,6 +568,9 @@ func enrichRead(toolInput map[string]any, cwd string) enrichResult {
 	}
 
 	st := queryFileIndexScope(cwd, filePath)
+	if st.Loading {
+		return enrichResult{context: repoLoadingNativeAllowance(st.LoadingRepo)}
+	}
 	// A file in a linked worktree the session is not working in is served by
 	// that worktree's view, not the one graph tools default to (#820).
 	wtRoot := foreignWorktreeRoot(cwd, filePath)
@@ -752,6 +755,9 @@ func hookSearchScope(cwd string, toolInput map[string]any) searchScopeVerdict {
 		}
 		st := queryFileIndexScope(cwd, scope)
 		switch {
+		case st.Loading:
+			// Its repository is loading: the graph cannot answer this search.
+			return searchScopeNonSource
 		case st.Indexed:
 			return searchScopeIndexed
 		// Before Symbolless, which it can accompany: a size- or gate-skipped
@@ -1157,6 +1163,24 @@ type fileIndexStatus struct {
 	// View is the graph that answered, as the daemon reported it; nil when
 	// it named none. It shapes message text only and decides nothing.
 	View *daemon.ProbeView
+	// Loading reports that the path belongs to a configured repository the
+	// daemon has not registered since it started. Graph tools answer
+	// repo_loading for it, so this is the one decision every door shares:
+	// a loading repository is never denied a native tool, whatever its
+	// persisted rows say, or the agent has no read path at all. The deny
+	// resumes once the repository is ready. LoadingRepo names it.
+	Loading     bool
+	LoadingRepo string
+}
+
+// repoLoadingNativeAllowance is the context a native tool carries when the
+// hook lets it through because the path's repository is still loading.
+func repoLoadingNativeAllowance(repo string) string {
+	if repo == "" {
+		repo = "this repository"
+	}
+	return fmt.Sprintf("[Gortex] %s is still loading after a restart; graph tools return repo_loading until it is ready. "+
+		"Native reads are allowed until then.\n", repo)
 }
 
 // noGraphAnswer reports whether a redirect to graph tools has nothing true to
@@ -1164,6 +1188,10 @@ type fileIndexStatus struct {
 // symbol lookups; the search doors answer for symbol-free files too.
 func (st fileIndexStatus) noGraphAnswer() bool {
 	switch {
+	case st.Loading:
+		// The graph has an answer, but not for this session yet: a redirect
+		// to tools that refuse with repo_loading says nothing true.
+		return true
 	case st.Indexed:
 		// Before the Tracked tests below: an older daemon reports coverage
 		// without the tracked flag, and they would silence it.
@@ -1235,6 +1263,12 @@ func fileIndexScopeViaDaemon(cwd, filePath string, timeout time.Duration) fileIn
 		return fileIndexStatus{Unreached: true}
 	}
 	logProbeViewFallback(daemon.ControlFileCoverage, result.View)
+	return fileIndexStatusFromCoverage(result)
+}
+
+// fileIndexStatusFromCoverage turns the daemon's coverage answer into the
+// hook's verdict, split from the transport so it is testable without a daemon.
+func fileIndexStatusFromCoverage(result daemon.FileCoverageResult) fileIndexStatus {
 	// Covered counts as an answer whatever the daemon's vintage. A daemon
 	// predating Answered still reports coverage truthfully, and gating on the
 	// missing field would drop a real deny into silence for the whole life of
@@ -1245,6 +1279,12 @@ func fileIndexScopeViaDaemon(cwd, filePath string, timeout time.Duration) fileIn
 		Tracked: result.Tracked,
 		ProbeOK: result.Answered || result.Covered,
 		View:    result.View,
+	}
+	if result.RepoState == daemon.RepoStateLoading {
+		// Coverage read from a loading repository's persisted rows is not a
+		// reason to deny: report it as loading, never as indexed.
+		st.ProbeOK, st.Loading, st.LoadingRepo = true, true, result.Repo
+		return st
 	}
 	if !st.ProbeOK {
 		return st
@@ -1533,6 +1573,11 @@ var dirCoverageFn = dirCoverageViaDaemon
 // Only a completed walk that claimed nothing proves a scope holds no source.
 // From the graph alone a scope mid-walk looks exactly like an excluded one.
 func scopeTrackedFromCoverage(result daemon.DirCoverageResult) (hasSource, probeOK bool) {
+	if result.RepoState == daemon.RepoStateLoading {
+		// A loading repository's scope holds nothing the graph will answer
+		// for yet, whatever its persisted rows say (see fileIndexStatus).
+		return false, true
+	}
 	if !result.Answered {
 		return false, false
 	}

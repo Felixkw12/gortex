@@ -22,7 +22,7 @@ A session's boundary comes from its working directory. Inside a tracked repo it 
 
 Such a session has no single workspace slug, so `_meta.scope_applied` reports `repos:N` rather than `workspace`. `repo:`, `project:`, `workspace:` and `scope:` narrow *within* the contained set; naming a repo or workspace outside it is refused with an error rather than answered empty. `repo:"*"` widens only back to the session's own repos.
 
-A directory that neither lies inside nor contains a tracked repo still fails closed with the structured `repo_not_tracked` error — tracking the parent of your repos is not required, and doing so would index every child a second time. Over the HTTP surface (`gortex daemon start --http-addr ...`) the `/v1/graph` route accepts `?project=` and `?repo=` to narrow the dump, so a typo'd value returns an empty result for that request instead of bringing the whole index up empty.
+A directory that neither lies inside nor contains a tracked repo still fails closed with the structured `repo_not_tracked` error — tracking the parent of your repos is not required, and doing so would index every child a second time. A configured repo that warmup has not registered yet after a daemon start is not "untracked": its sessions get `repo_loading` (retryable) until it is ready, then work in place without reconnecting — see [Startup states](mcp.md#startup-states). Over the HTTP surface (`gortex daemon start --http-addr ...`) the `/v1/graph` route accepts `?project=` and `?repo=` to narrow the dump, so a typo'd value returns an empty result for that request instead of bringing the whole index up empty.
 
 ## Configuration
 
@@ -301,8 +301,11 @@ warmup tail re-resolves the graph while every automatic checkout the catalog
 remembers wants its two layers built, all through one store writer. Build work
 is therefore held until warmup completes. Nothing else is: registration,
 catalog seeding, route reads and serving a generation that is already published
-never consult the gate, so a warming daemon keeps answering from whatever the
-last run left behind. Held work is not dropped either — a coordinator cycle
+never consult the gate. A repository answers graph calls once warmup registers
+it; until then its sessions get `repo_loading` (see
+[Startup states](mcp.md#startup-states)). A coordinator that could not start
+because its primary was not registered yet is started when that primary
+registers, not at the janitor's next pass. Held work is not dropped either — a coordinator cycle
 reschedules onto the gate's own wake, and a ref view's build keeps its claim, so
 the selection that made it still gets a token to poll and later selections
 coalesce onto the same one.
