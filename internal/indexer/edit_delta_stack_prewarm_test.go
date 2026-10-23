@@ -423,6 +423,13 @@ func (s *referrerFactsStore) FindNodesByNamesInRepo(names []string, repoPrefix s
 	return s.Graph.FindNodesByNamesInRepo(names, repoPrefix)
 }
 
+func (s *referrerFactsStore) FindNodesByNamesInRepoLanguages(names []string, repoPrefix string, languages []string) map[string][]*graph.Node {
+	for _, name := range names {
+		s.names[name]++
+	}
+	return s.Graph.FindNodesByNamesInRepoLanguages(names, repoPrefix, languages)
+}
+
 // A likely file's reads past its own names are warmed: its declarations' stub
 // keys' incoming identities, and for a file referencing it (by reference
 // fact, as the affected-by planner finds it) that file's pending names and
