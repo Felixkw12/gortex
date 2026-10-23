@@ -305,3 +305,62 @@ func TestAnalysisGenerationGCCanceledChunkRollsBackAndReleasesWriter(t *testing.
 		t.Fatalf("canceled transaction deleted rows: %d remain", got)
 	}
 }
+
+// Eligibility remains per view, including the aggregate view cap; traversal of
+// that eligible set is oldest-first even when a pass stops after one chunk.
+func TestAnalysisGenerationGCOrderPreservesViewRetention(t *testing.T) {
+	store, err := Open(filepathForAnalysisTest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var ids [10][3]int64
+	for view := range ids {
+		handle := store.AtGeneration(int64(view + 1))
+		for generation := range ids[view] {
+			ids[view][generation] = buildMinimalAnalysisGeneration(t, handle,
+				fmt.Sprintf("view-%d-gen-%d", view, generation), 4, true)
+		}
+	}
+	oldest := ids[0][0]
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	interrupted := &analysisGCInterruptContext{Context: ctx, store: store, cancel: cancel, stop: func() bool {
+		var count int
+		if err := store.writerDB.QueryRow(`SELECT COUNT(*) FROM analysis_concepts WHERE generation_id = ?`, oldest).Scan(&count); err != nil {
+			t.Errorf("observe oldest chunk: %v", err)
+			return true
+		}
+		return count < 4
+	}}
+	if removed, err := store.PruneAnalysisGenerations(interrupted, 1, 1); !errors.Is(err, context.Canceled) || removed != 1 {
+		t.Fatalf("interrupted pass: removed=%d err=%v, want one committed row then cancellation", removed, err)
+	}
+	for _, view := range ids {
+		for _, id := range view {
+			want := 4
+			if id == oldest {
+				want = 3
+			}
+			if got := analysisGCCount(t, store, "analysis_concepts", id); got != want {
+				t.Fatalf("generation %d: concepts=%d want=%d; only the oldest eligible generation may change", id, got, want)
+			}
+		}
+	}
+	if _, err := store.PruneAnalysisGenerations(context.Background(), 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	for view, generations := range ids {
+		for generation, id := range generations {
+			// The last eight views retain one fallback plus the active row.
+			// The two oldest views retain only their active row.
+			want := 0
+			if generation == 2 || (view >= 2 && generation == 1) {
+				want = 1
+			}
+			if got := analysisGCCount(t, store, "analysis_generations", id); got != want {
+				t.Fatalf("view %d generation %d: manifests=%d want=%d", view+1, id, got, want)
+			}
+		}
+	}
+}

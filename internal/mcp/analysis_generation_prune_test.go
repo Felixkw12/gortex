@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -277,6 +278,34 @@ func TestAnalysisGenerationPruneReplayDoesNotRenewRequest(t *testing.T) {
 		synctest.Wait()
 		if calls != 1 || s.analysisPruneScheduled.Load() {
 			t.Fatalf("replay on a failing store: calls=%d scheduled=%v", calls, s.analysisPruneScheduled.Load())
+		}
+	})
+}
+
+func TestAnalysisGenerationPruneRetryRechecksEditLane(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var busy atomic.Bool
+		withEditLane(t, &busy)
+		s := &Server{}
+		t.Cleanup(s.DrainBackground)
+		calls := 0
+		writer := &analysisPruneTestStore{prune: func(ctx context.Context, _, _ int) (int64, error) {
+			calls++
+			<-ctx.Done()
+			return 1, ctx.Err()
+		}}
+		before := analysisPruneStoodDown.Load()
+		s.scheduleAnalysisGenerationPrune(writer)
+		time.Sleep(30 * time.Second)
+		synctest.Wait()
+		if calls != 1 || !s.analysisPruneScheduled.Load() {
+			t.Fatalf("first pass: calls=%d scheduled=%v", calls, s.analysisPruneScheduled.Load())
+		}
+		busy.Store(true)
+		time.Sleep(30*time.Second + analysisPruneLaneWait + analysisYieldPoll)
+		synctest.Wait()
+		if calls != 1 || s.analysisPruneScheduled.Load() || analysisPruneStoodDown.Load() != before+1 {
+			t.Fatalf("busy retry: calls=%d scheduled=%v stood_down=%d", calls, s.analysisPruneScheduled.Load(), analysisPruneStoodDown.Load()-before)
 		}
 	})
 }
