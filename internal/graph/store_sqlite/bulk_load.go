@@ -104,6 +104,10 @@ const (
 // carried id as its implicit suffix, defining same-name enumeration order.
 const nodesByNameIndexDDL = `CREATE INDEX IF NOT EXISTS nodes_by_name ON nodes(name, view_gen, id, repo_prefix, kind, file_path)`
 
+// nodesByNameIndexColumns is nodesByNameIndexDDL's key, which the v38 step
+// compares against the installed index.
+var nodesByNameIndexColumns = []string{"name", "view_gen", "id", "repo_prefix", "kind", "file_path"}
+
 const nodesStatsHistogramIndexDDL = `CREATE INDEX IF NOT EXISTS nodes_stats_histogram ON nodes(view_gen, kind, language)`
 
 var bulkDroppableIndexes = []bulkDroppableIndex{

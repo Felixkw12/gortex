@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -138,12 +139,18 @@ var schemaMigrations = []schemaMigration{
 }
 
 // Rebuild just the secondary index; graph payload, identity and receipts stay
-// unchanged. The same DDL serves fresh stores and existing bulk sealing.
+// unchanged. The same DDL serves fresh stores and existing bulk sealing. An
+// upgrade from v25 or older already rebuilt nodes_by_name in its current shape
+// at v26, so an index that matches is left alone rather than built twice.
 func coverNodeDeclarationIndex(tx *sql.Tx) error {
+	current, err := indexColumnsMatch(tx, "nodes_by_name", nodesByNameIndexColumns)
+	if err != nil || current {
+		return err
+	}
 	if _, err := tx.Exec(`DROP INDEX IF EXISTS nodes_by_name`); err != nil {
 		return err
 	}
-	_, err := tx.Exec(nodesByNameIndexDDL)
+	_, err = tx.Exec(nodesByNameIndexDDL)
 	return err
 }
 
@@ -224,6 +231,12 @@ func edgeCandidateIndexMatchesGenerationFirst(tx *sql.Tx, name string) (bool, er
 	if !ok {
 		return false, fmt.Errorf("generation-first edge candidate index %q has no expected shape", name)
 	}
+	return indexColumnsMatch(tx, name, columns)
+}
+
+// indexColumnsMatch reports whether the installed index name keys exactly
+// columns, in order. A missing index has no columns and never matches.
+func indexColumnsMatch(tx *sql.Tx, name string, columns []string) (bool, error) {
 	rows, err := tx.Query(`SELECT name FROM pragma_index_info(?) ORDER BY seqno`, name)
 	if err != nil {
 		return false, fmt.Errorf("read %s shape: %w", name, err)
@@ -240,15 +253,7 @@ func edgeCandidateIndexMatchesGenerationFirst(tx *sql.Tx, name string) (bool, er
 	if err := rows.Err(); err != nil {
 		return false, fmt.Errorf("read %s shape: %w", name, err)
 	}
-	if len(got) != len(columns) {
-		return false, nil
-	}
-	for i := range got {
-		if got[i] != columns[i] {
-			return false, nil
-		}
-	}
-	return true, nil
+	return slices.Equal(got, columns), nil
 }
 
 // generationSelectiveGraphIndexNames is the bounded v27 migration whitelist.

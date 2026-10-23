@@ -133,3 +133,35 @@ func TestExactNameDeclarationCoveringMigrationPreservesOrderedFacts(t *testing.T
 	}
 	requireGenerationLookupIndexShapes(t, s.db)
 }
+
+// An upgrade from v25 or older reaches v38 with nodes_by_name already rebuilt
+// by v26; the step must not build that index a second time.
+func TestExactNameDeclarationCoveringMigrationKeepsCurrentIndex(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "current.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tx, err := s.writerDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Every DROP or CREATE bumps the schema cookie; a freed root page can be
+	// reused by the rebuilt index, so the page number alone proves nothing.
+	cookie := func() int64 {
+		t.Helper()
+		var v int64
+		if err := tx.QueryRow(`PRAGMA schema_version`).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	before := cookie()
+	if err = coverNodeDeclarationIndex(tx); err != nil {
+		t.Fatal(err)
+	}
+	if after := cookie(); after != before {
+		t.Fatalf("current nodes_by_name was rebuilt: schema cookie %d -> %d", before, after)
+	}
+}
