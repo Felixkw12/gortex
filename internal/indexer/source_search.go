@@ -57,17 +57,16 @@ func (idx *Indexer) CurrentSourceSearchFiles(ctx context.Context, root string, a
 		if entry.IsDir() && allowDir != nil && !allowDir(filepath.ToSlash(rel)) {
 			return filepath.SkipDir
 		}
-		excluded := sourceSearchExcluded(matcher, ignores, root, path, entry.IsDir())
 		if entry.IsDir() {
-			if excluded && !ignores.HasNegatedDescendant(path) {
-				m := matcher
-				if m == nil || !m.HasNegatedDescendant(filepath.ToSlash(rel)) {
-					return filepath.SkipDir
-				}
+			// The index walk's pruning rule: .git and agent-state folders
+			// close, and an excluded folder stays open only while a
+			// re-include might reach into it.
+			if shouldPruneDir(path, root, matcher, ignores, false) {
+				return filepath.SkipDir
 			}
 			return nil
 		}
-		if excluded || (allow != nil && !allow(filepath.ToSlash(rel))) {
+		if sourceSearchExcluded(matcher, ignores, root, path, false) || (allow != nil && !allow(filepath.ToSlash(rel))) {
 			return nil
 		}
 		if pathguard.SymlinkEscapes(path, root) {
@@ -99,14 +98,14 @@ func (idx *Indexer) CurrentSourceSearchFiles(ctx context.Context, root string, a
 	return files, err
 }
 
+// sourceSearchExcluded applies the index walk's exclusion rules
+// (shouldExcludeRules) to a source-search candidate, so search_text admits
+// exactly what the index would: no .git content, only the MCP config files in
+// the agent-config folders that hold one (never the checkouts under
+// .claude/worktrees/), and the layered config excludes and per-folder ignore
+// files on top.
 func sourceSearchExcluded(matcher *excludes.Matcher, ignores *excludes.Hierarchical, root, path string, isDir bool) bool {
-	if rel, err := filepath.Rel(root, path); err == nil && excludes.InAgentConfigDir(rel) {
-		return !isDir && !excludes.IsMCPConfigFile(rel)
-	}
-	if matcher != nil && matcher.MatchAbsDir(path, root, isDir) {
-		return true
-	}
-	return ignores.Match(path, isDir)
+	return shouldExcludeRules(path, root, isDir, matcher, ignores)
 }
 
 // AdmitSourceSearchBuffer applies the same corpus policy to overlay-only files.
