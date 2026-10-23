@@ -67,6 +67,30 @@ func TestCheckoutRemovalRunsThroughAnUnbindableCWD(t *testing.T) {
 	nested := filepath.Join(stack.repoRoot, "vendored-theme")
 	require.NoError(t, os.MkdirAll(filepath.Join(nested, ".git"), 0o755))
 
+	// Give the terminal-refusal control its own fixture. Automatic discovery
+	// may truthfully report pending before it rejects an unknown nested root;
+	// the live discovery control below covers that timing separately.
+	// Close the control's observers before removing its optional provider, so
+	// cleanup cannot lose a live lifecycle. The removal fixture above keeps
+	// its live lifecycle throughout all four catalog-only requests.
+	control := newViewStack(t)
+	require.NoError(t, control.srv.lifecycle.Close())
+	control.srv.lifecycle = nil
+	controlNested := filepath.Join(control.repoRoot, "vendored-theme")
+	require.NoError(t, os.MkdirAll(filepath.Join(controlNested, ".git"), 0o755))
+
+	// The graph-read gate still refuses the nested root instead of answering
+	// from its parent's corpus, with a deterministic terminal error.
+	readRan := false
+	res, err := control.callWithView(t, controlNested, "get_symbol", nil,
+		func(context.Context) (*mcplib.CallToolResult, error) {
+			readRan = true
+			return mcplib.NewToolResultText(`{}`), nil
+		})
+	require.NoError(t, err)
+	require.False(t, readRan, "get_symbol reached its handler through an unbindable cwd")
+	assertToolError(t, res, graphview.CodeCheckoutInaccessible)
+
 	// The gate is real and stays real: a graph read through the same cwd is
 	// still refused rather than answered off the parent's corpus.
 	//
@@ -75,25 +99,25 @@ func TestCheckoutRemovalRunsThroughAnUnbindableCWD(t *testing.T) {
 	// startup alone spends that slice (Windows runners), the first answer is
 	// the documented retryable view_building refusal; the settled answer this
 	// test pins arrives on a retry, exactly as a client would see it.
-	readRan := false
-	var res *mcplib.CallToolResult
+	liveReadRan := false
+	var liveRes *mcplib.CallToolResult
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		var err error
-		res, err = stack.callWithView(t, nested, "get_symbol", nil,
+		liveRes, err = stack.callWithView(t, nested, "get_symbol", nil,
 			func(context.Context) (*mcplib.CallToolResult, error) {
-				readRan = true
+				liveReadRan = true
 				return mcplib.NewToolResultText(`{}`), nil
 			})
 		require.NoError(t, err)
-		require.False(t, readRan, "get_symbol reached its handler through an unbindable cwd")
-		if !res.IsError || !strings.Contains(viewResultText(t, res), graphview.CodeViewBuilding) {
+		require.False(t, liveReadRan, "get_symbol reached its handler through an unbindable cwd")
+		if !liveRes.IsError || !strings.Contains(viewResultText(t, liveRes), graphview.CodeViewBuilding) {
 			break
 		}
-		require.True(t, time.Now().Before(deadline), "checkout discovery never settled: %s", viewResultText(t, res))
+		require.True(t, time.Now().Before(deadline), "checkout discovery never settled: %s", viewResultText(t, liveRes))
 		time.Sleep(10 * time.Millisecond)
 	}
-	assertToolError(t, res, graphview.CodeCheckoutInaccessible)
+	assertToolError(t, liveRes, graphview.CodeCheckoutInaccessible)
 
 	for _, call := range viewlessCalls(nested) {
 		t.Run(call.name, func(t *testing.T) {

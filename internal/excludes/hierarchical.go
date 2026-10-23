@@ -2,6 +2,7 @@ package excludes
 
 import (
 	"bufio"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,20 @@ type Hierarchical struct {
 	// forgets counts Forget calls. A read that started before one does not
 	// store its result, which may predate the change Forget reports.
 	forgets uint64
+
+	// observe, when set (ObserveReads), is handed every ignore file read.
+	observe func(path string, data []byte, err error)
+}
+
+// ObserveReads installs fn, which is handed every ignore file the matcher
+// reads: the bytes it read, or the error that ended the read (a missing
+// file's fs.ErrNotExist among them). A caller that must account for every
+// working-copy read it makes (a build proving its reads) installs it before
+// the matcher's first use; it is not safe to install concurrently with one.
+func (h *Hierarchical) ObserveReads(fn func(path string, data []byte, err error)) {
+	if h != nil {
+		h.observe = fn
+	}
 }
 
 // NewHierarchical builds a per-directory ignore matcher rooted at root.
@@ -204,7 +219,7 @@ func (h *Hierarchical) dirMatcher(dir string) *Matcher {
 
 	var patterns []string
 	for _, name := range h.filenames {
-		patterns = append(patterns, readIgnoreFile(filepath.Join(dir, name))...)
+		patterns = append(patterns, readIgnoreFile(filepath.Join(dir, name), h.observe)...)
 	}
 	if len(patterns) > 0 {
 		m = New(patterns)
@@ -231,16 +246,18 @@ func (h *Hierarchical) cached(dir string) bool {
 // non-comment lines as gitignore-syntax patterns. A missing or
 // unreadable file yields nil — honoring ignore files is a convenience,
 // never a hard requirement, so a missing or permission-denied file
-// silently no-ops.
-func readIgnoreFile(path string) []string {
-	f, err := os.Open(path)
+// silently no-ops. observe, when set, is handed what the read found.
+func readIgnoreFile(path string, observe func(string, []byte, error)) []string {
+	data, err := os.ReadFile(path)
+	if observe != nil {
+		observe(path, data, err)
+	}
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
 
 	var patterns []string
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {

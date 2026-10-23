@@ -42,7 +42,24 @@ func TestCheckoutLifecycleSeedLogsStages(t *testing.T) {
 	assert.Equal(t, generationID, fields["generation_id"])
 	assert.IsType(t, float64(0), fields["elapsed_seconds"])
 
-	entries := logs.FilterMessage("checkout lifecycle seed stage completed").All()
+	// Seed also emits per-checkout/per-family detail. Select the five
+	// aggregate stage records whose counters this upstream contract checks.
+	var entries []observer.LoggedEntry
+	for _, entry := range logs.FilterMessage("checkout lifecycle seed stage completed").All() {
+		fields := entry.ContextMap()
+		switch fields["stage"] {
+		case "resume_reconciler", "sweep_retirements", "resume_mode_transitions":
+			entries = append(entries, entry)
+		case "record_checkout":
+			if _, ok := fields["recorded_checkouts"]; ok {
+				entries = append(entries, entry)
+			}
+		case "reconcile_family":
+			if _, ok := fields["families"]; ok {
+				entries = append(entries, entry)
+			}
+		}
+	}
 	require.Len(t, entries, 5)
 	stages := []struct {
 		name  string
@@ -101,7 +118,12 @@ func TestCheckoutLifecycleSeedLogsFirstReconcileFailure(t *testing.T) {
 
 	require.NoError(t, f.lc.Seed(ctx), "reconciliation remains best-effort")
 	require.NotEmpty(t, firstFamily)
-	entries := logs.FilterMessage("checkout lifecycle seed stage completed").FilterField(zap.String("stage", "reconcile_family")).All()
+	var entries []observer.LoggedEntry
+	for _, entry := range logs.FilterMessage("checkout lifecycle seed stage completed").FilterField(zap.String("stage", "reconcile_family")).All() {
+		if _, summary := entry.ContextMap()["families"]; summary {
+			entries = append(entries, entry)
+		}
+	}
 	require.Len(t, entries, 1)
 	fields := entries[0].ContextMap()
 	assert.Equal(t, "error", fields["outcome"])

@@ -48,6 +48,11 @@ type reuseVal struct {
 	// be re-priced again. Every other resolver-authored tag is left to the
 	// fresh resolve, as before.
 	resolution string
+	// semanticMeta is the provenance a semantic confirmation stamped on the
+	// captured bind (confirmed_from_origin, semantic_source). Only a per-file
+	// delta's change set keeps it (pruneBuiltinReuse); every other caller
+	// strips it and keeps the established reuse.
+	semanticMeta map[string]any
 }
 
 // reuseResolutionTag reads the provenance tag a reuse must carry —
@@ -129,9 +134,8 @@ func captureIncrementalState(g graph.Store, graphPath string) (reuse map[reuseKe
 				continue
 			}
 			if graph.IsUnresolvedTarget(e.To) {
-				priorUnresolved = append(priorUnresolved, &graph.Edge{
-					From: e.From, Kind: e.Kind, To: e.To, Meta: e.Meta,
-				})
+				prior := *e
+				priorUnresolved = append(priorUnresolved, &prior)
 				continue
 			}
 			if !reusableResolvedEdge(e) {

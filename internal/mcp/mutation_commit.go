@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/agents"
+	"github.com/zzet/gortex/internal/indexer"
 )
 
 // The commit ledger exists because a tool call has two independent terminal
@@ -86,13 +87,21 @@ const mutationIDParamDescription = "Optional idempotency key. Retrying with the 
 
 var mutationCommitSequence atomic.Uint64
 
+// mutationDiskCommitSequence orders disk commits. It is stamped after the
+// rename and before the commit's refresh ticket is admitted, so a fresh
+// publication of a larger value captured the path after the smaller one's
+// bytes landed.
+var mutationDiskCommitSequence atomic.Uint64
+
 // errMutationNotApplied is returned by commitFileMutation when the request was
 // cancelled before the disk commit. Callers surface it as a terminal refusal so
 // the client knows retrying is safe.
 var errMutationNotApplied = errors.New("mutation not applied")
 
 type mutationCommitRecord struct {
-	mu sync.RWMutex
+	mu                     sync.RWMutex
+	owner                  *Server
+	pendingSourceRecovered bool
 
 	id      string
 	tool    string
@@ -106,6 +115,9 @@ type mutationCommitRecord struct {
 
 	disk  string
 	graph string
+	// commitSeq is the mutationDiskCommitSequence value of the disk commit,
+	// zero until committed.
+	commitSeq uint64
 	// graphRecorded says whether graph carries an outcome or is still the
 	// seed beginMutationCommit wrote. The status string cannot answer that on
 	// its own: "stale" means both "the reindex reported without confirming an
@@ -143,6 +155,7 @@ type mutationCommitSnapshot struct {
 	// on. Ordering matters for the listing: it is filled from the same
 	// snapshot the flag is derived from, so the two cannot disagree.
 	GraphRecorded       bool   `json:"-"`
+	CommitSeq           uint64 `json:"-"`
 	NewSHA              string `json:"new_sha,omitempty"`
 	BytesWritten        int    `json:"bytes_written,omitempty"`
 	Error               string `json:"error,omitempty"`
@@ -166,6 +179,7 @@ func (r *mutationCommitRecord) snapshot() mutationCommitSnapshot {
 		DiskStatus:          r.disk,
 		GraphStatus:         r.graph,
 		GraphRecorded:       r.graphRecorded,
+		CommitSeq:           r.commitSeq,
 		NewSHA:              r.newSHA,
 		BytesWritten:        r.bytesWritten,
 		Error:               r.errText,
@@ -216,6 +230,9 @@ func (r *mutationCommitRecord) markCommitted(newSHA string, bytesWritten int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.disk = mutationDiskCommitted
+	if r.commitSeq == 0 {
+		r.commitSeq = mutationDiskCommitSequence.Add(1)
+	}
 	r.newSHA = newSHA
 	r.bytesWritten = bytesWritten
 	r.committedAt = time.Now()
@@ -230,7 +247,12 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 		return
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer func() {
+		r.mu.Unlock()
+		if r.owner != nil {
+			r.owner.refreshPendingSourceRecord(r)
+		}
+	}()
 	// Concurrent pollers can hold an earlier pending snapshot after another
 	// poller observed completion. Never regress that same ticket to pending.
 	if outcome.Pending && r.graphRecorded && r.graph != mutationGraphPending && r.reindexReceipt != "" && r.reindexReceipt == outcome.Receipt {
@@ -476,6 +498,7 @@ func (n *mutationCommitNote) verdict() mutationCommitVerdict {
 // still reachable.
 func (s *Server) beginMutationCommit(ctx context.Context, tool, mutationID, fingerprint, relPath, absPath string) *mutationCommitRecord {
 	record := &mutationCommitRecord{
+		owner:       s,
 		id:          fmt.Sprintf("commit-%d", mutationCommitSequence.Add(1)),
 		tool:        tool,
 		key:         mutationID,
@@ -492,6 +515,7 @@ func (s *Server) beginMutationCommit(ctx context.Context, tool, mutationID, fing
 		record.checkoutID = state.checkoutID
 		record.checkoutIncarnation = state.incarnation
 	}
+	s.pendingSourceFiles.register(record)
 	s.mutationCommits.put(record)
 	mutationCommitNoteFrom(ctx).observe(record)
 	return record
@@ -538,6 +562,7 @@ func (s *Server) commitFileMutation(
 		record.markNotApplied(err)
 		return record, fmt.Errorf("%w: %w", errMutationNotApplied, err)
 	}
+	indexer.StampPublicationPhase(ctx, indexer.PublicationDiskWriteStarted)
 	if err := agents.AtomicWriteFile(absPath, data, perm); err != nil {
 		record.markFailed(err)
 		return record, err
