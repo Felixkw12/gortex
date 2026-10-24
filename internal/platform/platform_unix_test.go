@@ -3,18 +3,22 @@
 package platform
 
 import (
-	"os"
+	"errors"
+	"syscall"
 	"testing"
 )
 
-// A process owned by another user can't be signalled (kill returns
-// EPERM) but still exists, so ProcessAlive must report it as alive.
-func TestProcessAliveOtherUser(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can signal every process; EPERM path not reachable")
+// A process owned by another user can't be signalled (kill returns EPERM)
+// but still exists: ProcessExists must report it, while ProcessAlive keeps
+// treating it as not reachable.
+func TestProcessExistsOtherUser(t *testing.T) {
+	if err := syscall.Kill(1, 0); !errors.Is(err, syscall.EPERM) {
+		t.Skipf("kill(1, 0) = %v; needs a PID 1 owned by another user", err)
 	}
-	// PID 1 (init) always exists and is owned by root.
-	if !ProcessAlive(1) {
-		t.Error("ProcessAlive(1) = false, want true for a process owned by another user")
+	if !ProcessExists(1) {
+		t.Error("ProcessExists(1) = false, want true for a process owned by another user")
+	}
+	if ProcessAlive(1) {
+		t.Error("ProcessAlive(1) = true, want false for a process the caller cannot signal")
 	}
 }
