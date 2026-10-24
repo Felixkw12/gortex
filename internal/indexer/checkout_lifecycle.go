@@ -1686,6 +1686,21 @@ func (l *CheckoutLifecycle) ApplyReload(ctx context.Context) (ReloadResult, erro
 			// purge that lands between the two checks is still seen.
 			continue
 		}
+		// An implicit observation never came from the config file. Its absence
+		// after reload is not a removal request, so do not mint a retirement.
+		checkout, err := l.checkoutForPrefix(ctx, prefix)
+		if err != nil {
+			return out, err
+		}
+		if checkout != nil {
+			intents, err := l.catalog.ListTrackingIntents(ctx, checkout.CheckoutID)
+			if err != nil {
+				return out, err
+			}
+			if len(intents) == 0 {
+				continue
+			}
+		}
 		outcome, err := l.retireOnReload(ctx, prefix)
 		if onlyRepositoryCleanupPending(err) {
 			// The checkout is withdrawn and its forget saga is journaled; a
