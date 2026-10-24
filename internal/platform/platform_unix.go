@@ -8,6 +8,7 @@
 package platform
 
 import (
+	"errors"
 	"os"
 	"syscall"
 )
@@ -22,12 +23,16 @@ func ShutdownSignals() []os.Signal {
 // ProcessAlive reports whether a process with the given PID currently
 // exists. Signalling 0 is the canonical Unix liveness probe: it runs
 // every permission check but delivers nothing, so a nil error means the
-// process is there (and reachable).
+// process is there (and reachable). EPERM means the process exists but
+// belongs to another user the caller may not signal (e.g. an MCP client
+// running under a different UID than a shared daemon), so it counts as
+// alive too.
 func ProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	return syscall.Kill(pid, 0) == nil
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // TerminateProcess asks the process to exit gracefully (SIGTERM).
