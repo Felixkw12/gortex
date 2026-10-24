@@ -19,7 +19,8 @@ jobs:
     # Each job compiles its packages once and runs their tests on one worker
     # process per CPU (scripts/ci-test-partition.py), so four jobs per OS cover
     # every test. Linux runs -race with coverage; macOS and Windows run the
-    # same tests without them.
+    # same tests without them, and macOS race-checks the indexer's watcher
+    # tests, which drive its FSEvents and kqueue backends.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -32,13 +33,15 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          # Keyed apart from the build jobs' cache: Linux tests compile -race.
+          # Keyed apart from the build jobs' go.sum-only cache, which holds
+          # no -race objects for the Linux tests to reuse.
           cache-dependency-path: |
             go.sum
-            scripts/ci-test-partition.py
+            go.mod
 
+      # Linux's build jobs already build the binary.
       - name: Build
-        if: matrix.partition == 'rest'
+        if: matrix.partition == 'rest' && matrix.os != 'ubuntu-latest'
         run: go build -o gortex ./cmd/gortex/
 
       - name: Test
@@ -62,7 +65,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload test logs
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-logs-${{ matrix.os }}-${{ strategy.job-index }}

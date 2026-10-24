@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import re
 import shutil
@@ -87,7 +88,7 @@ class PlanTests(unittest.TestCase):
 
 
 class RerunTests(unittest.TestCase):
-    """The batch outcomes that decide between a rerun alone and a hard failure."""
+    """The outcomes that decide between a whole rerun alone and a hard failure."""
 
     def job(self):
         scratch = Path(tempfile.mkdtemp())
@@ -101,37 +102,61 @@ class RerunTests(unittest.TestCase):
         job = self.job()
         runs = iter(outputs)
         with mock.patch.object(job, "run", side_effect=lambda *args, **kwargs: next(runs)):
-            reruns = job.run_batch("indexer:1/1", Path("indexer.test"), ".", list(names), 0, "b")
-            for name in reruns:
-                job.rerun_binary("indexer:1/1", Path("indexer.test"), ".", name)
-        return job
+            rerun = job.run_batch("indexer:1/1", Path("indexer.test"), ".", list(names), 0, "b")
+            job.rerun_batches("indexer:1/1", Path("indexer.test"), ".", [rerun] if rerun else [])
+        self.assertIsNone(next(runs, None), "every scripted run happens")
+        return [title for title, _ in job.failures], [title for title, _ in job.flaky]
 
-    def test_failure_beside_other_tests_that_passes_alone_is_flaky(self):
-        job = self.batch([(1, "--- PASS: TestA (0.10s)\n--- FAIL: TestB (0.20s)\n"),
-                          (0, "--- PASS: TestB (0.10s)\n")])
-        self.assertEqual((job.failures, job.flaky), ([], ["indexer:1/1 TestB"]))
+    def test_batch_that_passes_whole_and_alone_is_flaky(self):
+        first = (1, "--- PASS: TestA (0.10s)\n--- FAIL: TestB (0.20s)\n")
+        self.assertEqual(self.batch([first, (0, "--- PASS: TestA (0.1s)\n--- PASS: TestB (0.1s)\n")]),
+                         ([], ["indexer:1/1 TestB"]))
+        # A test that exits the binary leaves later tests unrun; the rerun runs them.
+        self.assertEqual(self.batch([(1, "--- FAIL: TestA (0.10s)\nexit status 1\n"),
+                                     (0, "--- PASS: TestA (0.1s)\n--- PASS: TestB (0.1s)\n")]),
+                         ([], ["indexer:1/1 TestA"]))
 
-    def test_failure_that_repeats_alone_fails_the_job(self):
-        job = self.batch([(1, "--- PASS: TestA (0.10s)\n--- FAIL: TestB (0.20s)\n"),
-                          (1, "--- FAIL: TestB (0.10s)\n")])
-        self.assertEqual([(label, name) for label, name, _, _ in job.failures], [("indexer:1/1", "TestB")])
-        self.assertEqual(job.flaky, [])
+    def test_rerun_that_fails_or_skips_a_test_fails_the_job(self):
+        first = (1, "--- PASS: TestA (0.10s)\n--- FAIL: TestB (0.20s)\n")
+        self.assertEqual(self.batch([first, (1, "--- PASS: TestA (0.1s)\n--- FAIL: TestB (0.1s)\n")]),
+                         (["indexer:1/1 TestB"], []))
+        self.assertEqual(self.batch([first, (0, "--- PASS: TestA (0.1s)\n")]),
+                         (["indexer:1/1 [b]: 1 tests never reported a result"], []))
 
-    def test_race_panic_or_timeout_is_never_rerun(self):
-        for report in (planner.RACE_REPORT, "panic: boom", planner.TIMEOUT_REPORT):
+    def test_race_panic_crash_or_timeout_is_never_rerun(self):
+        for report in (planner.RACE_REPORT, "panic: boom", "fatal error: concurrent map writes",
+                       "SIGSEGV: segmentation violation", planner.TIMEOUT_REPORT):
             with self.subTest(report=report):
-                job = self.batch([(1, f"=== RUN   TestB\n{report}\n--- FAIL: TestB (0.20s)\n"
-                                      "--- PASS: TestA (0.10s)\n")])
-                self.assertEqual([(name, rerun) for _, name, _, rerun in job.failures], [("TestB", False)])
-
-    def test_tests_an_exiting_test_kept_from_running_get_their_first_run(self):
-        job = self.batch([(1, "--- FAIL: TestA (0.10s)\nexit status 1\n"),
-                          (0, "--- PASS: TestA (0.10s)\n"), (0, "--- PASS: TestB (0.10s)\n")])
-        self.assertEqual((job.failures, job.flaky), ([], ["indexer:1/1 TestA"]))
+                failures, flaky = self.batch([(2, f"=== RUN   TestB\n{report}\n--- FAIL: TestB (0.20s)\n"
+                                                  "--- PASS: TestA (0.10s)\n")])
+                self.assertEqual((failures, flaky), (["indexer:1/1 TestB"], []))
 
     def test_clean_exit_that_skipped_a_test_fails(self):
-        job = self.batch([(0, "--- PASS: TestA (0.10s)\n")])
-        self.assertEqual([name for _, name, _, _ in job.failures], [None])
+        self.assertEqual(self.batch([(0, "--- PASS: TestA (0.10s)\n")]),
+                         (["indexer:1/1 [b]: 1 tests never reported a result"], []))
+
+    def rest(self, *runs):
+        """Drive run_rest over one package whose go test -json events are scripted."""
+        job = self.job()
+        package = "example.org/m/p"
+        outputs = iter((int(any(event["Action"] == "fail" for event in events)),
+                        "".join(json.dumps(dict(event, Package=package)) + "\n" for event in events))
+                       for events in runs)
+        with mock.patch.object(job, "run", side_effect=lambda *args, **kwargs: next(outputs)):
+            job.run_rest([package])
+        self.assertIsNone(next(outputs, None), "every scripted run happens")
+        return [title for title, _ in job.failures], [title for title, _ in job.flaky]
+
+    def test_rest_reruns_the_whole_package(self):
+        # TestB exits the binary: it has a run event and no result.
+        first = [{"Action": "fail", "Test": "TestA"}, {"Action": "run", "Test": "TestB"}, {"Action": "fail"}]
+        passed = [{"Action": "pass", "Test": "TestA"}, {"Action": "pass", "Test": "TestB"}, {"Action": "pass"}]
+        failed = [{"Action": "pass", "Test": "TestA"}, {"Action": "run", "Test": "TestB"}, {"Action": "fail"}]
+        self.assertEqual(self.rest(first, passed), ([], ["rest example.org/m/p TestA"]))
+        self.assertEqual(self.rest(first, failed), (["rest example.org/m/p"], []))
+        # A failed test in a package that still reports pass is a TestMain bug.
+        self.assertEqual(self.rest([{"Action": "fail", "Test": "TestA"}, {"Action": "pass"}]),
+                         (["rest example.org/m/p TestA", "rest example.org/m/p"], []))
 
 
 if __name__ == "__main__":
