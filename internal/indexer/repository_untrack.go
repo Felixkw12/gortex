@@ -138,6 +138,9 @@ func (mi *MultiIndexer) untrackRepoCheckedRetainingAdmission(
 		}
 	}
 	mi.mu.Unlock()
+	if state.metadata != nil {
+		mi.forgetRepoLoad(state.metadata.RootPath)
+	}
 
 	state.mu.Lock()
 	defer state.mu.Unlock()

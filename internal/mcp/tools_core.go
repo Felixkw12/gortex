@@ -1447,6 +1447,11 @@ func (s *Server) handleIndexRepository(ctx context.Context, req mcp.CallToolRequ
 	// RepoPrefix and byRepo stays consistent. Using the shared singleton
 	// indexer here produces unprefixed nodes that corrupt per-repo stats.
 	if s.multiIndexer != nil {
+		// A repository warmup is still loading is not "dropped": reconciling
+		// it here would start a second load behind the first.
+		if answer, loading := s.configuredRepoStillLoading(ctx, req, path); loading {
+			return answer, nil
+		}
 		// Accept either a tracked prefix directly or a filesystem path.
 		// Falls back to reconciling from persisted config so users don't
 		// have to re-track repos the daemon dropped across warmup (T0.3).

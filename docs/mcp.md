@@ -235,7 +235,7 @@ Four additional push channels modeled on `subscribe_diagnostics` — per-session
 
 | Tool | Description |
 |------|-------------|
-| `subscribe_workspace_readiness` | `notifications/workspace_readiness` — daemon warmup phase transitions (snapshot_loaded → parallel_parse → deferred_passes_all → global_resolve → end_batch → watcher_started → ready). Last-known phase replayed to late subscribers. A graph tool *called during warmup* does not need this subscription to cope: it returns an in-band `warming` block plus best-effort partial results instead of blocking or erroring |
+| `subscribe_workspace_readiness` | `notifications/workspace_readiness` — daemon warmup phase transitions (snapshot_loaded → parallel_parse → deferred_passes_all → global_resolve → end_batch → watcher_started → ready), plus one `{event:"repo_state", repo, repo_path, state:"ready"}` event each time a configured repository registers. Last-known phase replayed to late subscribers. A graph tool *called during warmup* does not need this subscription to cope: for a session whose repository is already registered it returns an in-band `warming` block plus best-effort partial results; for a session whose repository warmup has not registered yet it returns `repo_loading` (see [Startup states](#startup-states)) |
 | `unsubscribe_workspace_readiness` | Opt back out — idempotent |
 | `subscribe_daemon_health` | `notifications/daemon_health` — periodic ticker (default 15 s, `interval_ms` clamped to 1 s..5 min) snapshots uptime, alloc/sys/heap, num_goroutine, num_gc, tracked_repos, sessions, lsp_alive, graph nodes/edges. Ticker only runs while ≥1 subscriber is attached |
 | `unsubscribe_daemon_health` | Opt back out — idempotent |
@@ -243,6 +243,21 @@ Four additional push channels modeled on `subscribe_diagnostics` — per-session
 | `unsubscribe_stale_refs` | Opt back out — idempotent |
 | `subscribe_graph_invalidated` | `notifications/graph_invalidated` — coarse "the graph was rebuilt, drop cached results" signal. `{node_count, edge_count, reason, ts}`; unfiltered |
 | `unsubscribe_graph_invalidated` | Opt back out — idempotent |
+
+## Startup states
+
+After a daemon start, a repository is served once warmup registers it, which on a large store is minutes after the socket accepts connections. Until then a session whose working directory is inside a configured repository (or above one, or in a linked worktree of one) is neither tracked nor untracked, and gets its own answers:
+
+| State | When | `tools/call` | `initialize` instructions |
+|---|---|---|---|
+| loading | configured, warmup job queued or running | `repo_loading`, `retryable:true`, with `phase`, `percent`, `repo`, `repo_path` | a LOADING preamble ahead of the ordinary instructions |
+| failed | the warmup job ended without registering it | `repo_unavailable`, `retryable:false`, with `reason` | how to repair it |
+| missing | the configured path does not exist | `repo_unavailable`, `retryable:false` | how to repair it |
+| ready | registered | served normally | ordinary |
+
+While loading, `index_health` (also `workspace(operation:"index")`), `capabilities`, `tools_search` and the `subscribe_*` / `unsubscribe_*` tools answer; `index_health` lists only the caller's repository. `track_repository`, `index_repository` and `workspace_admin(operation:"track")` for the repository answer `{status:"already_configured", state:"loading"}`; once its load has failed they run normally, because tracking it again is the repair. Every other tool call, `resources/read` and `prompts/get` returns `repo_loading`, and mutations stay refused.
+
+Tools start working **in place** when the repository registers: no reconnect is needed. The session's cached scope is dropped at registration, and a session whose `initialize` reported the repository as loading receives one `notifications/message` saying it is ready. A directory outside every configured repository still gets `repo_not_tracked`. The control-socket probe that hooks and the CLI pre-flight read reports the same per-repository `state` (`loading`, `ready`, `failed`, `missing`), the hook lets native Read/Grep/Edit through for a loading repository instead of denying them, and the CLI maps `repo_loading` to "the daemon is still loading <repo>": on a terminal it waits up to `--loading-wait` (default 30 s), otherwise it exits with code 75 (`EX_TEMPFAIL`).
 
 ## Request lifetime (why a call can never hang)
 

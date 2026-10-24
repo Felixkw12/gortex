@@ -44,6 +44,18 @@ const (
 	// repo's root tree. Used by the daemon's MCP front-door.
 	ErrCodeRepoNotTracked ErrorCode = "repo_not_tracked"
 
+	// ErrCodeRepoLoading — the cwd belongs to a configured repository the
+	// daemon has not finished loading since it started. Retryable: tools
+	// start working in place once the repository registers, with no
+	// reconnect and no change to tracking configuration.
+	ErrCodeRepoLoading ErrorCode = "repo_loading"
+
+	// ErrCodeRepoUnavailable — the cwd belongs to a configured repository
+	// whose load after a start ended without registering it (a failed
+	// index, a taken prefix) or whose path is gone. Not retryable as is;
+	// the error's reason names what to repair.
+	ErrCodeRepoUnavailable ErrorCode = "repo_unavailable"
+
 	// ErrCodeSymbolNotFound — the requested symbol id is not in the
 	// index. Recoverable: the agent can search for it instead.
 	ErrCodeSymbolNotFound ErrorCode = "symbol_not_found"

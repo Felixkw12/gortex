@@ -222,6 +222,11 @@ type CheckoutLifecycle struct {
 	coordinatorActivating map[string]struct{}
 	coordinatorClosing    bool
 	coordinatorStartWG    sync.WaitGroup
+	// awaitingPrimary names, per primary graph, the admitted checkouts whose
+	// coordinator could not start because that primary was not registered
+	// yet. PrimaryRegistered drains it. Guarded by awaitingPrimaryMu alone.
+	awaitingPrimaryMu sync.Mutex
+	awaitingPrimary   map[string]map[string]struct{}
 	// coordinatorLeaseWG counts the waiters that hold one coordinator's
 	// repository-owner admission for the length of its build loop
 	// (holdRepositoryOwnerRead). Close joins them after the admissions have
@@ -2196,27 +2201,109 @@ func (l *CheckoutLifecycle) finishCheckoutActivation(checkoutID string) {
 // pass through it would only re-derive the same dormant verdict.
 func (l *CheckoutLifecycle) activateCheckout(ctx context.Context, checkoutID string) {
 	defer l.finishCheckoutActivation(checkoutID)
+	if l.startCheckoutCoordinator(ctx, checkoutID) {
+		l.prioritizeCheckout(checkoutID)
+	}
+}
+
+// startCheckoutCoordinator re-reads one checkout and brings up its coordinator
+// when it is still a ready automatic checkout with a primary. It reports
+// whether it got as far as ensureCoordinator.
+func (l *CheckoutLifecycle) startCheckoutCoordinator(ctx context.Context, checkoutID string) bool {
 	if l.catalog == nil {
-		return
+		return false
 	}
 	checkout, found, err := l.catalog.GetCheckout(ctx, checkoutID)
 	if err != nil || !found {
-		return
+		return false
 	}
 	if checkout.State != store_sqlite.CheckoutStateReady ||
 		checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic {
-		return
+		return false
 	}
 	_, primary, err := l.familyGraphsFor(ctx, checkout)
 	if err != nil || primary == nil || primary.GraphID == "" {
-		return
+		return false
 	}
 	// ensureCoordinator's cold-install path signals "checkout registered" once,
 	// which arms the first build. Signalling again here would only re-reset the
 	// coordinator's quiet window and delay that build — the same starvation
 	// ActivateCheckout avoids on a live coordinator.
 	l.ensureCoordinator(ctx, primary.GraphID, checkout)
-	l.prioritizeCheckout(checkoutID)
+	return true
+}
+
+// awaitPrimary records a checkout whose coordinator could not start because
+// its family's primary is not registered yet.
+func (l *CheckoutLifecycle) awaitPrimary(primaryGraphID, checkoutID string) {
+	if primaryGraphID == "" || checkoutID == "" {
+		return
+	}
+	l.awaitingPrimaryMu.Lock()
+	defer l.awaitingPrimaryMu.Unlock()
+	if l.awaitingPrimary == nil {
+		l.awaitingPrimary = map[string]map[string]struct{}{}
+	}
+	waiting := l.awaitingPrimary[primaryGraphID]
+	if waiting == nil {
+		waiting = map[string]struct{}{}
+		l.awaitingPrimary[primaryGraphID] = waiting
+	}
+	waiting[checkoutID] = struct{}{}
+}
+
+// stopAwaitingPrimary forgets a checkout whose coordinator is up.
+func (l *CheckoutLifecycle) stopAwaitingPrimary(primaryGraphID, checkoutID string) {
+	l.awaitingPrimaryMu.Lock()
+	defer l.awaitingPrimaryMu.Unlock()
+	if waiting := l.awaitingPrimary[primaryGraphID]; waiting != nil {
+		delete(waiting, checkoutID)
+		if len(waiting) == 0 {
+			delete(l.awaitingPrimary, primaryGraphID)
+		}
+	}
+}
+
+// PrimaryRegistered retries the coordinators that could not start because the
+// primary registered under prefix had not finished indexing.
+//
+// Seeding applies coordinators before warmup registers any primary, so on a
+// restart every admitted coordinator meets an unregistered primary and is
+// skipped; until now the only retry was the janitor, an hour away by default.
+// This runs when the primary enters the registry. Whether the family's
+// reconcile finished before or after that registration does not matter: a
+// skip in either order is recorded here first. Each retry runs as an
+// activation on the lifecycle's own context, so Close joins it.
+func (l *CheckoutLifecycle) PrimaryRegistered(prefix string) {
+	if l == nil || l.catalog == nil || prefix == "" {
+		return
+	}
+	l.awaitingPrimaryMu.Lock()
+	graphIDs := make([]string, 0, len(l.awaitingPrimary))
+	for graphID := range l.awaitingPrimary {
+		graphIDs = append(graphIDs, graphID)
+	}
+	l.awaitingPrimaryMu.Unlock()
+	for _, graphID := range graphIDs {
+		graph, found, err := l.catalog.GetDedicatedGraph(l.transitionCtx, graphID)
+		if err != nil || !found || graph.RepoPrefix != prefix {
+			continue
+		}
+		l.awaitingPrimaryMu.Lock()
+		waiting := l.awaitingPrimary[graphID]
+		delete(l.awaitingPrimary, graphID)
+		l.awaitingPrimaryMu.Unlock()
+		for checkoutID := range waiting {
+			started, _ := l.beginCheckoutActivation(checkoutID)
+			if !started {
+				continue
+			}
+			go func(checkoutID string) {
+				defer l.finishCheckoutActivation(checkoutID)
+				l.startCheckoutCoordinator(l.transitionCtx, checkoutID)
+			}(checkoutID)
+		}
+	}
 }
 
 // ensureCoordinator brings up the coordinator for one automatic checkout, or
@@ -2261,16 +2348,22 @@ func (l *CheckoutLifecycle) ensureCoordinator(
 		// background reconciliation. Recorded so the checkout has a stated
 		// reason for having no view instead of silently having none.
 		l.recordCoordinatorStartFailure(checkout, err)
+		if errors.Is(err, graphview.ErrRepositoryOwnerUnknown) {
+			l.awaitPrimary(primaryGraphID, checkout.CheckoutID)
+		}
 		return
 	}
 	if coordinator == nil {
-		// Not a failure: the primary is bound but has not finished indexing,
-		// and the next sweep tries again.
+		// Not a failure: the primary is bound but has not finished indexing.
+		// Its registration retries this checkout (PrimaryRegistered), so a
+		// restart does not leave it waiting for the janitor's next sweep.
+		l.awaitPrimary(primaryGraphID, checkout.CheckoutID)
 		return
 	}
 	if !l.installCoordinatorAtHead(checkout, coordinator) {
 		return
 	}
+	l.stopAwaitingPrimary(primaryGraphID, checkout.CheckoutID)
 	l.clearCoordinatorStartFailure(checkout.CheckoutID)
 	coordinator.Signal("checkout registered")
 }

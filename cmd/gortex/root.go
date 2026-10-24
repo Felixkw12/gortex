@@ -191,6 +191,12 @@ func execute() {
 			}
 			os.Exit(ec.code)
 		}
+		// Any other error that names its exit code (repoLoadingError's 75)
+		// was already printed by cobra; only the code is left to honour.
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			os.Exit(coded.ExitCode())
+		}
 		os.Exit(1)
 	}
 }

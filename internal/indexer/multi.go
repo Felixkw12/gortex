@@ -131,6 +131,13 @@ type MultiIndexer struct {
 	batchMutationGate sync.RWMutex
 	globalPassMu      sync.Mutex
 
+	// repoLoads records where each configured repository stands on its way
+	// into repos after a start: queued or running while warmup works on it,
+	// then ready, failed or missing. It is read lock-free (see
+	// repo_load_state.go) because the MCP admission gate and the probe consult
+	// it on every frame and must never wait behind mu.
+	repoLoads repoLoadTable
+
 	// shadowAdmission is process-wide, not per MultiIndexer. Every cold repo
 	// competes for the same weighted in-memory budget; repos that do not fit
 	// immediately stream to SQLite instead of waiting or overcommitting RAM.
@@ -3146,6 +3153,9 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 		mi.indexers[prefix] = idx
 		mi.mu.Unlock()
 		installed = true
+		// The exists check above holds the stable lane, so this is the
+		// repository's first registration, never a rewrite of an entry.
+		mi.markRepoRegistered(prefix, absPath)
 
 		// Add to global config.
 		entry.Path = absPath
@@ -3400,6 +3410,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		mi.indexers[prefix] = idx
 		mi.mu.Unlock()
 		installed = true
+		mi.markRepoRegistered(prefix, absPath)
 
 		// Warm routes other than census_noop (which restores via
 		// cleanCensusResult) and full_retrack (which publishes via

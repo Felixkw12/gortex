@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,7 +61,7 @@ func requireDaemonToolWithSurface(repoPath, tool string, args map[string]any, to
 		return nil, err
 	}
 	defer exec.Close()
-	out, err := exec.CallTool(context.Background(), tool, args)
+	out, err := callToolWaitingForLoad(exec, tool, args, effectiveLoadingWait())
 	if err != nil {
 		if errors.Is(err, ErrRepoNotTracked) {
 			return nil, daemonRequiredErr(repoPath)

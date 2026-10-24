@@ -322,6 +322,14 @@ func (c *realController) FileCoverage(ctx context.Context, p daemon.FileCoverage
 	defer view.release()
 
 	out := daemon.FileCoverageResult{View: view.answer, Tracked: c.pathTracked(abs, view)}
+	// On a warm restart the persisted catalog binds a configured repository
+	// before warmup registers it, so the coverage below reads its persisted
+	// rows and reports the file covered while every graph call refuses with
+	// repo_loading. The state rides on the reply so the hook can let the
+	// native tool through instead of denying the only read path left.
+	if repo, loading := c.loadingRepoForPath(abs); loading {
+		out.RepoState, out.Repo = daemon.RepoStateLoading, repo
+	}
 	if !view.servable {
 		return out, nil
 	}
@@ -410,6 +418,10 @@ func (c *realController) DirCoverage(ctx context.Context, p daemon.DirCoveragePa
 	defer view.release()
 
 	out := daemon.DirCoverageResult{View: view.answer, Tracked: c.pathTracked(abs, view)}
+	// See FileCoverage: a loading repository's scope must not deny Grep.
+	if repo, loading := c.loadingRepoForPath(abs); loading {
+		out.RepoState, out.Repo = daemon.RepoStateLoading, repo
+	}
 	if !view.servable {
 		return out, nil
 	}

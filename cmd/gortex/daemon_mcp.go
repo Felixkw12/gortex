@@ -44,6 +44,11 @@ type mcpDispatcher struct {
 	// diagnostic has already been emitted, so it fires once per session
 	// rather than on every frame. Cleared in SessionEnded.
 	loggedUntracked sync.Map
+	// loadingSessions maps a session ID to the repository its initialize
+	// reported as loading, so that session is told once the repository is
+	// ready. Instructions cannot be refreshed after initialize; the message is
+	// the only in-session signal. Cleared on notify and in SessionEnded.
+	loadingSessions sync.Map
 }
 
 func newMCPDispatcher(srv *gortexmcp.Server, mi *indexer.MultiIndexer, logger *zap.Logger) *mcpDispatcher {
@@ -93,9 +98,11 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	// tools/call — that's the frame that needs the graph. initialize and
 	// tools/list flow through so the MCP handshake SURVIVES an untracked cwd:
 	// initialize returns the inactive-instructions variant (run `gortex track`)
-	// and tools/list answers an empty/track-only list, instead of a
-	// connection-poisoning errored initialize. Only tools/call is refused (with
-	// the structured not-tracked error the agent can act on).
+	// and tools/list keeps the full list (see rewriteUntrackedResponse),
+	// instead of a connection-poisoning errored initialize. Only tools/call is
+	// refused (with the structured not-tracked error the agent can act on).
+	// A cwd in a configured repository that is not registered yet is not
+	// untracked: see pendingRepoRefusal.
 	// Discovery needs the calling CWD for its scope authorization, but binding
 	// a client session must wait until admission has succeeded.
 	ctx = gortexmcp.WithSessionID(ctx, sess.ID)
@@ -105,9 +112,22 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	// carried a clientInfo.name.
 	ctx = gortexmcp.WithClientConnection(ctx)
 	reachable, admissionErr := d.cwdReachableChecked(ctx, sess.CWD)
-	untracked := sess.CWD != "" && !reachable && admissionErr == nil
+	// A configured repository the registry does not hold yet is neither
+	// tracked nor untracked: it is loading, or its load ended without
+	// registering it. It gets its own answers below, never the untracked
+	// "run gortex track" ones.
+	var pending *repoPendingAdmission
+	if errors.As(admissionErr, &pending) {
+		admissionErr = nil
+	}
+	untracked := sess.CWD != "" && !reachable && admissionErr == nil && pending == nil
 	if admissionErr != nil && !checkoutAdmissionMetadataMethod(peekFrameMethod(frame)) {
 		return checkoutAdmissionError(sess.CWD, frame, admissionErr), nil
+	}
+	if pending != nil {
+		if refused := d.pendingRepoRefusal(sess, frame, pending.load); refused != nil {
+			return refused, nil
+		}
 	}
 	if untracked {
 		d.logUncoveredCWDOnce(sess)
@@ -148,7 +168,10 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	// frames (initialize, tools/list, notifications) flow through
 	// the local MCPServer below; routing them across a federation
 	// would change semantics that are intentionally machine-local.
-	if d.router.Load() != nil {
+	// A session in a repository that is still loading is local by definition:
+	// the router must not hand its admitted calls to whatever server a
+	// workspace roster names.
+	if d.router.Load() != nil && pending == nil {
 		if proxied, ok := d.tryProxyToolCall(ctx, sess, frame); ok {
 			return proxied, nil
 		}
@@ -193,14 +216,17 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 			zap.String("session_id", sess.ID), zap.Error(err))
 		return nil, fmt.Errorf("marshal reply: %w", err)
 	}
-	// For an untracked cwd, rewrite the surviving initialize / tools/list
-	// response into its inactive variant: the agent gets the actionable
-	// "run gortex track" instructions and an empty track-only tool list.
+	// For an untracked cwd, rewrite the surviving initialize response into
+	// its inactive variant: the agent gets the actionable "run gortex track"
+	// instructions. tools/list is left whole.
 	if untracked {
 		out = rewriteUntrackedResponse(peekFrameMethod(frame), out, sess.CWD, d.trackedRoots())
 	}
 	if admissionErr != nil {
 		out = rewriteCheckoutAdmissionResponse(peekFrameMethod(frame), out, sess.CWD, admissionErr)
+	}
+	if pending != nil {
+		d.notePendingRepoSession(sess, peekFrameMethod(frame), pending.load)
 	}
 	return out, nil
 }
@@ -315,6 +341,7 @@ func (d *mcpDispatcher) SessionEnded(sess *daemon.Session) {
 		d.srv.ReleaseSession(sess.ID)
 	}
 	d.loggedUntracked.Delete(sess.ID)
+	d.loadingSessions.Delete(sess.ID)
 }
 
 // cwdReachable reports whether a session cwd has any chance of
@@ -448,6 +475,14 @@ func (d *mcpDispatcher) cwdReachableChecked(ctx context.Context, cwd string) (bo
 		}
 		if _, _, ok := d.multiIndexer.ContainedReposScope(cwd); ok {
 			return true, nil
+		}
+		// Configured but not registered yet: warmup has not reached the
+		// repository, or its load ended without registering it. Decided
+		// before the checkout and router arms, so a worktree of a loading
+		// primary is not told to reconcile and a loading cwd never takes the
+		// router's path. Lock-free; reads no store.
+		if rec, pending := d.multiIndexer.PendingRepoForPath(cwd); pending {
+			return false, &repoPendingAdmission{load: rec}
 		}
 	}
 	// Checkout fallback: a git worktree of a tracked family is a directory

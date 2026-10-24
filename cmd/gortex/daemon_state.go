@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -480,6 +481,10 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 	finishHeal(zap.Int("removed", removedDuplicates))
 
 	repos := state.configManager.Global().Repos
+	// This snapshot is warmup's job set, so it is also the set that reads as
+	// loading. Re-announced after the duplicate heal above, which can drop a
+	// second spelling of one directory the boot-time announcement still held.
+	state.multiIndexer.ExpectRepos(repos)
 
 	// Purge orphaned repo prefixes BEFORE the warmup loop re-registers the
 	// tracked repos, while the store still reflects the prior run's state. A
@@ -677,6 +682,10 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 					// and skips, the worker proceeds to the next job, and
 					// warmup completes.
 					func(entry config.RepoEntry) {
+						// jobErr is what ended this repository's job, so its
+						// load state can leave "loading" with a reason.
+						var jobErr error
+						state.multiIndexer.StartRepoLoad(entry.Path)
 						defer func() {
 							if r := recover(); r != nil {
 								logger.Error("daemon: warmup repo panic recovered",
@@ -685,7 +694,9 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 								changedRepos.Add(1)
 								scopeUnknown.Store(true)
 								deltaFrontier.invalidate()
+								jobErr = fmt.Errorf("warmup crashed while loading this repository: %v", r)
 							}
+							state.multiIndexer.FinishRepoLoad(entry.Path, jobErr)
 						}()
 						// Route repos the store already knows through
 						// ReconcileRepoCtx — it calls IncrementalReindexPaths, which
@@ -736,6 +747,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 							res, err := state.multiIndexer.ReconcileRepoCtx(batchCtx, entry, priorMtimes)
 							switch {
 							case err != nil:
+								jobErr = err
 								logger.Warn("daemon: startup reconcile failed",
 									zap.String("path", entry.Path), zap.Error(err))
 								// Treat a failed reconcile as "changed" so the global
@@ -770,6 +782,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 							deltaFrontier.invalidate()
 							changedRepos.Add(1)
 							if res, err := state.multiIndexer.TrackRepoCtx(batchCtx, entry); err != nil {
+								jobErr = err
 								logger.Warn("daemon: startup track failed",
 									zap.String("path", entry.Path), zap.Error(err))
 								scopeUnknown.Store(true)
@@ -842,6 +855,13 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 		return nil
 	}); err != nil {
 		logger.Error("daemon: repository topology batch failed", zap.Error(err))
+	}
+	// A batch that failed before its workers drained the queue leaves jobs
+	// that never ran. Settle them, so no configured repository reads as
+	// loading after the work that would have loaded it is gone. A no-op for
+	// every repository a job already settled.
+	for _, entry := range repos {
+		state.multiIndexer.FinishRepoLoad(entry.Path, errors.New("warmup ended before this repository was loaded"))
 	}
 	// RunRepositoryTopologyBatch has joined every parse worker and finalized
 	// the coordinated bulk loader. No producer still needs the canonical

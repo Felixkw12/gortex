@@ -102,6 +102,9 @@ func (s *Server) handleTrackRepository(ctx context.Context, req mcp.CallToolRequ
 	if s.multiIndexer == nil {
 		return mcp.NewToolResultError("multi-repo indexing is not enabled"), nil
 	}
+	if answer, loading := s.configuredRepoStillLoading(ctx, req, path); loading {
+		return answer, nil
+	}
 
 	entry := config.RepoEntry{Path: path}
 	if name, ok := req.GetArguments()["name"].(string); ok && name != "" {
