@@ -480,13 +480,14 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 	removedDuplicates := healDuplicateRepos(state.configManager.Global(), logger)
 	finishHeal(zap.Int("removed", removedDuplicates))
 
-	repos := state.multiIndexer.ResolveConfiguredRepos(ctx, state.configManager.Global().Repos)
-	// This snapshot is warmup's job set, so it is also the set that reads as
-	// loading. Re-announced after the duplicate heal above, which can drop a
-	// second spelling of one directory the boot-time announcement still held,
-	// and after prefix resolution, which skips a colliding entry that would
-	// otherwise read as loading forever.
-	state.multiIndexer.ExpectRepos(repos)
+	configuredRepos := state.configManager.Global().Repos
+	// Every configured entry reads as loading, including one that prefix
+	// resolution below skips; the settle loop after the job loop ends that one
+	// as failed with the prefix's owner. Re-announced after the duplicate heal
+	// above, which can drop a second spelling of one directory the boot-time
+	// announcement still held.
+	state.multiIndexer.ExpectRepos(configuredRepos)
+	repos := state.multiIndexer.ResolveConfiguredRepos(ctx, configuredRepos)
 
 	// Purge orphaned repo prefixes BEFORE the warmup loop re-registers the
 	// tracked repos, while the store still reflects the prior run's state. A
@@ -867,6 +868,11 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 	// every repository a job already settled.
 	for _, entry := range repos {
 		state.multiIndexer.FinishRepoLoad(entry.Path, errors.New("warmup ended before this repository was loaded"))
+	}
+	// A configured entry that prefix resolution skipped had no job. Settling
+	// it with no job error records the prefix's registered owner as the reason.
+	for _, entry := range configuredRepos {
+		state.multiIndexer.FinishRepoLoad(entry.Path, nil)
 	}
 	// RunRepositoryTopologyBatch has joined every parse worker and finalized
 	// the coordinated bulk loader. No producer still needs the canonical

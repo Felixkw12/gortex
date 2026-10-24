@@ -83,6 +83,10 @@ func TestWarmupPrefixCollisionPrefersPublishedCatalogOwner(t *testing.T) {
 			if includeOwner {
 				require.NotNil(t, mi.GetMetadata("src"))
 				assert.Equal(t, owner, mi.GetMetadata("src").RootPath)
+				load, ok := mi.RepoLoadFor(rejected)
+				require.True(t, ok, "a skipped collision must stay in the load table, not read as untracked")
+				assert.Equal(t, indexer.RepoLoadFailed, load.State)
+				assert.Contains(t, load.Reason, "prefix_taken")
 			}
 			assert.NotEmpty(t, g.GetRepoNodes("src"), "skipping a collision must not make its owner an orphan")
 			after, found, err := catalog.GetDedicatedGraph(t.Context(), binding.GraphID)
