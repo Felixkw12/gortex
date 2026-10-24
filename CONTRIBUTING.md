@@ -76,9 +76,18 @@ checks and is the right default for most work. Other optional build tags:
 go test -race ./...
 ```
 
-CI runs the suite under `-race` with `-timeout=45m` on Linux. A few packages —
-`internal/persistence` in particular — are slow under `-race`, so if you hit the
-default 10-minute panic, raise the timeout rather than assuming a hang.
+CI runs the suite under `-race` on Linux. A few packages — `internal/indexer`,
+`internal/mcp` and `internal/graph/store_sqlite` in particular — are slow under
+`-race`, so if you hit the default 10-minute panic, raise the timeout rather
+than assuming a hang. CI leaves the pure-Go SQLite driver out of race
+instrumentation (`-gcflags=modernc.org/...=-race=false`), which makes those
+packages several times faster; pass the same flag locally to match it.
+
+To run a package the way CI does, one worker process per CPU:
+
+```bash
+TEST_RACE=true python3 scripts/ci-test-partition.py --partition mcp+store
+```
 
 ### Linting
 
@@ -113,9 +122,12 @@ go test -bench=. -benchmem ./internal/graph/
 Your PR has to get past all of these
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
-- `go build` + `go test -race` with coverage on `ubuntu-latest`
-- `go build` + the full test suite without `-race` on `macos-latest` and
-  `windows-latest`
+- the full test suite under `-race` with coverage on `ubuntu-latest`, and
+  without `-race` on `macos-latest` and `windows-latest`, as four jobs per OS.
+  A test that fails while other tests share the runner is rerun once alone;
+  if it passes then, the job passes and flags it as flaky. A data race, a
+  timeout or a panic is never rerun.
+- `go build` on each OS
 - a static Linux build (`netgo,osusergo,static_link`) verified to be
   self-contained and smoke-tested inside `debian:11` and `alpine:3`
 - golangci-lint
