@@ -26,11 +26,13 @@ func (idx *Indexer) indexStateTarget(diskTarget graph.Store) graph.Store {
 	return idx.graph
 }
 
-// persistRepoIndexState records the per-repo freshness provenance. Index
-// passes call it at the end of a successful (re)index, and on the shadow path
-// only after the shadow drain succeeds; reconcileRepoIndexState also calls it
-// with no drain. diskTarget is the shadow's durable destination; nil falls
-// back to idx.graph.
+// persistRepoIndexState records the per-repo freshness provenance. Callers:
+// a full (re)index at its end, and on the shadow path only after the drain
+// succeeds; an edit-delta pass for the payload generation it built;
+// reconcileRepoIndexState after an incremental reconcile; and the census,
+// which stores counts when none are stored. diskTarget is the durable
+// destination (the shadow's store or the edit delta's generation handle);
+// nil falls back to idx.graph.
 // Backends without durable state (the in-memory graph) do not implement
 // RepoIndexStateWriter, so the write is skipped — exactly like the file-mtime
 // ledger.
