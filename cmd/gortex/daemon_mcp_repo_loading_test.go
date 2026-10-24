@@ -123,7 +123,9 @@ func TestDispatcher_LoadingRepo_AnswersByMethod(t *testing.T) {
 	})
 
 	t.Run("track of the configured root is already_configured", func(t *testing.T) {
-		frame := `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"workspace_admin","arguments":{"operation":"track","path":"` + loading + `"}}}`
+		path, err := json.Marshal(loading)
+		require.NoError(t, err)
+		frame := `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"workspace_admin","arguments":{"operation":"track","path":` + string(path) + `}}}`
 		text := toolResultText(t, dispatchJSON(t, d, sess, frame))
 		assert.Contains(t, text, "already_configured")
 		assert.Contains(t, text, "loading")
