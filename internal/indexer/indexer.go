@@ -2870,6 +2870,10 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 			}
 		}()
 		defer recoverIndexCtxRawStoragePanic(&result, &retErr)
+		// A panic can unwind the drain without setting retErr.
+		if shadowAttemptCounted && !shadowPublicationComplete {
+			censusMtimes = nil
+		}
 		published := retErr == nil && result != nil && censusMtimes != nil
 		if idx.finishColdSizeSkips(sizeReceiptCtx, sizeReceipts, censusMtimes, published) {
 			fileFailed.Store(true)
@@ -3360,7 +3364,7 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 					deferredVectorPlan = nil
 				}
 			}()
-			if retErr != nil {
+			if retErr != nil || result == nil {
 				return
 			}
 			// The read-only-context mode's one write gate. Everything the
@@ -3378,6 +3382,10 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				deferredVectorPlan = pruneVectorPlanToCorpus(deferredVectorPlan, inMemShadow)
 			}
 			reporter.Report("persisting bulk graph", 0, 0)
+			if err := ctx.Err(); err != nil {
+				retErr = err
+				return
+			}
 			drainStart := time.Now()
 			shadowNodeCount := inMemShadow.NodeCount()
 			shadowEdgeCount := inMemShadow.EdgeCount()
@@ -3428,6 +3436,19 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				return
 			}
 			bl.BeginBulkLoad()
+			// FlushBulk is a no-op under an outer coordinated window. Otherwise
+			// it must also restore the standalone window if a drain write panics.
+			bulkFlushPending := true
+			bulkFlushInProgress := false
+			defer func() {
+				// A FlushBulk panic may leave the store's writer lock held.
+				// Do not re-enter it; let the panic unwind the earlier defers.
+				if bulkFlushPending && !bulkFlushInProgress {
+					if err := bl.FlushBulk(); err != nil && retErr == nil {
+						retErr = fmt.Errorf("indexer: persist bulk graph: %w", err)
+					}
+				}
+			}()
 			// Transfer the shadow in explicit row/byte-capped batches. The
 			// process-wide shadow admission caps all live shadows at 1 GiB; these
 			// much smaller buffers prevent persistence from double-buffering an
@@ -3568,7 +3589,11 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 				zap.String("repo", idx.RepoPrefix()),
 				zap.Duration("drain_elapsed", flushStart.Sub(drainStart)),
 			)
-			if ferr := bl.FlushBulk(); ferr != nil && retErr == nil {
+			bulkFlushInProgress = true
+			ferr := bl.FlushBulk()
+			bulkFlushInProgress = false
+			bulkFlushPending = false
+			if ferr != nil && retErr == nil {
 				retErr = fmt.Errorf("indexer: persist bulk graph: %w", ferr)
 			}
 			idx.logger.Info("indexer: FlushBulk complete",
@@ -3629,6 +3654,10 @@ func (idx *Indexer) indexCtxRaw(ctx context.Context, root string) (result *Index
 					deferredVectorPlan.Release()
 					deferredVectorPlan = nil
 				}
+			}
+			// Cancellation during publication must not certify the replacement.
+			if retErr == nil {
+				retErr = ctx.Err()
 			}
 			shadowPublicationComplete = retErr == nil
 		}()
