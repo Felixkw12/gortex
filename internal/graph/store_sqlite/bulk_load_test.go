@@ -115,7 +115,7 @@ func TestBulkLoadDropsAndRebuildsIndexes(t *testing.T) {
 			t.Fatalf("index %s missing before bulk load", idx.name)
 		}
 	}
-	if got := pragmaIntDB(t, s.db, "synchronous"); got != 1 {
+	if got := pragmaIntDB(t, s.writerDB, "synchronous"); got != 1 {
 		t.Fatalf("synchronous before = %d, want 1 (NORMAL)", got)
 	}
 
@@ -180,8 +180,8 @@ func TestBulkLoadDropsAndRebuildsIndexes(t *testing.T) {
 			t.Fatalf("index %s not rebuilt after FlushBulk", idx.name)
 		}
 	}
-	// synchronous restored to NORMAL on the pool.
-	if got := pragmaIntDB(t, s.db, "synchronous"); got != 1 {
+	// synchronous restored to NORMAL on the writer connection.
+	if got := pragmaIntDB(t, s.writerDB, "synchronous"); got != 1 {
 		t.Fatalf("synchronous after = %d, want 1 (NORMAL)", got)
 	}
 	integrityOK(t, s.db)
