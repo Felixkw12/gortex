@@ -159,6 +159,10 @@ type CheckoutLifecycle struct {
 	catalog      *store_sqlite.Catalog
 	store        *store_sqlite.Store
 	leases       *graphview.LeaseManager
+	// Non-Git observations have no catalog intent to distinguish them from
+	// removed config entries. Keep their live root until explicit registration
+	// supersedes the observation or teardown removes it.
+	implicitRoots sync.Map // prefix -> registered root (non-catalog observations)
 
 	// Owner registration and closure share this lock; serving acquisition is
 	// registry-only and always precedes the reader's catalog snapshot.
@@ -781,6 +785,7 @@ func (l *CheckoutLifecycle) Register(
 		out.Prefix = config.ResolvePrefix(entry)
 	}
 
+	l.implicitRoots.Delete(out.Prefix)
 	identity, catalogErr := l.recordCheckout(ctx, out.Prefix, absPath, source, false)
 	out.CheckoutID, out.Incarnation = identity.checkoutID, identity.incarnation
 	out.FamilyID, out.GraphID = identity.familyID, identity.graphID
@@ -822,6 +827,11 @@ func (l *CheckoutLifecycle) RecordImplicit(ctx context.Context, root string) err
 	defer l.beginBatch()()
 
 	identity, err := l.recordCheckout(ctx, prefix, root, TrackSourceImplicit, false)
+	if identity.checkoutID == "" {
+		if meta := l.mi.GetMetadata(prefix); meta != nil {
+			l.implicitRoots.Store(prefix, meta.RootPath)
+		}
+	}
 	l.attachWatcherContext(ctx, prefix)
 	_ = l.reconcileFamilyNow(ctx, identity.familyID, root)
 	l.notifyTrackedSetChanged()
@@ -1673,7 +1683,7 @@ func (l *CheckoutLifecycle) ApplyReload(ctx context.Context) (ReloadResult, erro
 		}
 	}
 
-	for prefix := range l.mi.AllMetadata() {
+	for prefix, meta := range l.mi.AllMetadata() {
 		if wanted[prefix] {
 			continue
 		}
@@ -1684,6 +1694,10 @@ func (l *CheckoutLifecycle) ApplyReload(ctx context.Context) (ReloadResult, erro
 			// A cleanup purged it after the listing above. The purge drops the
 			// metadata before finalize reopens admission, so in this order a
 			// purge that lands between the two checks is still seen.
+			continue
+		}
+		if root, implicit := l.implicitRoots.Load(prefix); implicit && meta != nil &&
+			pathkey.SamePathIdentity(root.(string), meta.RootPath) {
 			continue
 		}
 		// An implicit observation never came from the config file. Its absence
@@ -4422,6 +4436,7 @@ func (l *CheckoutLifecycle) evictRepoChecked(
 	}
 	nodesRemoved, edgesRemoved, err = l.mi.purgeRepoChecked(ctx, prefix, finalize)
 	if l.mi.GetMetadata(prefix) == nil {
+		l.implicitRoots.Delete(prefix)
 		// The registry is hidden even when a later payload/vector/config phase
 		// fails. Invalidate cached scopes now; the closed mutation lane prevents
 		// the retained config intent from retracking in this process.
