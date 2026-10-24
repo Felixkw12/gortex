@@ -20,6 +20,15 @@ import (
 // Preset names are deliberately not reserved: a user custom provider of
 // the same name (providers.json or inline `llm.custom`) always wins.
 var gatewayPresets = map[string]CustomProvider{
+	// API Route (https://www.api-route.com/en/docs/quickstart) uses the
+	// OpenAI Chat Completions API with bare model ids.
+	"api-route": {
+		BaseURL:       "https://global.api-route.com/v1",
+		Model:         "gpt-6.1-sol",
+		APIKeyEnv:     "API_ROUTE_API_KEY",
+		SchemaMode:    "json_schema",
+		PromptProfile: "frontier",
+	},
 	// Cheaper Inference (https://cheaperinference.com/docs) is an
 	// OpenAI-compatible gateway; model ids are bare (no vendor prefix).
 	"cheaperinference": {

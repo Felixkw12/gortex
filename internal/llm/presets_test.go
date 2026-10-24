@@ -63,6 +63,12 @@ func TestConfig_ActiveCustom_PresetResolution(t *testing.T) {
 		t.Errorf("cheaperinference preset: %+v ok=%v profile=%v", cp, ok, ProfileFor(ci))
 	}
 
+	route := Config{Provider: "api-route"}
+	cp, ok = route.ActiveCustom()
+	if !ok || cp.BaseURL != "https://global.api-route.com/v1" || cp.Model != "gpt-6.1-sol" || cp.APIKeyEnv != "API_ROUTE_API_KEY" || cp.SchemaMode != "json_schema" || ProfileFor(route) != ProfileFrontier {
+		t.Errorf("api-route preset: %+v ok=%v profile=%v", cp, ok, ProfileFor(route))
+	}
+
 	// A user custom provider of the same name always wins, wholesale —
 	// no preset field leaks into it.
 	c.Custom = map[string]CustomProvider{"testgw": {BaseURL: "https://mine/v1", Model: "my-model"}}
