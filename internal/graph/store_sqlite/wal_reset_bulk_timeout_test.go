@@ -60,6 +60,11 @@ func TestWALBulkCompletionResetCapsPinnedConnectionBusyTimeout(t *testing.T) {
 	cfg := walReclaimConfig{thresholdBytes: 1, readerWait: time.Second, truncateBudget: walReclaimTruncateBudget}
 	err = s.reclaimWALInLane(context.Background(), cfg, checkpoint, res)
 	require.Error(t, err, "the reader must still pin the reset at the hold deadline")
+	select {
+	case <-entered:
+	default:
+		t.Fatal("bulk completion did not reach the reset connection")
+	}
 	require.False(t, res.openGate)
 	require.Less(t, res.writerHold, walReclaimMaxWriterHold+500*time.Millisecond)
 	require.LessOrEqual(t, observedBusy, walReclaimMaxWriterHold.Milliseconds())

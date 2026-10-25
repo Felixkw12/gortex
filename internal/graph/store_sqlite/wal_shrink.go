@@ -94,14 +94,27 @@ func (s *Store) resetWALForPressure(ctx context.Context) (walCheckpointResult, e
 }
 
 func (s *Store) resetWALForReclaimWithBusyTimeout(ctx context.Context, busyMillis int64) (walCheckpointResult, error) {
+	if err := ctx.Err(); err != nil {
+		return walCheckpointResult{}, err
+	}
 	walPath := s.dbPath + "-wal"
 	if walFileSize(walPath) < walShrinkInPlaceBytes {
 		var result walCheckpointResult
+		attempted := false
 		err := s.withWriterResetConnWithBusyTimeout(ctx, busyMillis, func(conn *sql.Conn) error {
+			attempted = true
 			var err error
 			result, err = checkpointWALOnceOn(ctx, conn, "TRUNCATE")
 			return err
 		})
+		if hook := walResetResultHook; hook != nil {
+			err = hook(err)
+		}
+		// modernc may return ctx.Err after SQLite completed the checkpoint.
+		// Every caller observes that physical result before releasing writeMu.
+		if info, statErr := os.Stat(walPath); attempted && err != nil && statErr == nil && info.Size() == 0 {
+			err = nil
+		}
 		return result, err
 	}
 	return s.resetWALInPlaceLockedWithBusyTimeout(ctx, busyMillis)
@@ -117,6 +130,10 @@ var walResetBusyMillis = sqliteCheckpointBusyTimeoutMillis
 // Nil in production; install before owned work starts and restore after join.
 // The callback must not retain the connection or start asynchronous work.
 var walResetCheckpointConnObserver func(context.Context, *sql.Conn)
+
+// walResetResultHook injects an interrupt after SQL for reset outcome tests.
+// Nil in production; recognition still runs while the write gate is held.
+var walResetResultHook func(error) error
 
 // withWriterResetConn runs fn on the writer connection with its busy timeout
 // lowered to walResetBusyMillis (or what is left of ctx's deadline), restored
@@ -162,6 +179,10 @@ func (s *Store) withWriterResetConnWithBusyTimeout(ctx context.Context, busyMill
 }
 
 func (s *Store) resetWALInPlaceLockedWithBusyTimeout(ctx context.Context, busyMillis int64) (result walCheckpointResult, err error) {
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	before := readWALWriteMark(s.dbPath)
 	if err := s.setWriterJournalLimitLocked(ctx, -1); err != nil {
 		return result, fmt.Errorf("wal in-place reset: lift the writer's journal_size_limit: %w", err)
 	}
@@ -176,16 +197,25 @@ func (s *Store) resetWALInPlaceLockedWithBusyTimeout(ctx context.Context, busyMi
 	err = s.withWriterResetConnWithBusyTimeout(ctx, busyMillis, func(conn *sql.Conn) error {
 		return s.restartWALInPlaceOn(ctx, conn, &result)
 	})
+	if hook := walResetResultHook; hook != nil {
+		err = hook(err)
+	}
+	after := readWALWriteMark(s.dbPath)
+	if walInPlaceResetCompleted(before, after) {
+		s.walShrinkPending.Store(true)
+		s.walReclaim.update(func(st *WALReclaimStats) { st.ShrinkInPlaceResets++ })
+		return result, nil
+	}
 	if err != nil {
 		return result, err
 	}
-	snap, ok := readWALIndexSnapshot(s.dbPath)
-	if !ok || snap.MxFrame > walShrinkMaxRestartFrames {
-		return result, fmt.Errorf("%w: mx_frame=%d", errWALResetNotRestarted, snap.MxFrame)
-	}
-	s.walShrinkPending.Store(true)
-	s.walReclaim.update(func(st *WALReclaimStats) { st.ShrinkInPlaceResets++ })
-	return result, nil
+	return result, fmt.Errorf("%w: mx_frame=%d", errWALResetNotRestarted, after.MxFrame)
+}
+
+func walInPlaceResetCompleted(before, after WALWriteMark) bool {
+	// A small mxFrame alone may predate this attempt. The changed salt proves
+	// a new incarnation; its bounded marker frames prove the log restarted.
+	return before.Valid && after.Valid && before.Salt != after.Salt && after.MxFrame <= walShrinkMaxRestartFrames
 }
 
 // restartWALInPlaceOn is the in-place reset's statements on one connection: a
