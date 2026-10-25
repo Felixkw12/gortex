@@ -280,7 +280,9 @@ call as *unknown* and re-read before assuming it did or did not land.
 
 When every dispatch slot is busy, a request waits up to the queue budget for
 one; at most 16× the dispatch cap may wait, and the wait counts against the
-request timeout.
+request timeout. A source edit gives its slot back while it waits for its graph
+refresh to publish, so editing agents do not hold slots that other requests
+need.
 
 The handler bound fires just inside any deadline the transport already imposed,
 so the client receives the tool-shaped diagnosis rather than an opaque transport

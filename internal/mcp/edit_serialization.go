@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/viewmetrics"
 )
@@ -470,6 +471,32 @@ func (r *mutationReceipt) outcome(pending bool) mutationReindexOutcome {
 	return outcome
 }
 
+type noDispatchSlotReleaseKey struct{}
+
+// withoutDispatchSlotRelease marks a wait that heavy work follows, such as a
+// multi-file rename's next write, so the wait keeps its dispatch slot.
+func withoutDispatchSlotRelease(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noDispatchSlotReleaseKey{}, true)
+}
+
+func noDispatchSlotRelease(ctx context.Context) bool {
+	marked, _ := ctx.Value(noDispatchSlotReleaseKey{}).(bool)
+	return marked
+}
+
+// releaseDispatchSlotForWait hands the request's daemon dispatch slot back at
+// a passive post-commit wait. Outside a daemon dispatch it does nothing.
+func (s *Server) releaseDispatchSlotForWait(ctx context.Context) {
+	if noDispatchSlotRelease(ctx) {
+		return
+	}
+	if s.releaseDispatchSlot != nil {
+		s.releaseDispatchSlot(ctx)
+		return
+	}
+	daemon.ReleaseMCPDispatchSlot(ctx)
+}
+
 func (s *Server) mutationWaitDuration() time.Duration {
 	if s.mutationReindexWait > 0 {
 		return s.mutationReindexWait
@@ -521,6 +548,9 @@ func (s *Server) mutationReindexState(ctx context.Context, absPath string) mutat
 				// publishes; actual queued writes still preempt chain folds.
 				resumeIntent := suspendSourceMutationWriteIntent(ctx)
 				defer resumeIntent()
+				// Only waiting from here on: let other requests use this
+				// dispatch slot.
+				s.releaseDispatchSlotForWait(ctx)
 				timer := time.NewTimer(s.mutationWaitDuration())
 				defer timer.Stop()
 				select {

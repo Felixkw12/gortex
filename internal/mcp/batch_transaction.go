@@ -1292,6 +1292,9 @@ func (s *Server) waitBatchGraphReceipts(ctx context.Context, files []batchTransa
 			// before the caller persists the durable receipt.
 			resumeIntent = suspendSourceMutationWriteIntent(ctx)
 			defer resumeIntent()
+			// Only waiting from here on: let other requests use this
+			// dispatch slot.
+			s.releaseDispatchSlotForWait(ctx)
 		}
 		timer := time.NewTimer(remaining)
 		select {

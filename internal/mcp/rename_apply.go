@@ -414,7 +414,7 @@ func (s *Server) planRenameWrites(ctx context.Context, edits []renameEdit, allow
 func (s *Server) commitRenameWrites(ctx context.Context, writes []*renameFileWrite) []map[string]any {
 	sess := s.sessionFor(ctx)
 	results := make([]map[string]any, 0, len(writes))
-	for _, w := range writes {
+	for i, w := range writes {
 		entry := map[string]any{
 			"file":          w.RelPath,
 			"edits":         w.Edits,
@@ -445,7 +445,13 @@ func (s *Server) commitRenameWrites(ctx context.Context, writes []*renameFileWri
 		}
 		entry["status"] = "applied"
 		sess.recordModified(w.RelPath)
-		outcome := s.mutationReindexState(ctx, w.AbsPath)
+		// Later files still write and may reindex inline, so only the last
+		// file's wait gives the dispatch slot back.
+		waitCtx := ctx
+		if i < len(writes)-1 {
+			waitCtx = withoutDispatchSlotRelease(ctx)
+		}
+		outcome := s.mutationReindexState(waitCtx, w.AbsPath)
 		commit.recordGraph(outcome)
 		if outcome.Err != nil {
 			entry["reindex_error"] = outcome.Err.Error()

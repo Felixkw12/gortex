@@ -273,6 +273,20 @@ type mcpDispatchWaitContextKey struct{}
 type mcpDispatchSlotsContextKey struct{}
 type mcpDispatchQueueWaitContextKey struct{}
 type mcpDispatchUnboundedContextKey struct{}
+type mcpDispatchSlotLeaseContextKey struct{}
+
+// mcpDispatchSlotLease lets the handler running a dispatch give its slot back
+// before it returns.
+type mcpDispatchSlotLease struct {
+	mu    sync.Mutex
+	grant *mcpDispatchSlotGrant // the attached dispatch's release; nil when none
+}
+
+// mcpDispatchSlotGrant carries one dispatch's slot release. Its address
+// identifies that dispatch, so a stale detach cannot clear a later attach.
+type mcpDispatchSlotGrant struct {
+	release func()
+}
 
 func isLongLivedMCPRequest(method string) bool {
 	return method == "subscriptions/listen"
@@ -308,6 +322,64 @@ func mcpDispatchSlotsForContext(ctx context.Context) chan struct{} {
 		return slots
 	}
 	return mcpDispatchSlots
+}
+
+// withMCPDispatchSlotLease gives one request an empty lease. A dispatch that
+// takes a slot attaches its release to the lease while its handler runs.
+func withMCPDispatchSlotLease(ctx context.Context) context.Context {
+	return context.WithValue(ctx, mcpDispatchSlotLeaseContextKey{}, &mcpDispatchSlotLease{})
+}
+
+func mcpDispatchSlotLeaseForContext(ctx context.Context) *mcpDispatchSlotLease {
+	lease, _ := ctx.Value(mcpDispatchSlotLeaseContextKey{}).(*mcpDispatchSlotLease)
+	return lease
+}
+
+// attach hands release to the handler and returns the grant that detaches it.
+// A nil lease attaches nothing.
+func (l *mcpDispatchSlotLease) attach(release func()) *mcpDispatchSlotGrant {
+	if l == nil {
+		return nil
+	}
+	grant := &mcpDispatchSlotGrant{release: release}
+	l.mu.Lock()
+	l.grant = grant
+	l.mu.Unlock()
+	return grant
+}
+
+// detach takes back grant if it is still attached. It is idempotent.
+func (l *mcpDispatchSlotLease) detach(grant *mcpDispatchSlotGrant) {
+	if l == nil || grant == nil {
+		return
+	}
+	l.mu.Lock()
+	if l.grant == grant {
+		l.grant = nil
+	}
+	l.mu.Unlock()
+}
+
+// ReleaseMCPDispatchSlot returns the calling request's dispatch slot to the
+// pool before its handler returns. A handler calls it when it starts a
+// passive wait and has no further heavy work: the rest of the handler runs
+// outside the dispatch cap. It reports whether a slot was returned; it is a
+// no-op without a daemon dispatch in progress and on every call after the
+// first.
+func ReleaseMCPDispatchSlot(ctx context.Context) bool {
+	lease := mcpDispatchSlotLeaseForContext(ctx)
+	if lease == nil {
+		return false
+	}
+	lease.mu.Lock()
+	grant := lease.grant
+	lease.grant = nil
+	lease.mu.Unlock()
+	if grant == nil {
+		return false
+	}
+	grant.release()
+	return true
 }
 
 func withMCPDispatchQueueWait(ctx context.Context, wait time.Duration) context.Context {
@@ -356,13 +428,17 @@ func dispatchMCPWithContext(ctx context.Context, dispatch func() ([]byte, error)
 
 	result := make(chan mcpDispatchResult, 1)
 	started := make(chan struct{})
+	lease := mcpDispatchSlotLeaseForContext(ctx)
 	go func() {
 		var releaseOnce sync.Once
 		release := func() { releaseOnce.Do(func() { <-slots }) }
-		defer release() // Retain the slot until an uncooperative handler returns, including panic unwinding.
+		defer release() // Retain the slot until an uncooperative handler returns, including panic unwinding, unless the handler hands it back early through ReleaseMCPDispatchSlot.
+		grant := lease.attach(release)
+		defer lease.detach(grant) // Registered after release, so it runs first while unwinding.
 		close(started)
 		reply, err := dispatch()
-		release() // A terminal response must not overtake its dispatch capacity release.
+		lease.detach(grant) // No release handle outlives the response.
+		release()           // A terminal response must not overtake its dispatch capacity release.
 		result <- mcpDispatchResult{reply: reply, err: err}
 	}()
 	<-started
@@ -553,7 +629,7 @@ func serveMCPConnectionWithHooks(conn net.Conn, reader *bufio.Reader, timeout ti
 		requestLine := append([]byte(nil), line...)
 		requestID := append(json.RawMessage(nil), responseID...)
 		admission := newMCPDispatchAdmission()
-		dispatchCtx := withMCPDispatchAdmission(requestCtx, admission)
+		dispatchCtx := withMCPDispatchSlotLease(withMCPDispatchAdmission(requestCtx, admission))
 		requests.Add(1)
 		go func() {
 			defer requests.Done()
