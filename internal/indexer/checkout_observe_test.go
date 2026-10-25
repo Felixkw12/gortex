@@ -71,7 +71,7 @@ func observeCheckoutUntilSettled(t testing.TB, lc *CheckoutLifecycle, path strin
 	for {
 		started := time.Now()
 		checkout, found, err := lc.ObserveCheckoutPath(ctx, path, authorize...)
-		if elapsed := time.Since(started); elapsed > time.Second {
+		if elapsed := time.Since(started); elapsed > testTimingSlack(time.Second) {
 			t.Fatalf("discovery request exceeded bounded wait: %s", elapsed)
 		}
 		if !errors.Is(err, ErrCheckoutMutationBusy) || ctx.Err() != nil {
@@ -296,7 +296,7 @@ func TestObserveCheckoutPathSlowMetadataReturnsRetryableBusy(t *testing.T) {
 	if found || !errors.Is(observeErr, ErrCheckoutMutationBusy) || !errors.Is(observeErr, context.DeadlineExceeded) {
 		t.Fatalf("slow discovery lost bounded retry state: found=%v err=%v", found, observeErr)
 	}
-	if time.Since(started) > 2*time.Second {
+	if time.Since(started) > testTimingSlack(2*time.Second) {
 		t.Fatal("metadata admission escaped its deadline")
 	}
 	rows, err := catalog.ListCheckouts(t.Context(), familyID)
@@ -309,27 +309,36 @@ func TestObserveCheckoutPathSlowInventoryMakesProgressAcrossRetries(t *testing.T
 	lc, catalog, primary, familyID, _, _ := newCheckoutObservationFixture(t)
 	worktree := filepath.Join(filepath.Dir(primary), "slow-inventory")
 	builderGit(t, primary, "worktree", "add", "-b", "slow-inventory", worktree)
+	release := make(chan struct{})
+	var once sync.Once
+	unpark := func() { once.Do(func() { close(release) }) }
+	defer unpark()
 	var calls atomic.Int32
 	lc.observationInventory = func(ctx context.Context, path string) (*gitstate.FamilyInventory, error) {
 		calls.Add(1)
-		timer := time.NewTimer(350 * time.Millisecond)
-		defer timer.Stop()
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-timer.C:
+		case <-release:
 			return gitstate.Inventory(ctx, path)
 		}
 	}
-	started := time.Now()
 	_, found, err := lc.ObserveCheckoutPath(t.Context(), worktree)
 	if found || !errors.Is(err, ErrCheckoutMutationBusy) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("slow inventory did not return bounded pending: found=%v err=%v", found, err)
 	}
-	if elapsed := time.Since(started); elapsed < 200*time.Millisecond || elapsed > time.Second {
-		t.Fatalf("unexpected discovery wait: %s", elapsed)
-	}
 	firstJob := checkoutObservationJobForTest(lc, worktree)
+	if firstJob == nil || firstJob.ctx.Err() != nil {
+		t.Fatal("the caller's deadline stopped the shared inventory job")
+	}
+	_, found, err = lc.ObserveCheckoutPath(t.Context(), worktree)
+	if found || !errors.Is(err, ErrCheckoutMutationBusy) {
+		t.Fatalf("blocked inventory retry did not remain pending: found=%v err=%v", found, err)
+	}
+	if checkoutObservationJobForTest(lc, worktree) != firstJob || calls.Load() != 1 {
+		t.Fatal("retry replaced the in-flight inventory job")
+	}
+	unpark()
 	checkout, found, err := observeCheckoutUntilSettled(t, lc, worktree)
 	if err != nil || !found || checkout.FamilyID != familyID {
 		t.Fatalf("retry did not finish continuing discovery: %+v found=%v err=%v", checkout, found, err)

@@ -2,6 +2,7 @@ package store_sqlite
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -304,7 +305,7 @@ func TestShadowReplacementCancelInvalidatesPriorProvenanceAndRetries(t *testing.
 	}})
 	shadowDeleteTrigger(t, s, "nodes", "OLD.id")
 	n, e, err := s.EvictRepoForShadowReplacement(ctx, "shadow")
-	require.True(t, errors.Is(err, context.Canceled), "%v", err)
+	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, 256, n)
 	require.Zero(t, e)
 	var states int
@@ -385,9 +386,9 @@ func TestShadowReplacementCompletesUnderUnrelatedWriters(t *testing.T) {
 	require.GreaterOrEqual(t, checkoutWrites.Load(), int32(2))
 	beforeBase, beforeCheckout := baseWrites.Load(), checkoutWrites.Load()
 	// This is an algorithm-completion fixture cap, not a foreground latency
-	// promise. Normal runs retain two seconds; race instrumentation gets the
-	// existing allowance while both checked producers must keep committing.
-	attempt, cancelAttempt := context.WithTimeout(t.Context(), raceSlack(2*time.Second))
+	// promise. Host and race slack allow slow fixture completion while both
+	// checked producers must keep committing.
+	attempt, cancelAttempt := context.WithTimeout(t.Context(), testTimingSlack(2*time.Second))
 	defer cancelAttempt()
 	start := time.Now()
 	n, e, err := s.EvictRepoForShadowReplacement(attempt, "shadow")
@@ -591,4 +592,66 @@ func TestShadowEndpointRevisionIgnoresPositiveWritesAndRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, stats.updatedRows)
 	require.Equal(t, uint64(1), s.baseEdgeEndpointRevision.Load())
+}
+
+func TestShadowEvictStepNormalizesOnlyCanceledCompletedTransactions(t *testing.T) {
+	for _, stage := range []string{"mutate", "invalidation", "commit"} {
+		t.Run(stage, func(t *testing.T) {
+			for _, canceled := range []bool{false, true} {
+				name := "live"
+				if canceled {
+					name = "canceled"
+				}
+				t.Run(name, func(t *testing.T) {
+					s, _ := shadowEvictionFixture(t, 0)
+					s.analysisGenerationPresent = stage == "invalidation"
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					n, err := s.shadowEvictStep(ctx, func(tx *sql.Tx) (int, *sqliteMutationReceiptAccumulator, error) {
+						// Complete rollback before the selected operation, without
+						// depending on database/sql's rollback goroutine scheduling.
+						if err := tx.Rollback(); err != nil {
+							return 0, nil, err
+						}
+						if canceled {
+							cancel()
+						}
+						switch stage {
+						case "mutate":
+							_, err := tx.Exec(`SELECT 1`)
+							return 0, nil, err
+						case "invalidation":
+							// A successful mutation with a positive count forces the
+							// next SQL call through invalidateAnalysisViewTx.
+							return 1, nil, nil
+						default:
+							return 0, nil, nil
+						}
+					})
+					require.Zero(t, n)
+					if canceled {
+						require.ErrorIs(t, err, context.Canceled)
+					} else {
+						require.ErrorIs(t, err, sql.ErrTxDone)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestShadowEvictStepKeepsARealErrorWhenACancelRacesIt(t *testing.T) {
+	s, _ := shadowEvictionFixture(t, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	sentinel := errors.New("controlled write failure")
+	n, err := s.shadowEvictStep(ctx, func(*sql.Tx) (int, *sqliteMutationReceiptAccumulator, error) {
+		// The cancel lands while the transaction is still open, so only the
+		// real error, not a completed transaction, reaches the normalizer.
+		cancel()
+		return 0, nil, sentinel
+	})
+	require.Zero(t, n)
+	require.ErrorIs(t, err, sentinel)
+	require.NotErrorIs(t, err, context.Canceled)
 }
