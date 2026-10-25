@@ -104,7 +104,7 @@ func TestRunTrackPrefixCollisionKeepsAliasEntry(t *testing.T) {
 }
 
 func TestNotifyDaemonTrackPrefixCollision(t *testing.T) {
-	_, _, first := spinUpDaemonWithConfig(t)
+	_, _, first, _ := spinUpDaemonWithConfig(t)
 	second := filepath.Join(t.TempDir(), filepath.Base(first))
 	require.NoError(t, os.MkdirAll(second, 0o755))
 	origName := trackName
