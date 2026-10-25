@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -2979,6 +2980,14 @@ func (mi *MultiIndexer) resolveTrackPrefix(entry *config.RepoEntry, absPath stri
 	}
 	publish(prefix)
 	mi.mu.Unlock()
+	// Hand the indexer the manager's shared exclude snapshot, as main does by
+	// rebuilding after publication: policy refreshes compare slice identity,
+	// so a private copy would read as a changed policy on the first pass.
+	// Another root can publish the same prefix after the unlock; keep the
+	// prepared list unless the shared one has the same content.
+	if effective := mi.configMgr.EffectiveExclude(prefix); slices.Equal(effective, cfg.Exclude) {
+		cfg.Exclude, cfg.Index.Exclude, cfg.Watch.Exclude = effective, effective, effective
+	}
 	return prefix, cfg
 }
 
