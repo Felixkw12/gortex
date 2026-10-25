@@ -183,17 +183,33 @@ func (s *Store) resetWALInPlaceLockedWithBusyTimeout(ctx context.Context, busyMi
 		return result, err
 	}
 	before := readWALWriteMark(s.dbPath)
+	conn, release, err := s.activeWriteConnLocked(ctx)
+	if err != nil {
+		return result, err
+	}
+	var previousLimit int64
+	err = conn.QueryRowContext(ctx, `PRAGMA journal_size_limit`).Scan(&previousLimit)
+	release()
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		if err == nil || s.walShrinkPending.Load() || previousLimit == -1 {
+			return
+		}
+		// A refused RESTART may already have copied the whole log. The next
+		// application commit can then restart it: keep -1 so that commit does
+		// not truncate the entire file before the slice shrink can run.
+		if snap, ok := readWALIndexSnapshot(s.dbPath); ok && snap.NBackfill >= snap.MxFrame {
+			return
+		}
+		_ = s.setWriterJournalLimitLocked(context.Background(), previousLimit)
+	}()
+	// Own cleanup before the PRAGMA, whose preparation may apply the limit
+	// even if the driver subsequently reports cancellation.
 	if err := s.setWriterJournalLimitLocked(ctx, -1); err != nil {
 		return result, fmt.Errorf("wal in-place reset: lift the writer's journal_size_limit: %w", err)
 	}
-	defer func() {
-		// A reset that did not happen leaves nothing to shrink: give the
-		// writer its limit back (unless an earlier reset's shrink is still
-		// pending and will restore it).
-		if err != nil && !s.walShrinkPending.Load() {
-			_ = s.setWriterJournalLimitLocked(context.Background(), walShrinkKeepBytes)
-		}
-	}()
 	err = s.withWriterResetConnWithBusyTimeout(ctx, busyMillis, func(conn *sql.Conn) error {
 		return s.restartWALInPlaceOn(ctx, conn, &result)
 	})
@@ -254,11 +270,17 @@ func (s *Store) restartWALInPlaceOn(ctx context.Context, conn *sql.Conn, result 
 // setWriterJournalLimitLocked sets journal_size_limit on the writer
 // connection. The caller holds writeMu.
 func (s *Store) setWriterJournalLimitLocked(ctx context.Context, limit int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	conn, release, err := s.activeWriteConnLocked(ctx)
 	if err != nil {
 		return err
 	}
 	defer release()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	_, err = conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA journal_size_limit = %d`, limit))
 	return err
 }
