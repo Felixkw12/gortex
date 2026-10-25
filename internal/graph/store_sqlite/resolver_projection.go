@@ -429,10 +429,10 @@ func (s *Store) QualifiedNodeIdentitiesSeq(kinds ...graph.NodeKind) iter.Seq[gra
 func (s *Store) FileNodeIdentitiesSeq(repoPrefixes []string) iter.Seq[graph.FileNodeIdentity] {
 	return resolverNodeProjectionSeq(
 		s, []graph.NodeKind{graph.KindFile}, repoPrefixes,
-		`id, file_path, repo_prefix, workspace_id`,
+		`id, file_path, repo_prefix, workspace_id, language`,
 		func(rows *sql.Rows) (graph.FileNodeIdentity, string, error) {
 			var row graph.FileNodeIdentity
-			err := rows.Scan(&row.ID, &row.FilePath, &row.RepoPrefix, &row.WorkspaceID)
+			err := rows.Scan(&row.ID, &row.FilePath, &row.RepoPrefix, &row.WorkspaceID, &row.Language)
 			return row, row.ID, err
 		},
 	)

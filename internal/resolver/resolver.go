@@ -4379,12 +4379,11 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 				}
 			}
 			quality := fallback
-			// The candidate's language is read only for a folder match, so an
-			// import costs no file-wide language walk.
-			if callerLanguage != "" && dir != "" && (dir == importPath || strings.HasSuffix(importPath, "/"+dir)) {
-				if node := r.cachedGetNode(file.ID); node != nil && node.Language == callerLanguage {
-					quality = folderMatch
-				}
+			// The directory index carries each file's language, so a folder
+			// match costs no store read.
+			if callerLanguage != "" && dir != "" && file.Language == callerLanguage &&
+				(dir == importPath || strings.HasSuffix(importPath, "/"+dir)) {
+				quality = folderMatch
 			}
 			if ownership == GoPackageOwnershipExact {
 				quality = exactOwnership

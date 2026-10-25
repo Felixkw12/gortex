@@ -32,8 +32,8 @@ func sameRepoImportFixture(importPath, mode string) (*Resolver, *graph.Edge) {
 		FilePath: "src/main.go", Language: "go", RepoPrefix: "src",
 	})
 	files := []graph.FileNodeIdentity{
-		{ID: "src/a/config/config.go", FilePath: "src/a/config/config.go", RepoPrefix: "src"},
-		{ID: "src/b/config/config.go", FilePath: "src/b/config/config.go", RepoPrefix: "src"},
+		{ID: "src/a/config/config.go", FilePath: "src/a/config/config.go", RepoPrefix: "src", Language: "go"},
+		{ID: "src/b/config/config.go", FilePath: "src/b/config/config.go", RepoPrefix: "src", Language: "go"},
 	}
 	for _, file := range files {
 		g.AddNode(&graph.Node{
@@ -136,8 +136,8 @@ func TestResolveImportRepoRootPrefersMatchingPath(t *testing.T) {
 					FilePath: "repo/app/main.go", Language: "go", RepoPrefix: "repo",
 				})
 				files := []graph.FileNodeIdentity{
-					{ID: "repo/root.go", FilePath: "repo/root.go", RepoPrefix: "repo"},
-					{ID: "repo/repo/pkg.go", FilePath: "repo/repo/pkg.go", RepoPrefix: "repo"},
+					{ID: "repo/root.go", FilePath: "repo/root.go", RepoPrefix: "repo", Language: "go"},
+					{ID: "repo/repo/pkg.go", FilePath: "repo/repo/pkg.go", RepoPrefix: "repo", Language: "go"},
 				}
 				if ownership == "no-root" {
 					files = files[1:]
@@ -212,7 +212,7 @@ func TestResolveImportSameRepoOwnershipAndLanguage(t *testing.T) {
 								g.AddNode(&graph.Node{ID: caller, Kind: graph.KindFile, FilePath: caller, Language: tc.callerLanguage, RepoPrefix: prefix})
 								g.AddNode(&graph.Node{ID: correct, Kind: graph.KindFile, FilePath: correct, Language: tc.callerLanguage, RepoPrefix: prefix})
 								g.AddNode(&graph.Node{ID: other, Kind: graph.KindFile, FilePath: other, Language: tc.otherLanguage, RepoPrefix: prefix})
-								files := []graph.FileNodeIdentity{{ID: correct, FilePath: correct, RepoPrefix: prefix}, {ID: other, FilePath: other, RepoPrefix: prefix}}
+								files := []graph.FileNodeIdentity{{ID: correct, FilePath: correct, RepoPrefix: prefix, Language: tc.callerLanguage}, {ID: other, FilePath: other, RepoPrefix: prefix, Language: tc.otherLanguage}}
 								if reverse {
 									files[0], files[1] = files[1], files[0]
 								}
@@ -262,4 +262,46 @@ func TestResolveImportSameRepoDifferentLanguageFallback(t *testing.T) {
 	g.AddEdge(e)
 	New(g).ResolveAll()
 	assert.Equal(t, "repo/config/settings.py", e.To, "another language remains the fallback when no folder matches")
+}
+
+// getNodeCountingStore counts point reads of nodes.
+type getNodeCountingStore struct {
+	graph.Store
+	gets int
+}
+
+func (s *getNodeCountingStore) GetNode(id string) *graph.Node {
+	s.gets++
+	return s.Store.GetNode(id)
+}
+
+// The folder match compares the language the directory index carries, so
+// ranking candidates reads no node from the store: an import of a large
+// package would otherwise read every file in its folder on each save.
+func TestResolveImportFolderMatchReadsNoCandidateNodes(t *testing.T) {
+	const importPath = "example.com/module/b/config"
+	g := graph.New()
+	caller := &graph.Node{
+		ID: "src/main.go", Kind: graph.KindFile, Name: "main.go",
+		FilePath: "src/main.go", Language: "go", RepoPrefix: "src",
+	}
+	g.AddNode(caller)
+	for _, id := range []string{"src/a/config/config.go", "src/b/config/config.go", "src/b/config/load.go"} {
+		g.AddNode(&graph.Node{ID: id, Kind: graph.KindFile, Name: id, FilePath: id, Language: "go", RepoPrefix: "src"})
+	}
+	store := &getNodeCountingStore{Store: g}
+	r := New(store)
+	// Production always installs the workspace lookup, so the scan never stops early.
+	r.SetWorkspaceMembership(func(string) string { return "" })
+	r.buildDirIndexes()
+	r.nodeByID = map[string]*graph.Node{caller.ID: caller}
+	e := &graph.Edge{
+		From: caller.ID, To: "unresolved::import::" + importPath,
+		Kind: graph.EdgeImports, FilePath: caller.ID, Line: 3,
+	}
+
+	r.resolveImport(e, importPath, &ResolveStats{})
+
+	assert.Equal(t, "src/b/config/config.go", e.To)
+	assert.Zero(t, store.gets, "ranking import candidates read nodes from the store")
 }
