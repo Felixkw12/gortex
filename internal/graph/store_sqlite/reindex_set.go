@@ -692,18 +692,7 @@ func sqliteReindexRowsTxLimited(tx *sql.Tx, viewGen int64, keys []sqliteReindexK
 		}
 		args = append(args, viewGen)
 
-		query := `WITH wanted(from_id, to_id, kind, file_path, line) AS (VALUES ` + multiValues(rowCount, reindexKeyParamsPerRow) + `)
-		SELECT e.from_id, e.to_id, e.kind, e.file_path, e.line,
-			e.confidence, e.confidence_label, e.origin, e.tier, e.cross_repo,
-			e.meta, e.resolve_terminal, e.resolve_terminal_reason, e.semantic_source
-		FROM wanted AS w
-		JOIN edges AS e
-		  ON e.from_id = w.from_id
-		 AND e.to_id = w.to_id
-		 AND e.kind = w.kind
-		 AND e.file_path = w.file_path
-		 AND e.line = w.line
-		 AND e.view_gen = ?`
+		query := sqliteReindexRowsSQL(rowCount)
 		rows, err := tx.Query(query, args...)
 		if tooManySQLVariables(err) && rowCount > 1 {
 			rowLimit = lowerBatchVariableLimit(variableLimit, reindexKeyParamsPerRow, rowCount)
@@ -746,8 +735,28 @@ func simulateSQLiteReindexSet(
 	for key, row := range initial {
 		state[key] = row
 	}
+	// Free every moving stored identity before choosing destination payloads.
+	// A chain or swap must not mistake a moving sibling for a stationary row.
+	moving := make(map[sqliteReindexKey]bool, len(mutations))
 	for _, mutation := range mutations {
-		delete(state, mutation.oldKey)
+		if mutation.oldKey != mutation.newRow.key {
+			moving[mutation.oldKey] = true
+			delete(state, mutation.oldKey)
+		}
+	}
+	for _, mutation := range mutations {
+		if mutation.oldKey == mutation.newRow.key {
+			if !moving[mutation.oldKey] {
+				// Do not resurrect an identity that this batch moves away.
+				state[mutation.newRow.key] = mutation.newRow
+			}
+			continue
+		}
+		if _, stored := initial[mutation.oldKey]; !stored {
+			// An intermediate identity created by an earlier entry still
+			// applies in order, preserving net cancellation within a batch.
+			delete(state, mutation.oldKey)
+		}
 		if _, exists := state[mutation.newRow.key]; !exists {
 			state[mutation.newRow.key] = mutation.newRow
 		}
@@ -814,19 +823,7 @@ func deleteSQLiteReindexRowsTxLimited(tx *sql.Tx, viewGen int64, keys []sqliteRe
 		}
 		args = append(args, viewGen)
 
-		query := `WITH doomed(from_id, to_id, kind, file_path, line) AS (VALUES ` + multiValues(rowCount, reindexKeyParamsPerRow) + `)
-		DELETE FROM edges
-		WHERE id IN (
-			SELECT e.id
-			FROM edges AS e
-			JOIN doomed AS d
-			  ON e.from_id = d.from_id
-			 AND e.to_id = d.to_id
-			 AND e.kind = d.kind
-			 AND e.file_path = d.file_path
-			 AND e.line = d.line
-			 AND e.view_gen = ?
-		)`
+		query := edgeExactDeleteByIdentitySQL(multiValues(rowCount, reindexKeyParamsPerRow))
 		result, err := tx.Exec(query, args...)
 		if tooManySQLVariables(err) && rowCount > 1 {
 			rowLimit = lowerBatchVariableLimit(variableLimit, reindexKeyParamsPerRow, rowCount)
@@ -900,4 +897,21 @@ func insertSQLiteReindexRowsTxLimited(tx *sql.Tx, viewGen int64, rows []sqliteRe
 		changed += int(inserted)
 	}
 	return changed, statements, nil
+}
+
+// Drive from the bounded identities even when stale statistics describe a tiny
+// generation. Reversing this join scans every generation edge per identity.
+func sqliteReindexRowsSQL(rowCount int) string {
+	return `WITH wanted(from_id, to_id, kind, file_path, line) AS (VALUES ` + multiValues(rowCount, reindexKeyParamsPerRow) + `)
+		SELECT e.from_id, e.to_id, e.kind, e.file_path, e.line,
+			e.confidence, e.confidence_label, e.origin, e.tier, e.cross_repo,
+			e.meta, e.resolve_terminal, e.resolve_terminal_reason, e.semantic_source
+		FROM wanted AS w
+		CROSS JOIN edges AS e
+		  ON e.from_id = w.from_id
+		 AND e.to_id = w.to_id
+		 AND e.kind = w.kind
+		 AND e.file_path = w.file_path
+		 AND e.line = w.line
+		 AND e.view_gen = ?`
 }

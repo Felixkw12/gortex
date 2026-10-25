@@ -75,9 +75,7 @@ var errWALResetNotRestarted = errors.New("store_sqlite: wal in-place reset: the 
 
 // resetWALForReclaim is the reclaim's reset: a TRUNCATE checkpoint for a small
 // log, the in-place reset (and a pending shrink) for a big one. The caller
-// holds the write gate and has backfilled the log. A reset that completed
-// after its context ended returns nil (see walResetInterrupted), so every
-// caller counts it the same way.
+// holds the write gate and has backfilled the log.
 // The reset of the log runs on the writer connection (the caller holds
 // writeMu), never on the reclaim's checkpoint connection: a connection
 // discards its page cache when another connection changes the log's header,
@@ -96,20 +94,26 @@ func (s *Store) resetWALForPressure(ctx context.Context) (walCheckpointResult, e
 }
 
 func (s *Store) resetWALForReclaimWithBusyTimeout(ctx context.Context, busyMillis int64) (walCheckpointResult, error) {
+	if err := ctx.Err(); err != nil {
+		return walCheckpointResult{}, err
+	}
 	walPath := s.dbPath + "-wal"
 	if walFileSize(walPath) < walShrinkInPlaceBytes {
 		var result walCheckpointResult
+		attempted := false
 		err := s.withWriterResetConnWithBusyTimeout(ctx, busyMillis, func(conn *sql.Conn) error {
+			attempted = true
 			var err error
 			result, err = checkpointWALOnceOn(ctx, conn, "TRUNCATE")
 			return err
 		})
-		if walResetInterrupted(err) && walFileSize(walPath) == 0 {
-			// The TRUNCATE emptied the file: the log is reset. mxFrame 0
-			// alone would not show it, since the header is reset before the
-			// ftruncate, which can still fail. The writer is held, so no
-			// commit can have refilled the file.
-			return result, nil
+		if hook := walResetResultHook; hook != nil {
+			err = hook(err)
+		}
+		// modernc may return ctx.Err after SQLite completed the checkpoint.
+		// Every caller observes that physical result before releasing writeMu.
+		if info, statErr := os.Stat(walPath); attempted && walResetInterrupted(err) && statErr == nil && info.Size() == 0 {
+			err = nil
 		}
 		return result, err
 	}
@@ -137,39 +141,43 @@ var walResetBusyMillis = sqliteCheckpointBusyTimeoutMillis
 // The callback must not retain the connection or start asynchronous work.
 var walResetCheckpointConnObserver func(context.Context, *sql.Conn)
 
-// withWriterResetConn runs fn on the active write connection (the writer, or
-// the pinned bulk connection inside a bulk window) with its busy timeout
+// walResetResultHook injects an interrupt after SQL for reset outcome tests.
+// Nil in production; recognition still runs while the write gate is held.
+var walResetResultHook func(error) error
+
+// withWriterResetConn runs fn on the writer connection with its busy timeout
 // lowered to walResetBusyMillis (or what is left of ctx's deadline), restored
-// afterwards. The caller holds writeMu.
+// afterwards. The caller holds
+// writeMu. A bulk window reuses its pinned connection with the same bounded
+// busy policy, then restores that connection's previous timeout.
 func (s *Store) withWriterResetConn(ctx context.Context, fn func(conn *sql.Conn) error) error {
 	return s.withWriterResetConnWithBusyTimeout(ctx, int64(walResetBusyMillis), fn)
 }
 
 func (s *Store) withWriterResetConnWithBusyTimeout(ctx context.Context, busyMillis int64, fn func(conn *sql.Conn) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	conn, release, err := s.activeWriteConnLocked(ctx)
 	if err != nil {
 		return err
 	}
 	defer release()
-	// SQLite's wait for readers to leave the log never checks the interrupt,
-	// so this timeout, not ctx, bounds how long a reset keeps the writer. The
-	// pinned bulk connection needs it as much as the writer's: left at its
-	// 5 s, a bulk completion's reset held the writer 3.9 s and 5.1 s against
-	// the 2 s cap.
-	busy := busyMillis
-	if deadline, ok := ctx.Deadline(); ok {
-		if left := time.Until(deadline).Milliseconds(); left < busy {
-			busy = max(left, 0)
-		}
-	}
-	var prev int64
-	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&prev); err != nil {
+	var previous int64
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&previous); err != nil {
 		return err
 	}
-	// Restored on every exit: SQLite applies the PRAGMA when it prepares it,
-	// so even a call that reports ctx's error may have lowered it.
+	busy := max(busyMillis, 0)
+	if deadline, ok := ctx.Deadline(); ok {
+		busy = min(busy, max(time.Until(deadline).Milliseconds(), 0))
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Prepare may apply a PRAGMA even when ExecContext reports cancellation.
+	// Own restoration before issuing it, including on a pinned bulk connection.
 	defer func() {
-		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, prev))
+		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, previous))
 	}()
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout = %d`, busy)); err != nil {
 		return err
@@ -181,53 +189,62 @@ func (s *Store) withWriterResetConnWithBusyTimeout(ctx context.Context, busyMill
 }
 
 func (s *Store) resetWALInPlaceLockedWithBusyTimeout(ctx context.Context, busyMillis int64) (result walCheckpointResult, err error) {
-	before, beforeOK := readWALReclaimFrontier(s.dbPath)
-	if err := s.setWriterJournalLimitLocked(ctx, -1); err != nil {
-		return result, fmt.Errorf("wal in-place reset: lift the writer's journal_size_limit: %w", err)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	before := readWALWriteMark(s.dbPath)
+	conn, release, err := s.activeWriteConnLocked(ctx)
+	if err != nil {
+		return result, err
+	}
+	var previousLimit int64
+	err = conn.QueryRowContext(ctx, `PRAGMA journal_size_limit`).Scan(&previousLimit)
+	release()
+	if err != nil {
+		return result, err
 	}
 	defer func() {
 		if err == nil {
 			return
 		}
-		// The reset gave up. A log already fully copied restarts at the
-		// first commit once its readers leave (a reader refused the RESTART,
-		// or the RESTART completed after its deadline): keep the writer's
-		// limit lifted so that commit does not truncate the file in one
-		// call, and leave the file to the shrink once the log has restarted.
+		// A fully copied log can restart on the next commit even when its
+		// RESTART was refused. Remember that incarnation until it restarts or
+		// is emptied; its live-frame floor alone cannot authorize restoration.
 		if after, ok := readWALReclaimFrontier(s.dbPath); ok && after.mx > 0 && after.backfill == after.mx {
 			s.walLimitKept.Store(&after)
 			return
 		}
-		// Otherwise nothing is left to shrink: give the writer its limit
-		// back, unless a shrink still to come (an earlier reset's, or a kept
-		// log's) will restore it.
-		if !s.walShrinkPending.Load() && s.walLimitKept.Load() == nil {
-			_ = s.setWriterJournalLimitLocked(context.Background(), walShrinkKeepBytes)
+		if !s.walShrinkPending.Load() && s.walLimitKept.Load() == nil && previousLimit != -1 {
+			_ = s.setWriterJournalLimitLocked(context.Background(), previousLimit)
 		}
 	}()
+	// Own cleanup before the PRAGMA, whose preparation may apply the limit
+	// even if the driver subsequently reports cancellation.
+	if err := s.setWriterJournalLimitLocked(ctx, -1); err != nil {
+		return result, fmt.Errorf("wal in-place reset: lift the writer's journal_size_limit: %w", err)
+	}
 	err = s.withWriterResetConnWithBusyTimeout(ctx, busyMillis, func(conn *sql.Conn) error {
 		return s.restartWALInPlaceOn(ctx, conn, &result)
 	})
-	if walResetInterrupted(err) && beforeOK {
-		// The marker committed: the log restarted at its first frame under a
-		// new salt. Decided before the deferred restore above, so the reset
-		// counts with its shrink pending and the writer's limit still lifted.
-		// A RESTART that completed late does not count: without the marker
-		// the log has not restarted, and it restarts only at the next commit.
-		if after, ok := readWALReclaimFrontier(s.dbPath); ok && after.salt != before.salt && after.mx <= walShrinkMaxRestartFrames {
-			err = nil
-		}
+	if hook := walResetResultHook; hook != nil {
+		err = hook(err)
+	}
+	after := readWALWriteMark(s.dbPath)
+	if (err == nil || walResetInterrupted(err)) && walInPlaceResetCompleted(before, after) {
+		s.walShrinkPending.Store(true)
+		s.walReclaim.update(func(st *WALReclaimStats) { st.ShrinkInPlaceResets++ })
+		return result, nil
 	}
 	if err != nil {
 		return result, err
 	}
-	snap, ok := readWALIndexSnapshot(s.dbPath)
-	if !ok || snap.MxFrame > walShrinkMaxRestartFrames {
-		return result, fmt.Errorf("%w: mx_frame=%d", errWALResetNotRestarted, snap.MxFrame)
-	}
-	s.walShrinkPending.Store(true)
-	s.walReclaim.update(func(st *WALReclaimStats) { st.ShrinkInPlaceResets++ })
-	return result, nil
+	return result, fmt.Errorf("%w: mx_frame=%d", errWALResetNotRestarted, after.MxFrame)
+}
+
+func walInPlaceResetCompleted(before, after WALWriteMark) bool {
+	// A small mxFrame alone may predate this attempt. The changed salt proves
+	// a new incarnation; its bounded marker frames prove the log restarted.
+	return before.Valid && after.Valid && before.Salt != after.Salt && after.MxFrame <= walShrinkMaxRestartFrames
 }
 
 // restartWALInPlaceOn is the in-place reset's statements on one connection: a
@@ -264,16 +281,10 @@ func (s *Store) restartWALInPlaceOn(ctx context.Context, conn *sql.Conn, result 
 }
 
 // setWriterJournalLimitLocked sets journal_size_limit on the writer
-// connection. The caller holds writeMu.
-//
-// SQLite applies the limit when it prepares the PRAGMA, before the driver
-// looks at ctx, so a call on an ended context changed the limit and still
-// returned the context's error: inside a bulk window, where no pool checkout
-// refuses the context first, a reset retried after its deadline left the bulk
-// connection at -1 with no shrink pending. An ended context therefore changes
-// nothing, and the PRAGMA runs without ctx, so its error says whether the
-// limit changed. It only sets a field of the pager and takes no lock, so it
-// cannot extend a hold.
+// connection. The caller holds writeMu. SQLite applies this pager setting at
+// preparation, before the driver can observe cancellation. Reject ended
+// contexts first, then detach this lock-free mutation so its result describes
+// whether the setting actually changed.
 func (s *Store) setWriterJournalLimitLocked(ctx context.Context, limit int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -283,6 +294,9 @@ func (s *Store) setWriterJournalLimitLocked(ctx context.Context, limit int64) er
 		return err
 	}
 	defer release()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	_, err = conn.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf(`PRAGMA journal_size_limit = %d`, limit))
 	return err
 }
@@ -352,8 +366,6 @@ func (s *Store) shrinkWALSliceOnce(ctx context.Context, ckptDB *sql.DB, slice in
 // walShrinkNeeded reports a -wal file larger than its live frames need by
 // more than the smallest slice: a log reset in place and not yet shrunk (or
 // one a commit restarted while the writer's journal_size_limit was lifted).
-// It also reports a kept log (walLimitKept) that has since restarted or been
-// truncated: the shrink then restores the writer's limit, whatever the size.
 func (s *Store) walShrinkNeeded() bool {
 	if s.walShrinkPending.Load() {
 		return true
