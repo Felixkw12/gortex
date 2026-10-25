@@ -190,6 +190,7 @@ func contractCoreCapabilityTable() []contractCoreCapRow {
 		{"CrossRepoEdgeAggregator", capOf[graph.CrossRepoEdgeAggregator], capDropped, capReasonEdges},
 		{"ExtractCandidatesScanner", capOf[graph.ExtractCandidatesScanner], capDropped, capReasonEdges},
 		{"FileImportAggregator", capOf[graph.FileImportAggregator], capDropped, capReasonEdges},
+		{"ScopedOutlineAggregator", capOf[graph.ScopedOutlineAggregator], capDropped, capReasonEdges},
 		{"FileImporters", capOf[graph.FileImporters], capDropped, capReasonEdges},
 		{"FileSubGraphReader", capOf[graph.FileSubGraphReader], capDropped, capReasonEdges},
 		{"FileSubGraphCountReader", capOf[graph.FileSubGraphCountReader], capDropped, capReasonEdges},

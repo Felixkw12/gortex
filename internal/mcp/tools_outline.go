@@ -31,32 +31,73 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 		topLanguagesN    = 5
 	)
 
-	// scopedNodes confines the whole-repo overview to the session's
-	// workspace — for an unbound session it returns every node, so the
-	// outline is byte-identical to the legacy global view. inScope is
-	// the node-ID set used to bound the edge-driven and analyzer-driven
-	// sections; nil for an unbound session means "no filter".
-	_, _, bound := s.sessionScope(ctx)
+	// Bound sessions aggregate the request reader's scope in the backend.
+	// Keep unbound sessions on the cached Stats / EdgeCount path.
+	opts, bound := s.sessionScopeOptions(ctx)
+	if bound {
+		opts, _ = s.scopeOptionsWithRepoNarrow(ctx, repoAllowFromContext(ctx))
+	}
 
 	// Every node / edge read below goes through the request's reader, so
 	// an overlay-active caller sees its own buffers. Hoisted once: the
 	// outline touches the reader from several sections.
 	reader := s.readerFor(ctx)
 
-	// Pull the full scoped node slice only when the session is bound
-	// — the lang count, total-node count, and edge filter need it then.
-	// Unbound sessions get the same numbers from the backend's cached
-	// Stats() (one indexed groupby on disk backends) and the
-	// callable-only entry-point pass, neither of which materialises
-	// the whole node table over cgo.
 	var scoped []*graph.Node
 	var inScope map[string]bool
+	var aggregated *graph.OutlineCounts
 	if bound {
-		scoped = s.scopedNodesLight(ctx)
-		inScope = make(map[string]bool, len(scoped))
-		for _, n := range scoped {
-			inScope[n.ID] = true
+		if ag, ok := reader.(graph.ScopedOutlineAggregator); ok {
+			counts := ag.ScopedOutlineCounts(graph.NodeScope{
+				WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow,
+			})
+			aggregated = &counts
+		} else {
+			// Overlays deliberately take the existing reader-based path.
+			scoped = s.scopedNodesLight(ctx)
+			inScope = make(map[string]bool, len(scoped))
+			for _, n := range scoped {
+				inScope[n.ID] = true
+			}
 		}
+	}
+	// The aggregate path resolves only analyzer and entry-point candidates.
+	// Cache negative lookups as well, and stop community lookups as soon as
+	// one member matches instead of fetching every member of large groups.
+	checked := make(map[string]bool)
+	candidateScope := make(map[string]bool)
+	allowsAny := func(ids []string) bool {
+		if !bound {
+			return true
+		}
+		if aggregated == nil {
+			for _, id := range ids {
+				if inScope[id] {
+					return true
+				}
+			}
+			return false
+		}
+		const batchSize = 128
+		for start := 0; start < len(ids); start += batchSize {
+			chunk := ids[start:min(start+batchSize, len(ids))]
+			var missing []string
+			for _, id := range chunk {
+				if !checked[id] {
+					missing = append(missing, id)
+					checked[id] = true
+				}
+			}
+			for id, n := range reader.GetNodesByIDs(missing) {
+				candidateScope[id] = opts.ScopeAllows(n)
+			}
+			for _, id := range chunk {
+				if candidateScope[id] {
+					return true
+				}
+			}
+		}
+		return false
 	}
 
 	// Language breakdown — computed from the scoped node set so the
@@ -67,7 +108,10 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	}
 	langCounts := make(map[string]int)
 	totalScopedNodes := 0
-	if bound {
+	if aggregated != nil {
+		maps.Copy(langCounts, aggregated.ByLanguage)
+		totalScopedNodes = aggregated.TotalNodes
+	} else if bound {
 		for _, n := range scoped {
 			if n.Language != "" {
 				langCounts[n.Language]++
@@ -104,7 +148,9 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	// the backend's EdgeCount() — an O(1) lookup that skips
 	// materialising every edge over cgo.
 	totalEdges := 0
-	if inScope == nil {
+	if aggregated != nil {
+		totalEdges = aggregated.TotalEdges
+	} else if inScope == nil {
 		totalEdges = reader.EdgeCount()
 	} else {
 		for _, e := range reader.AllEdges() {
@@ -128,15 +174,8 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	if comms := s.getCommunities(); comms != nil && len(comms.Communities) > 0 {
 		sorted := make([]analysis.Community, 0, len(comms.Communities))
 		for _, c := range comms.Communities {
-			if inScope == nil {
+			if allowsAny(c.Members) {
 				sorted = append(sorted, c)
-				continue
-			}
-			for _, m := range c.Members {
-				if inScope[m] {
-					sorted = append(sorted, c)
-					break
-				}
 			}
 		}
 		sort.Slice(sorted, func(i, j int) bool {
@@ -158,11 +197,26 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	// Post-filtered to the session's workspace.
 	hotspotsSection := []map[string]any{}
 	hs := s.getHotspots()
+	if aggregated != nil {
+		ids := make([]string, 0, len(hs))
+		for _, h := range hs {
+			ids = append(ids, h.ID)
+		}
+		// Populate the bounded candidate set in batches, including candidates
+		// beyond an early match so ranking retains the legacy order.
+		for start := 0; start < len(ids); start += 128 {
+			chunk := ids[start:min(start+128, len(ids))]
+			for id, n := range reader.GetNodesByIDs(chunk) {
+				candidateScope[id] = opts.ScopeAllows(n)
+				checked[id] = true
+			}
+		}
+	}
 	for _, h := range hs {
 		if len(hotspotsSection) >= topHotspotsN {
 			break
 		}
-		if inScope != nil && !inScope[h.ID] {
+		if bound && !allowsAny([]string{h.ID}) {
 			continue
 		}
 		hotspotsSection = append(hotspotsSection, map[string]any{
@@ -176,12 +230,35 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 		})
 	}
 
+	imported := []map[string]any(nil)
+	var entries []map[string]any
+	if aggregated != nil {
+		counts := make(map[string]int, len(aggregated.FileImports))
+		for _, row := range aggregated.FileImports {
+			counts[row.FilePath] = row.Count
+		}
+		imported = rankImportedFiles(counts, topMostImportedN)
+		mains := reader.FindNodesByName("main")
+		ids := make([]string, 0, len(mains))
+		for _, n := range mains {
+			if n != nil {
+				ids = append(ids, n.ID)
+			}
+		}
+		for id, n := range reader.GetNodesByIDs(ids) {
+			candidateScope[id] = opts.ScopeAllows(n)
+		}
+		entries = entryPointsForNodes(mains, candidateScope, topEntryPointsN)
+	} else {
+		imported = mostImportedFiles(reader, inScope, topMostImportedN)
+		entries = entryPoints(reader, inScope, topEntryPointsN)
+	}
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"summary":             summary,
 		"communities":         communitiesSection,
 		"hotspots":            hotspotsSection,
-		"most_imported_files": mostImportedFiles(reader, inScope, topMostImportedN),
-		"entry_points":        entryPoints(reader, inScope, topEntryPointsN),
+		"most_imported_files": imported,
+		"entry_points":        entries,
 	})
 }
 
@@ -214,10 +291,6 @@ func topCommunitiesSummary(comms []analysis.Community) []map[string]any {
 // Falls back to the AllEdges-driven loop on backends that don't — which
 // is what an overlay view takes, since it implements no aggregate.
 func mostImportedFiles(g graph.Reader, inScope map[string]bool, topN int) []map[string]any {
-	type fileCount struct {
-		path  string
-		count int
-	}
 	counts := make(map[string]int)
 	if ag, ok := g.(graph.FileImportAggregator); ok {
 		var scope []string
@@ -259,6 +332,14 @@ func mostImportedFiles(g graph.Reader, inScope map[string]bool, topN int) []map[
 		}
 	}
 
+	return rankImportedFiles(counts, topN)
+}
+
+func rankImportedFiles(counts map[string]int, topN int) []map[string]any {
+	type fileCount struct {
+		path  string
+		count int
+	}
 	var ranked []fileCount
 	for p, c := range counts {
 		ranked = append(ranked, fileCount{path: p, count: c})
@@ -295,13 +376,17 @@ func mostImportedFiles(g graph.Reader, inScope map[string]bool, topN int) []map[
 // the name lookup so a bound session never sees mains from other
 // workspaces.
 func entryPoints(g graph.Reader, inScope map[string]bool, topN int) []map[string]any {
+	return entryPointsForNodes(g.FindNodesByName("main"), inScope, topN)
+}
+
+func entryPointsForNodes(nodes []*graph.Node, inScope map[string]bool, topN int) []map[string]any {
 	type ep struct {
 		id       string
 		name     string
 		filePath string
 	}
 	var out []ep
-	for _, n := range g.FindNodesByName("main") {
+	for _, n := range nodes {
 		if n == nil {
 			continue
 		}
