@@ -214,6 +214,7 @@ type Server struct {
 	// analysis snapshots while betweenness runs.
 	hotspots        []analysis.HotspotEntry
 	hotspotsReady   bool
+	hotspotsOwned   bool // compact slice and cloned strings, guarded by analysisMu
 	hotspotsBuildMu sync.Mutex
 	analysisEpoch   uint64
 	// analysisRun tracks the background on-demand analysis pass so a tool
@@ -3198,6 +3199,7 @@ func (s *Server) incrementalCommunities() (*analysis.CommunityResult, analysis.I
 	// the epoch change, discard its result, and rebuild before publishing.
 	s.hotspots = nil
 	s.hotspotsReady = false
+	s.hotspotsOwned = false
 	s.analysisEpoch++
 	return result, stats
 }
@@ -3349,6 +3351,7 @@ func (s *Server) getHotspots() []analysis.HotspotEntry {
 		if s.analysisEpoch == epoch && s.communitiesToken == token && s.analysisSnapshotCurrentLocked() {
 			s.hotspots = hotspots
 			s.hotspotsReady = true
+			s.hotspotsOwned = false
 			s.analysisMu.Unlock()
 			scheduleOSMemoryReleaseAfterBurst(s.logger, "lazy_hotspots")
 			return hotspots

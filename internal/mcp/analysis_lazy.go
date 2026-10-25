@@ -171,9 +171,16 @@ func (s *Server) releaseTransientAnalysisIfIdle() bool {
 	// Retain the complete default ranking only within a fixed memory budget.
 	// A truncated prefix could hide a workspace's first visible result. This
 	// keeps no partition/member maps; epoch/token checks still govern hits.
-	if !hotspotResultRetainable(s.hotspots) {
+	if !s.hotspotsReady || !hotspotResultRetainable(s.hotspots) {
 		s.hotspots = nil
 		s.hotspotsReady = false
+		s.hotspotsOwned = false
+	} else if !s.hotspotsOwned {
+		// Own only the bounded result bytes, never a substring's source or
+		// a leading/trailing slice allocation. Existing callers retain their
+		// immutable result; later callers share this independent compact copy.
+		s.hotspots = compactHotspotResult(s.hotspots)
+		s.hotspotsOwned = true
 	}
 	return true
 }

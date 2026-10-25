@@ -146,3 +146,27 @@ func TestGetHotspotsOversizeResultIsCompleteAndRebuiltAfterRelease(t *testing.T)
 	require.Equal(t, first, second, "the complete ranking must survive for each caller, without truncation")
 	require.Equal(t, 2, builds)
 }
+
+func TestGetHotspotsTransientReleaseDuringRealBuildPreservesPartition(t *testing.T) {
+	store, _ := buildAnalysisCacheTestGraph(t, 80)
+	defer store.Close()
+	s, metrics := populateAnalysisForTest(store)
+	require.NoError(t, metrics.cacheSaveErr)
+	want := analysis.FindHotspots(store, s.getCommunities(), 0)
+	var builds int
+	s.hotspotsFn = func(reader graph.Reader, communities *analysis.CommunityResult, threshold float64) []analysis.HotspotEntry {
+		builds++
+		require.NotNil(t, communities)
+		require.NotEmpty(t, communities.NodeToComm)
+		// Existing build seam deterministically models another request's
+		// release after this build took its immutable partition snapshot.
+		require.True(t, s.releaseTransientAnalysisIfIdle())
+		assertNoMaterializedAnalysis(t, s)
+		return analysis.FindHotspots(reader, communities, threshold)
+	}
+	require.Equal(t, want, s.getHotspots())
+	s.releaseTransientAnalysisIfIdle()
+	assertNoMaterializedAnalysis(t, s)
+	require.Equal(t, want, s.getHotspots())
+	require.Equal(t, 1, builds)
+}

@@ -29,7 +29,7 @@ func TestReleaseTransientAnalysisDropsPublishedCompatibilityViews(t *testing.T) 
 func TestReleaseTransientAnalysisDropsOversizeHotspots(t *testing.T) {
 	for _, entries := range [][]analysis.HotspotEntry{
 		{{ID: strings.Repeat("x", hotspotResultRetentionBytes)}},
-		make([]analysis.HotspotEntry, 1, hotspotResultRetentionBytes/int(unsafe.Sizeof(analysis.HotspotEntry{}))+1),
+		make([]analysis.HotspotEntry, hotspotResultRetentionBytes/int(unsafe.Sizeof(analysis.HotspotEntry{}))+1),
 	} {
 		s := &Server{analysisGenerationReady: true, hotspots: entries, hotspotsReady: true}
 		if hotspotResultRetainable(entries) {
@@ -42,7 +42,7 @@ func TestReleaseTransientAnalysisDropsOversizeHotspots(t *testing.T) {
 	}
 }
 
-func TestHotspotResultRetentionIncludesStringsAndSpareCapacity(t *testing.T) {
+func TestHotspotResultRetentionIncludesStringBytes(t *testing.T) {
 	entryBytes := int(unsafe.Sizeof(analysis.HotspotEntry{}))
 	sliceBytes := int(unsafe.Sizeof([]analysis.HotspotEntry(nil)))
 	entries := []analysis.HotspotEntry{{ID: strings.Repeat("x", hotspotResultRetentionBytes-entryBytes-sliceBytes)}}
@@ -53,9 +53,35 @@ func TestHotspotResultRetentionIncludesStringsAndSpareCapacity(t *testing.T) {
 	if hotspotResultRetainable(entries) {
 		t.Fatal("string bytes outside the budget retained")
 	}
-	backing := []analysis.HotspotEntry{{ID: "visible"}, {Name: strings.Repeat("x", hotspotResultRetentionBytes)}}
-	if hotspotResultRetainable(backing[:1]) {
-		t.Fatal("strings in the unused backing slice were not accounted for")
+}
+
+func TestHotspotResultRetentionOwnsSubstringsAndSubsliceStorage(t *testing.T) {
+	large := strings.Repeat("x", 2*hotspotResultRetentionBytes)
+	backing := []analysis.HotspotEntry{
+		{Name: large},
+		{ID: large[:1], Name: large[1:3], Kind: large[3:6], FilePath: large[6:10], ComplexityScore: 3.5},
+		{Name: large},
+	}
+	input := backing[1:2]
+	s := &Server{analysisGenerationReady: true, hotspots: input, hotspotsReady: true}
+	s.releaseTransientAnalysisIfIdle()
+	if !s.hotspotsOwned || !s.hotspotsReady || len(s.hotspots) != 1 || cap(s.hotspots) != 1 {
+		t.Fatal("eligible complete result was not compacted")
+	}
+	if &s.hotspots[0] == &input[0] || s.hotspots[0] != input[0] {
+		t.Fatal("retained slice aliases its source or changed the result")
+	}
+	owned := s.hotspots[0]
+	for i, value := range []string{owned.ID, owned.Name, owned.Kind, owned.FilePath} {
+		source := []string{input[0].ID, input[0].Name, input[0].Kind, input[0].FilePath}[i]
+		if unsafe.StringData(value) == unsafe.StringData(source) {
+			t.Fatal("retained string still aliases a large source allocation")
+		}
+	}
+	first := &s.hotspots[0]
+	s.releaseTransientAnalysisIfIdle()
+	if &s.hotspots[0] != first {
+		t.Fatal("already owned result was unnecessarily copied again")
 	}
 }
 
