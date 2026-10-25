@@ -744,32 +744,61 @@ func TestCheckoutLifecycleReloadDiff(t *testing.T) {
 
 	main := f.gitRepo("reload-main")
 	worktree := f.worktreeOf(main, "reload-wt")
+	held := f.worktreeOf(main, "reload-held")
 
 	gc := f.cm.Global()
 	require.NoError(t, gc.AddRepo(config.RepoEntry{Path: main, Name: "reload-main"}))
 	require.NoError(t, gc.AddRepo(config.RepoEntry{Path: worktree, Name: "reload-wt"}))
+	require.NoError(t, gc.AddRepo(config.RepoEntry{Path: held, Name: "reload-held"}))
 	require.NoError(t, gc.Save())
 
 	added, err := f.lc.ApplyReload(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 2, added.Added)
+	assert.Equal(t, 3, added.Added)
 	assert.Equal(t, 0, added.Removed)
 	f.assertRegistered("reload-main", main, TrackSourceConfig)
 	f.assertRegistered("reload-wt", worktree, TrackSourceConfig)
+	f.assertRegistered("reload-held", held, TrackSourceConfig)
 	require.True(t, f.familyOf("reload-main").IsPrimaryBase,
 		"the first checkout registered holds the family's primary base")
 	require.False(t, f.familyOf("reload-wt").IsPrimaryBase)
+	require.False(t, f.familyOf("reload-held").IsPrimaryBase)
 
-	// The worktree is a live non-primary checkout of a family that has a
-	// ready primary, so dropping it from the config retires it.
+	// Both worktrees are live non-primary checkouts of a family that has a
+	// ready primary, so dropping them from the config retires them — even one
+	// whose payload a reader still holds. The registration's own producers
+	// can hold a payload the same way on a loaded machine, so either worktree
+	// may have its purge deferred; the pin makes that certain for one of them.
+	pin := f.lc.ViewLeases().AcquireBaseCorpus("reload-held")
+	defer pin.Release() // An early failure must not leave Close waiting on the reader.
+	require.True(t, pin.OwnerPinned(), "the serving pin carries no repository owner")
 	require.NoError(t, gc.RemoveRepo(worktree))
+	require.NoError(t, gc.RemoveRepo(held))
 	require.NoError(t, gc.Save())
 	removed, err := f.lc.ApplyReload(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 1, removed.Removed)
+	assert.Equal(t, 2, removed.Removed)
 	assert.Equal(t, 0, removed.Pending)
-	assert.Nil(t, f.mi.GetMetadata("reload-wt"))
+	require.NotNil(t, f.mi.GetMetadata("reload-held"),
+		"the purge did not wait for the pinned reader, so this step proves nothing about a deferred cleanup")
+	// A deferred worktree stays listed until its purge lands, but its removal
+	// is already the cleanup's: a reload in between has nothing left to retire.
+	between, err := f.lc.ApplyReload(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, between.Removed+between.Pending,
+		"a reload during a deferred purge retired a worktree a second time")
+	// Nothing but the lifecycle's own cleanup runtime finishes the purge.
+	pin.Release()
+	require.Eventually(t, func() bool {
+		for _, prefix := range []string{"reload-wt", "reload-held"} {
+			if f.mi.GetMetadata(prefix) != nil || f.lc.RepositoryAdmissionClosed(prefix) {
+				return false
+			}
+		}
+		return true
+	}, 30*time.Second, 10*time.Millisecond, "a removal the reload counted was never purged")
 	assert.False(t, f.watcher.isAttached("reload-wt"))
+	assert.False(t, f.watcher.isAttached("reload-held"))
 
 	// The main checkout owns the family's primary base: nothing is left to
 	// serve it from, so its removal is recorded and NOT applied.
