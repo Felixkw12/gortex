@@ -175,17 +175,25 @@ Expected output ends with `PASSED: SLSA verification passed`.
 
 Requires Go 1.26+ and a C toolchain (the tree-sitter extractors are CGO — no way around it).
 
+When building with gcc, set both flags below to avoid tree-sitter heap corruption
+from strict aliasing ([#821](https://github.com/zzet/gortex/issues/821)). Keep
+`-O2 -g`, because these variables replace Go's default C/C++ flags. Alternatively,
+use `make build`, which sets the flags automatically, or use clang
+(`CC=clang CXX=clang++`).
+
 ```bash
 git clone https://github.com/zzet/gortex.git
 cd gortex
-go build -o gortex ./cmd/gortex/
+CGO_CFLAGS="-O2 -g -fno-strict-aliasing" CGO_CXXFLAGS="-O2 -g -fno-strict-aliasing" \
+  go build -o gortex ./cmd/gortex/
 sudo mv gortex /usr/local/bin/
 ```
 
 Or without cloning:
 
 ```bash
-go install github.com/zzet/gortex/cmd/gortex@latest
+CGO_CFLAGS="-O2 -g -fno-strict-aliasing" CGO_CXXFLAGS="-O2 -g -fno-strict-aliasing" \
+  go install github.com/zzet/gortex/cmd/gortex@latest
 ```
 
 `go install` drops the binary into `$(go env GOBIN)` (default `~/go/bin`) — make sure that's on your `PATH`.

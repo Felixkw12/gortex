@@ -1,5 +1,10 @@
 BINARY    := gortex
 
+# Disable strict aliasing in tree-sitter C/C++ dependencies (see #821).
+# Keep Go's default optimization/debug flags when overriding its cgo defaults.
+export CGO_CFLAGS ?= -O2 -g -fno-strict-aliasing
+export CGO_CXXFLAGS ?= -O2 -g -fno-strict-aliasing
+
 # VERSION defaults to the nearest annotated tag (e.g. v0.1.0) or "dev" when
 # no tags exist / not a git checkout. COMMIT is the short SHA; DATE is RFC
 # 3339 UTC. internal/version parses main.version and treats main.commit as
