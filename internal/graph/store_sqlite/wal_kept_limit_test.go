@@ -111,3 +111,48 @@ func TestWALKeptLogUnreadableFileIsNotEmpty(t *testing.T) {
 	require.NoError(t, os.Truncate(walPath, 0))
 	require.True(t, s.walKeptLogRestarted(kept), "an actually empty WAL permits restoration")
 }
+
+func TestWALShrinkInterveningResetRetainsNewCleanup(t *testing.T) {
+	previous := walShrinkInPlaceBytes
+	walShrinkInPlaceBytes = 1
+	t.Cleanup(func() { walShrinkInPlaceBytes = previous; walShrinkBeforeRestore = nil })
+	s, checkpoint := finalBackfillFixture(t)
+	walPath := s.dbPath + "-wal"
+	const largeBytes = walShrinkKeepBytes + walShrinkMinSlice
+	require.NoError(t, os.Truncate(walPath, largeBytes))
+	s.writeMu.Lock()
+	_, err := s.resetWALForReclaim(t.Context())
+	s.writeMu.Unlock()
+	require.NoError(t, err)
+	intervened := false
+	walShrinkBeforeRestore = func() {
+		walShrinkBeforeRestore = nil
+		intervened = true
+		before, ok := readWALReclaimFrontier(s.dbPath)
+		require.True(t, ok)
+		// The last slice finished. A distinct real reset now restarts an
+		// enlarged sparse file before the old shrink can restore its limit.
+		s.writeMu.Lock()
+		require.NoError(t, os.Truncate(walPath, largeBytes))
+		_, err = s.resetWALForReclaim(t.Context())
+		s.writeMu.Unlock()
+		require.NoError(t, err)
+		after, ok := readWALReclaimFrontier(s.dbPath)
+		require.True(t, ok)
+		require.NotEqual(t, before.salt, after.salt)
+	}
+	_, _, err = s.shrinkWAL(t.Context(), checkpoint)
+	require.NoError(t, err)
+	require.True(t, intervened)
+	require.True(t, s.walShrinkPending.Load(), "the old shrink erased the newer reset's cleanup")
+	require.EqualValues(t, -1, activeWriterJournalLimit(t, s))
+	_, err = checkpointWALOnceOn(t.Context(), checkpoint, "PASSIVE")
+	require.NoError(t, err)
+	require.NoError(t, churnWriteOnce(s, 0))
+	require.EqualValues(t, largeBytes, walFileSize(walPath), "a later commit truncated the new reset's file")
+	_, _, err = s.shrinkWAL(t.Context(), checkpoint)
+	require.NoError(t, err)
+	require.EqualValues(t, walShrinkKeepBytes, activeWriterJournalLimit(t, s))
+	require.False(t, s.walShrinkPending.Load())
+	require.False(t, s.walShrinkNeeded())
+}

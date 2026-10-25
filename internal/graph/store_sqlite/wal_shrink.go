@@ -69,6 +69,9 @@ var (
 	// walShrinkTruncate is the file truncation (a seam for the cases that
 	// record every call).
 	walShrinkTruncate = os.Truncate
+	// Synchronous test seam after the final slice releases the writer and
+	// before restoration reacquires it. Nil outside deterministic gap tests.
+	walShrinkBeforeRestore func()
 )
 
 var errWALResetNotRestarted = errors.New("store_sqlite: wal in-place reset: the log did not restart")
@@ -455,6 +458,9 @@ func (s *Store) shrinkWAL(ctx context.Context, ckptDB *sql.DB) (slices int, shru
 		case <-time.After(walShrinkGap):
 		}
 	}
+	if hook := walShrinkBeforeRestore; hook != nil {
+		hook()
+	}
 	if lerr := s.restoreWriterJournalLimit(ctx); lerr != nil {
 		log.Printf("store_sqlite: wal shrink could not restore the writer's journal_size_limit error=%q", lerr)
 		return slices, shrunk, lerr
@@ -486,6 +492,35 @@ func (s *Store) restoreWriterJournalLimit(ctx context.Context) error {
 			// The slices reached their live-frame floor. The kept receipt
 			// still protects this incarnation and schedules its later restart.
 			s.walShrinkPending.Store(false)
+			return nil
+		}
+	}
+	// The final slice released the writer. A reset admitted in that gap can
+	// leave a new incarnation in the same large file; verify its current
+	// floor before restoring a limit that would truncate it on a later commit.
+	info, err := os.Stat(s.dbPath + "-wal")
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil && info.Size() > walShrinkKeepBytes {
+		frontier, ok := readWALReclaimFrontier(s.dbPath)
+		if !ok {
+			return fmt.Errorf("wal shrink: final WAL frontier unreadable")
+		}
+		conn, release, err := s.activeWriteConnLocked(ctx)
+		if err != nil {
+			return err
+		}
+		var pageSize int64
+		err = conn.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize)
+		release()
+		if err != nil {
+			return err
+		}
+		floor := max(walShrinkKeepBytes, int64(32)+int64(frontier.mx)*(24+pageSize))
+		if info.Size() > floor {
+			// Do not erase the newer reset's pending shrink. The next poll
+			// resumes bounded slices instead of allowing a whole-file truncate.
 			return nil
 		}
 	}
