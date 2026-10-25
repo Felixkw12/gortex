@@ -136,6 +136,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Cgo aliasing flags
+        run: sh scripts/check-cgo-flags.sh
+
       - name: CI test layout
         run: python3 -m unittest scripts/test_ci_test_partition.py
 
