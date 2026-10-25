@@ -62,7 +62,7 @@ func (r *outlineCountingReader) counters() *outlineCountingReader {
 }
 
 func (r *outlineCountingReader) BindReadContext(ctx context.Context) graph.Reader {
-	return &outlineCountingReader{Store: r.Store.WithReadContext(ctx), source: r.counters()}
+	return &outlineCountingReader{Store: r.WithReadContext(ctx), source: r.counters()}
 }
 
 func outlineFixture(t *testing.T) (*Server, *store_sqlite.Store) {

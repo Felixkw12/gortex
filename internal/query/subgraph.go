@@ -781,10 +781,3 @@ type WalkOptions struct {
 func (o WalkOptions) scopeAllows(n *graph.Node) bool {
 	return QueryOptions{WorkspaceID: o.WorkspaceID, ProjectID: o.ProjectID, RepoAllow: o.RepoAllow}.ScopeAllows(n)
 }
-
-// isGlobalExternal reports whether n is a synthetic global external: owned by
-// no repository and no workspace, at a path that names no repository source.
-func isGlobalExternal(n *graph.Node) bool {
-	return n.RepoPrefix == "" && n.WorkspaceID == "" && n.FilePath != "" &&
-		!graph.IsAuditableRepoSourcePath(n.FilePath)
-}
