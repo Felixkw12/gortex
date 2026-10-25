@@ -366,6 +366,8 @@ func (s *Store) shrinkWALSliceOnce(ctx context.Context, ckptDB *sql.DB, slice in
 // walShrinkNeeded reports a -wal file larger than its live frames need by
 // more than the smallest slice: a log reset in place and not yet shrunk (or
 // one a commit restarted while the writer's journal_size_limit was lifted).
+// Kept incarnations also schedule limit restoration after restart/emptying,
+// even if their file no longer reaches the ordinary shrink threshold.
 func (s *Store) walShrinkNeeded() bool {
 	if s.walShrinkPending.Load() {
 		return true
@@ -388,7 +390,10 @@ func (s *Store) walKeptLogRestarted(kept *walReclaimFrontier) bool {
 	if current, ok := readWALReclaimFrontier(s.dbPath); ok {
 		return current.salt != kept.salt
 	}
-	return walFileSize(s.dbPath+"-wal") == 0
+	info, err := os.Stat(s.dbPath + "-wal")
+	// A missing WAL has no old incarnation left to protect. Other stat
+	// errors are not evidence that a non-empty, reader-pinned file vanished.
+	return (err == nil && info.Size() == 0) || os.IsNotExist(err)
 }
 
 // shrinkWAL shrinks the -wal back to journal_size_limit in slices, releasing
@@ -396,6 +401,12 @@ func (s *Store) walKeptLogRestarted(kept *walReclaimFrontier) bool {
 // the writer's journal_size_limit. It stops early on ctx or a slice error
 // (the next poll resumes it).
 func (s *Store) shrinkWAL(ctx context.Context, ckptDB *sql.DB) (slices int, shrunk int64, err error) {
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	// Even a heuristic shrink must retain cleanup intent if restoring the
+	// pager setting fails after the file reaches its floor.
+	s.walShrinkPending.Store(true)
 	walPath := s.dbPath + "-wal"
 	startBytes := walFileSize(walPath)
 	started := time.Now()
@@ -444,9 +455,9 @@ func (s *Store) shrinkWAL(ctx context.Context, ckptDB *sql.DB) (slices int, shru
 		case <-time.After(walShrinkGap):
 		}
 	}
-	s.walShrinkPending.Store(false)
 	if lerr := s.restoreWriterJournalLimit(ctx); lerr != nil {
 		log.Printf("store_sqlite: wal shrink could not restore the writer's journal_size_limit error=%q", lerr)
+		return slices, shrunk, lerr
 	}
 	if slices > 0 {
 		log.Printf("store_sqlite: wal shrunk bytes_before=%d bytes_after=%d slices=%d max_slice_hold=%s elapsed=%s",
@@ -472,9 +483,18 @@ func (s *Store) restoreWriterJournalLimit(ctx context.Context) error {
 	defer s.writeMu.Unlock()
 	if kept := s.walLimitKept.Load(); kept != nil {
 		if !s.walKeptLogRestarted(kept) {
+			// The slices reached their live-frame floor. The kept receipt
+			// still protects this incarnation and schedules its later restart.
+			s.walShrinkPending.Store(false)
 			return nil
 		}
-		s.walLimitKept.Store(nil)
 	}
-	return s.setWriterJournalLimitLocked(ctx, walShrinkKeepBytes)
+	if err := s.setWriterJournalLimitLocked(ctx, walShrinkKeepBytes); err != nil {
+		return err
+	}
+	// Clear intent only after the setting succeeded, while the writer is
+	// still held so a later reset cannot have its pending state erased.
+	s.walLimitKept.Store(nil)
+	s.walShrinkPending.Store(false)
+	return nil
 }
