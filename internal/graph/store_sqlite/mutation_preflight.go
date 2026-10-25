@@ -65,16 +65,7 @@ func (s *Store) batchContainsNewEdgeLocked(edges []*graph.Edge) (bool, int, erro
 		// The insert this gates writes at the handle's generation, so an
 		// identical edge in another one is still a new edge here.
 		args = append(args, s.viewGen)
-		rows, err := s.queryActiveWriteLocked(context.Background(),
-			`WITH wanted(from_id, to_id, kind, file_path, line) AS (VALUES `+values.String()+`)
-             SELECT e.from_id, e.to_id, e.kind, e.file_path, e.line
-             FROM wanted AS w
-             JOIN edges AS e
-               ON e.from_id = w.from_id AND e.to_id = w.to_id
-              AND e.kind = w.kind AND e.file_path = w.file_path AND e.line = w.line
-              AND e.view_gen = ?`,
-			args...,
-		)
+		rows, err := s.queryActiveWriteLocked(context.Background(), existingEdgeIdentitiesSQL(values.String()), args...)
 		if err != nil {
 			return false, statements, err
 		}
@@ -101,6 +92,16 @@ func (s *Store) batchContainsNewEdgeLocked(edges []*graph.Edge) (bool, int, erro
 // batchContainsAnalysisNodeChangeLocked compares every analysis-facing node
 // field in bounded VALUES joins. The old AddBatch path called the single-node
 // preflight once per input row, yielding one SELECT + Meta decode per node.
+func existingEdgeIdentitiesSQL(values string) string {
+	return `WITH wanted(from_id, to_id, kind, file_path, line) AS (VALUES ` + values + `)
+             SELECT e.from_id, e.to_id, e.kind, e.file_path, e.line
+             FROM wanted AS w
+             JOIN edges AS e
+               ON e.from_id = w.from_id AND e.to_id = w.to_id
+              AND e.kind = w.kind AND e.file_path = w.file_path AND e.line = w.line
+              AND e.view_gen = ?`
+}
+
 func (s *Store) batchContainsAnalysisNodeChangeLocked(nodes []*graph.Node) (bool, int, error) {
 	const idsPerQuery = 450
 	incoming := make(map[string][]*graph.Node, len(nodes))

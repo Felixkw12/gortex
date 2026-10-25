@@ -51,12 +51,7 @@ func selectEdgeOriginsTx(tx *sql.Tx, viewGen int64, updates []graph.EdgeProvenan
 			args = append(args, key.from, key.to, string(key.kind), key.filePath, key.line)
 		}
 		args = append(args, viewGen)
-		rows, err := tx.Query(`WITH wanted(from_id,to_id,kind,file_path,line) AS (VALUES `+values.String()+`)
-SELECT e.from_id, e.to_id, e.kind, e.file_path, e.line, e.origin
-FROM wanted AS w
-JOIN edges AS e
-  ON e.from_id = w.from_id AND e.to_id = w.to_id AND e.kind = w.kind
- AND e.file_path = w.file_path AND e.line = w.line AND e.view_gen = ?`, args...)
+		rows, err := tx.Query(edgeOriginsByIdentitySQL(values.String()), args...)
 		if err != nil {
 			return nil, statements, err
 		}
@@ -80,6 +75,15 @@ JOIN edges AS e
 		}
 	}
 	return origins, statements, nil
+}
+
+func edgeOriginsByIdentitySQL(values string) string {
+	return `WITH wanted(from_id,to_id,kind,file_path,line) AS (VALUES ` + values + `)
+SELECT e.from_id, e.to_id, e.kind, e.file_path, e.line, e.origin
+FROM wanted AS w
+JOIN edges AS e
+  ON e.from_id = w.from_id AND e.to_id = w.to_id AND e.kind = w.kind
+ AND e.file_path = w.file_path AND e.line = w.line AND e.view_gen = ?`
 }
 
 func updateEdgeProvenanceTx(tx *sql.Tx, viewGen int64, states []provenanceFinalState) (int, error) {
