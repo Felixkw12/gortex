@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -637,4 +638,20 @@ func TestShadowEvictStepNormalizesOnlyCanceledCompletedTransactions(t *testing.T
 			}
 		})
 	}
+}
+
+func TestShadowEvictStepKeepsARealErrorWhenACancelRacesIt(t *testing.T) {
+	s, _ := shadowEvictionFixture(t, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	sentinel := errors.New("controlled write failure")
+	n, err := s.shadowEvictStep(ctx, func(*sql.Tx) (int, *sqliteMutationReceiptAccumulator, error) {
+		// The cancel lands while the transaction is still open, so only the
+		// real error, not a completed transaction, reaches the normalizer.
+		cancel()
+		return 0, nil, sentinel
+	})
+	require.Zero(t, n)
+	require.ErrorIs(t, err, sentinel)
+	require.NotErrorIs(t, err, context.Canceled)
 }
