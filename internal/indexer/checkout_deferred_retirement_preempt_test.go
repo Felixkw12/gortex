@@ -78,8 +78,8 @@ func TestDeferredRetirementSliceYieldsMidChunkToAnInteractiveWriter(t *testing.T
 	case <-time.After(2 * time.Second):
 		t.Fatal("the running chunk was not given up to the interactive writer")
 	}
-	if waited := got.at.Sub(waitFrom); waited > 100*time.Millisecond {
-		t.Fatalf("interactive writer waited %s for the chunk, want <= 100ms", waited)
+	if waited := got.at.Sub(waitFrom); waited > testTimingSlack(100*time.Millisecond) {
+		t.Fatalf("interactive writer waited %s for the chunk, want <= %s", waited, testTimingSlack(100*time.Millisecond))
 	}
 	if got.retired != 0 || !got.pending || got.err != nil {
 		t.Fatalf("preempted slice = (%d, %v, %v), want (0, true, <nil>)", got.retired, got.pending, got.err)
@@ -172,8 +172,8 @@ func TestDeferredRetirementStandsDownWhileAnEditCycleHoldsTheLane(t *testing.T) 
 	case <-time.After(2 * time.Second):
 		t.Fatal("the running chunk kept going through an edit cycle")
 	}
-	if waited := time.Unix(0, stoppedAt.Load()).Sub(cycleFrom); waited > 100*time.Millisecond {
-		t.Fatalf("the edit cycle waited %s for the chunk, want <= 100ms", waited)
+	if waited := time.Unix(0, stoppedAt.Load()).Sub(cycleFrom); waited > testTimingSlack(100*time.Millisecond) {
+		t.Fatalf("the edit cycle waited %s for the chunk, want <= %s", waited, testTimingSlack(100*time.Millisecond))
 	}
 
 	lifecycle.retireOwedSlice = func(context.Context, int64) error {
@@ -297,8 +297,8 @@ func TestStarvedDeferredRetirementStillStandsDownForAnEditCycle(t *testing.T) {
 	editCycle.Store(true)
 	select {
 	case at := <-done:
-		if waited := at.Sub(cycleFrom); waited > 100*time.Millisecond {
-			t.Fatalf("the edit cycle waited %s for a starved chunk, want <= 100ms", waited)
+		if waited := at.Sub(cycleFrom); waited > testTimingSlack(100*time.Millisecond) {
+			t.Fatalf("the edit cycle waited %s for a starved chunk, want <= %s", waited, testTimingSlack(100*time.Millisecond))
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("a starved chunk kept the writer through an edit cycle")

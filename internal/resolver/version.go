@@ -37,7 +37,9 @@ import (
 // the cache is keyed by the contract that produced it.
 // Same-repository folder matching changes import bindings for an unchanged corpus.
 // Package-scoped same-receiver field fallback changes edges for an unchanged corpus.
-const ResolutionSemanticsVersion = 3
+// Convergence winner payloads and surviving outgoing order change stored edges
+// for an unchanged corpus.
+const ResolutionSemanticsVersion = 4
 
 // resolverVersionDomain versions the ENCODING below, not the contract. Two
 // fingerprints that disagree about how the preimage is rendered must not be

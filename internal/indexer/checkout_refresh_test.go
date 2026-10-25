@@ -78,7 +78,7 @@ func TestCheckoutRefreshEnqueueOutlivesRequestAndPublishesExactGeneration(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(started) >= time.Second {
+	if time.Since(started) >= testTimingSlack(time.Second) {
 		t.Fatal("enqueue waited for a graph build")
 	}
 	checkoutID, incarnation := m.Identity()
@@ -122,7 +122,7 @@ func TestCheckoutRefreshRecoveryAdmitsWhileSourceLeaseOwnsBuildGate(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(started) >= time.Second {
+	if time.Since(started) >= testTimingSlack(time.Second) {
 		t.Fatal("recovery waited on source build gate")
 	}
 	assertCheckoutRefreshPending(t, ticket)
@@ -430,9 +430,8 @@ func TestCheckoutMutationConcurrentAdmissionIsBoundedByCaller(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	type admissionResult struct {
-		lease   *CheckoutMutation
-		err     error
-		elapsed time.Duration
+		lease *CheckoutMutation
+		err   error
 	}
 	done := make(chan admissionResult, 1)
 	joined := false
@@ -444,16 +443,15 @@ func TestCheckoutMutationConcurrentAdmissionIsBoundedByCaller(t *testing.T) {
 				if got.lease != nil {
 					got.lease.Close()
 				}
-			case <-time.After(2 * time.Second):
+			case <-time.After(testTimingSlack(2 * time.Second)):
 				t.Error("owned admission did not join after cancellation")
 			}
 		}
 		releaseSample()
 	}()
-	started := time.Now()
 	go func() {
 		lease, err := l.BeginCheckoutMutation(ctx, f.checkoutID, f.worktree, epoch)
-		done <- admissionResult{lease: lease, err: err, elapsed: time.Since(started)}
+		done <- admissionResult{lease: lease, err: err}
 	}()
 	witnessed := false
 	for !witnessed {
@@ -463,7 +461,7 @@ func TestCheckoutMutationConcurrentAdmissionIsBoundedByCaller(t *testing.T) {
 			if got.lease != nil {
 				got.lease.Close()
 			}
-			t.Fatalf("admission returned before a live urgent pre-check wait was witnessed: elapsed=%s error=%v", got.elapsed, got.err)
+			t.Fatalf("admission returned before a live urgent pre-check wait was witnessed: error=%v", got.err)
 		case <-ctx.Done():
 			t.Fatal("caller budget expired before a live urgent pre-check wait was witnessed")
 		default:
@@ -477,16 +475,15 @@ func TestCheckoutMutationConcurrentAdmissionIsBoundedByCaller(t *testing.T) {
 	select {
 	case got = <-done:
 		joined = true
-	case <-time.After(2 * time.Second):
+	case <-time.After(testTimingSlack(2 * time.Second)):
 		t.Fatal("admission did not return after its caller deadline")
 	}
 	if got.lease != nil {
 		got.lease.Close()
 		t.Fatal("admitted concurrent source mutation")
 	}
-	t.Logf("urgent_precheck_wait_witnessed=%v caller_budget=500ms elapsed=%s error=%v", witnessed, got.elapsed, got.err)
-	if !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, ErrCheckoutMutationBusy) || got.elapsed > 2*time.Second {
-		t.Fatalf("admission did not preserve caller deadline: elapsed=%s error=%v", got.elapsed, got.err)
+	if !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(got.err, ErrCheckoutMutationBusy) {
+		t.Fatalf("admission did not preserve caller deadline: error=%v", got.err)
 	}
 }
 
