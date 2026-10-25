@@ -1550,7 +1550,9 @@ func demotableNow(
 
 // ReloadResult counts what one configuration reload did.
 type ReloadResult struct {
-	Added   int
+	Added int
+	// Removed counts entries retired from the tracked set, including one whose
+	// payload purge is still waiting for its readers and producers to drain.
 	Removed int
 	// Pending counts entries whose removal was recorded as an intent
 	// transition instead of being applied.
@@ -1622,7 +1624,24 @@ func (l *CheckoutLifecycle) ApplyReload(ctx context.Context) (ReloadResult, erro
 		if wanted[prefix] {
 			continue
 		}
+		if l.RepositoryAdmissionClosed(prefix) {
+			continue // Durable cleanup already owns this repository's removal.
+		}
+		if l.mi.GetMetadata(prefix) == nil {
+			// A cleanup purged it after the listing above. The purge drops the
+			// metadata before finalize reopens admission, so in this order a
+			// purge that lands between the two checks is still seen.
+			continue
+		}
 		outcome, err := l.retireOnReload(ctx, prefix)
+		if onlyRepositoryCleanupPending(err) {
+			// The checkout is withdrawn and its forget saga is journaled; a
+			// reader, or a producer the registration started, still owns
+			// payload, and the cleanup runtime finishes the purge once it
+			// drains — exactly the deferral Untrack reports as success.
+			out.Removed++
+			continue
+		}
 		if err != nil {
 			l.logger.Warn("reload: retire failed",
 				zap.String("prefix", prefix), zap.Error(err))
