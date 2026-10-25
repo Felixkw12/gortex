@@ -1,6 +1,8 @@
 package store_sqlite
 
 import (
+	"bytes"
+	"encoding/gob"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,8 +32,13 @@ func TestScopedOutlineQueryPlans(t *testing.T) {
 			}
 		}
 		for _, generation := range []int64{0, 3} {
-			languages, edges, imports := outlineQueries(graph.NodeScope{WorkspaceID: "ws", ProjectID: "p", RepoAllow: map[string]bool{"repo": true, "other03": true}}, generation)
-			for name, query := range map[string]outlineQuery{"languages": languages, "edges": edges, "imports": imports} {
+			scope := graph.NodeScope{WorkspaceID: "ws", ProjectID: "p", RepoAllow: map[string]bool{"repo": true, "other03": true}}
+			languages, edges, imports := outlineQueries(scope, generation)
+			_, filteredEdges, filteredImports := outlineFilteredQueries(scope, generation, graph.OutlineEdgeFilter{
+				ExcludeKinds: []graph.EdgeKind{graph.EdgeMatches}, ExcludeNodeKinds: []graph.NodeKind{graph.KindContract}, ExcludeVia: "spring.Bean",
+			})
+			viaEdges, viaImports := outlineViaQueries(filteredEdges, filteredImports, "spring.Bean")
+			for name, query := range map[string]outlineQuery{"languages": languages, "edges": edges, "imports": imports, "filtered_edges": filteredEdges, "filtered_imports": filteredImports, "via_edges": viaEdges, "via_imports": viaImports} {
 				t.Run(name, func(t *testing.T) {
 					rows, err := db.Query("EXPLAIN QUERY PLAN "+query.sql, query.args...)
 					if err != nil {
@@ -60,10 +67,10 @@ func TestScopedOutlineQueryPlans(t *testing.T) {
 							t.Fatalf("table scan: %s", joined)
 						}
 					}
-					if name == "edges" && !strings.Contains(joined, "edges_by_from (view_gen=? AND from_id=?)") {
+					if strings.HasSuffix(name, "edges") && !strings.Contains(joined, "edges_by_from (view_gen=? AND from_id=?)") {
 						t.Fatalf("missing outgoing seek: %s", joined)
 					}
-					if name == "imports" && !strings.Contains(joined, "edges_by_to (view_gen=? AND to_id=? AND kind=?)") {
+					if strings.HasSuffix(name, "imports") && !strings.Contains(joined, "edges_by_to (view_gen=? AND to_id=? AND kind=?)") {
 						t.Fatalf("missing incoming seek: %s", joined)
 					}
 				})
@@ -122,5 +129,51 @@ func TestScopedOutlineGenerationAndMissingIndexes(t *testing.T) {
 			t.Fatal(err)
 		}
 		check()
+	}
+}
+
+func TestScopedOutlineFilteredParity(t *testing.T) {
+	storetest.RunFilteredScopedOutline(t, func(t *testing.T) graph.Store {
+		s, err := Open(filepath.Join(t.TempDir(), "outline.sqlite"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s
+	})
+}
+
+func TestScopedOutlineMetadataEncodings(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "metadata.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.AddBatch([]*graph.Node{
+		{ID: "a", Kind: graph.KindFunction, RepoPrefix: "repo", FilePath: "repo/a.go"},
+		{ID: "b", Kind: graph.KindFunction, RepoPrefix: "repo", FilePath: "repo/b.go"},
+	}, nil)
+	flat, err := encodeMeta(map[string]any{"via": "spring.Bean"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	falsePositive, err := encodeMeta(map[string]any{"other": "spring.Bean", "via": "spring.BeanFactory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy bytes.Buffer
+	if err := gob.NewEncoder(&legacy).Encode(map[string]any{"via": "spring.Bean"}); err != nil {
+		t.Fatal(err)
+	}
+	for i, blob := range [][]byte{flat, []byte(`{"via":"spring.Bean"}`), []byte(`{"via":"\u0073pring.Bean"}`), legacy.Bytes(), falsePositive, nil} {
+		for _, kind := range []string{"calls", "imports"} {
+			if _, err := s.writerDB.Exec(`INSERT INTO edges(from_id,to_id,kind,line,view_gen,meta) VALUES('a','b',?,?,0,?)`, kind, i, blob); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	got := s.ScopedOutlineCountsFiltered(graph.NodeScope{RepoAllow: map[string]bool{"repo": true}}, graph.OutlineEdgeFilter{ExcludeVia: "spring.Bean"})
+	if got.TotalEdges != 4 || len(got.FileImports) != 1 || got.FileImports[0].Count != 2 {
+		t.Fatalf("mixed metadata counts = %+v, want 4 edges and 2 imports", got)
 	}
 }

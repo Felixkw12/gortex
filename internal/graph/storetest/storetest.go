@@ -159,6 +159,7 @@ func RunConformance(t *testing.T, factory Factory, semantics Semantics) {
 	t.Run("NodesByKindsScanner", func(t *testing.T) { testNodesByKindsScanner(t, factory) })
 	t.Run("EdgeKindCounter", func(t *testing.T) { testEdgeKindCounter(t, factory) })
 	t.Run("CrossRepoEdgeAggregator", func(t *testing.T) { testCrossRepoEdgeAggregator(t, factory) })
+	t.Run("FilteredScopedOutline", func(t *testing.T) { RunFilteredScopedOutline(t, factory) })
 	t.Run("ScopedOutline", func(t *testing.T) { RunScopedOutline(t, factory) })
 	t.Run("FileImportAggregator", func(t *testing.T) { testFileImportAggregator(t, factory) })
 	t.Run("InDegreeForNodes", func(t *testing.T) { testInDegreeForNodes(t, factory) })

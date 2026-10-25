@@ -41,6 +41,11 @@ func (r *outlineCountingReader) ScopedOutlineCounts(scope graph.NodeScope) graph
 	return r.Store.ScopedOutlineCounts(scope)
 }
 
+func (r *outlineCountingReader) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter graph.OutlineEdgeFilter) graph.OutlineCounts {
+	r.aggregates++
+	return r.Store.ScopedOutlineCountsFiltered(scope, filter)
+}
+
 func outlineFixture(t *testing.T) (*Server, *store_sqlite.Store) {
 	t.Helper()
 	store, err := store_sqlite.Open(filepath.Join(t.TempDir(), "outline.sqlite"))
@@ -202,4 +207,50 @@ func TestOutlineOverlayReflectsUnsavedBuffers(t *testing.T) {
 	require.Contains(t, string(got), "typescript")
 	require.NotNil(t, store.GetNode("a-main"))
 	require.Nil(t, store.GetNode("unsaved-main"))
+}
+
+func TestOutlineContractRuntimeNeverScansAndPreservesFilters(t *testing.T) {
+	s, store := outlineFixture(t)
+	store.AddBatch([]*graph.Node{
+		{ID: "contract", Kind: graph.KindContract, RepoPrefix: "a", WorkspaceID: "ws", FilePath: "a/api.yaml"},
+		{ID: "config", Kind: graph.KindConfigKey, RepoPrefix: "a", WorkspaceID: "ws", FilePath: "a/config.yaml"},
+		{ID: "table", Kind: graph.KindTable, RepoPrefix: "a", WorkspaceID: "ws", FilePath: "a/schema.sql"},
+	}, []*graph.Edge{
+		{From: "contract", To: "a-lib", Kind: graph.EdgeImports},
+		{From: "a-main", To: "config", Kind: graph.EdgeReadsConfig},
+		{From: "a-main", To: "a-lib", Kind: graph.EdgeCalls, Meta: map[string]any{"via": "spring.Bean"}},
+		{From: "outside-main", To: "a-lib", Kind: graph.EdgeImports, Line: 7, Meta: map[string]any{"via": "spring.Bean"}},
+		{From: "a-main", To: "a-lib", Kind: graph.EdgeMatches},
+		{From: "a-main", To: "table", Kind: graph.EdgeProvides},
+	})
+	installContractCoreKindTestRuntime(t, s)
+	ctx := outlineBoundContext(s, "runtime", "ws", map[string]bool{"a": true})
+	reader := &outlineCountingReader{Store: store}
+	got := outlineJSON(t, s, ctx, reader)
+	require.Zero(t, reader.allEdges)
+	require.Zero(t, reader.allNodes)
+	require.Zero(t, reader.allNodesLight)
+	require.Equal(t, 1, reader.aggregates, "the production wrapper must use filtered SQL aggregation")
+	legacy := outlineJSON(t, s, ctx, legacyOutlineReader{Reader: store})
+	require.JSONEq(t, string(legacy), string(got))
+	var decoded struct {
+		Summary struct {
+			TotalEdges int `json:"total_edges"`
+		} `json:"summary"`
+	}
+	require.NoError(t, json.Unmarshal(got, &decoded))
+	require.Equal(t, 5, decoded.Summary.TotalEdges, "table provides remains core; contract/kind/metadata edges are excluded")
+	// Explicit ownership sets replace kind classification, even when empty.
+	for _, ids := range []map[string]bool{nil, {}, {"a-lib": true}} {
+		wrapped := newContractCoreEdges(store, ctx, ids)
+		aggregated, ok := scopedOutlineCountsFor(wrapped, graph.NodeScope{WorkspaceID: "ws", RepoAllow: map[string]bool{"a": true}})
+		require.True(t, ok)
+		var count int
+		for _, edge := range wrapped.AllEdges() {
+			if (graph.NodeScope{WorkspaceID: "ws", RepoAllow: map[string]bool{"a": true}}).Allows(wrapped.GetNode(edge.From)) && (graph.NodeScope{WorkspaceID: "ws", RepoAllow: map[string]bool{"a": true}}).Allows(wrapped.GetNode(edge.To)) {
+				count++
+			}
+		}
+		require.Equal(t, count, aggregated.TotalEdges)
+	}
 }

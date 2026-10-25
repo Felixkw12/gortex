@@ -47,10 +47,9 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	var inScope map[string]bool
 	var aggregated *graph.OutlineCounts
 	if bound {
-		if ag, ok := reader.(graph.ScopedOutlineAggregator); ok {
-			counts := ag.ScopedOutlineCounts(graph.NodeScope{
-				WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow,
-			})
+		if counts, ok := scopedOutlineCountsFor(reader, graph.NodeScope{
+			WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow,
+		}); ok {
 			aggregated = &counts
 		} else {
 			// Overlays deliberately take the existing reader-based path.

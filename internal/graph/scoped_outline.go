@@ -83,8 +83,46 @@ type ScopedOutlineAggregator interface {
 	ScopedOutlineCounts(NodeScope) OutlineCounts
 }
 
+// OutlineEdgeFilter describes the adjacency exclusions a composed reader
+// applies. Node and language counts remain unchanged. A nil ExcludeNodeIDs
+// allows callers to use endpoint kinds; a supplied identity set can express
+// the exact ownership set instead.
+type OutlineEdgeFilter struct {
+	ExcludeKinds     []EdgeKind
+	ExcludeNodeKinds []NodeKind
+	ExcludeNodeIDs   map[string]bool
+	ExcludeVia       string
+}
+
+// FilteredScopedOutlineAggregator preserves adjacency filters while pushing
+// outline counts into a selected backend. Overlays omit this capability too.
+type FilteredScopedOutlineAggregator interface {
+	ScopedOutlineCountsFiltered(NodeScope, OutlineEdgeFilter) OutlineCounts
+}
+
+func (f OutlineEdgeFilter) Allows(e *Edge, from, to *Node) bool {
+	if e == nil || f.ExcludeNodeIDs[e.From] || f.ExcludeNodeIDs[e.To] {
+		return false
+	}
+	for _, kind := range f.ExcludeKinds {
+		if e.Kind == kind {
+			return false
+		}
+	}
+	for _, kind := range f.ExcludeNodeKinds {
+		if (from != nil && from.Kind == kind) || (to != nil && to.Kind == kind) {
+			return false
+		}
+	}
+	return f.ExcludeVia == "" || e.Meta["via"] != f.ExcludeVia
+}
+
 // ScopedOutlineCounts is the in-memory reference implementation.
 func (g *Graph) ScopedOutlineCounts(scope NodeScope) OutlineCounts {
+	return g.ScopedOutlineCountsFiltered(scope, OutlineEdgeFilter{})
+}
+
+func (g *Graph) ScopedOutlineCountsFiltered(scope NodeScope, filter OutlineEdgeFilter) OutlineCounts {
 	out := OutlineCounts{ByLanguage: make(map[string]int)}
 	allowed := make(map[string]bool)
 	for _, n := range g.AllNodes() {
@@ -98,6 +136,9 @@ func (g *Graph) ScopedOutlineCounts(scope NodeScope) OutlineCounts {
 	}
 	imports := make(map[string]int)
 	for _, e := range g.AllEdges() {
+		if !filter.Allows(e, g.GetNode(e.From), g.GetNode(e.To)) {
+			continue
+		}
 		if allowed[e.From] && allowed[e.To] {
 			out.TotalEdges++
 		}
@@ -118,3 +159,5 @@ func (g *Graph) ScopedOutlineCounts(scope NodeScope) OutlineCounts {
 }
 
 var _ ScopedOutlineAggregator = (*Graph)(nil)
+
+var _ FilteredScopedOutlineAggregator = (*Graph)(nil)

@@ -1,6 +1,7 @@
 package store_sqlite
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"sort"
@@ -57,6 +58,10 @@ type outlineQuery struct {
 // unowned bucket are visited through nodes_by_repo; endpoint checks use the
 // node primary key in the same payload generation.
 func outlineQueries(scope graph.NodeScope, generation int64) (languages, edges, imports outlineQuery) {
+	return outlineFilteredQueries(scope, generation, graph.OutlineEdgeFilter{})
+}
+
+func outlineFilteredQueries(scope graph.NodeScope, generation int64, filter graph.OutlineEdgeFilter) (languages, edges, imports outlineQuery) {
 	predicate, args := outlineScopePredicate(scope, "n")
 	from := ` FROM nodes AS n`
 	if len(scope.RepoAllow) > 0 {
@@ -69,16 +74,60 @@ func outlineQueries(scope graph.NodeScope, generation int64) (languages, edges, 
 	targetPredicate, targetArgs := outlineScopePredicate(scope, "target")
 	edges = outlineQuery{`SELECT COUNT(*)` + from + ` CROSS JOIN edges AS e INDEXED BY edges_by_from
 		ON e.from_id = n.id AND e.view_gen = n.view_gen
-		JOIN nodes AS target ON target.id = e.to_id AND target.view_gen = e.view_gen
+		CROSS JOIN nodes AS target ON target.id = e.to_id AND target.view_gen = e.view_gen
 		WHERE ` + where + ` AND ` + targetPredicate, append(append([]any(nil), baseArgs...), targetArgs...)}
 	imports = outlineQuery{`SELECT COALESCE(NULLIF(n.file_path, ''), n.id) AS path, COUNT(*)` + from + ` CROSS JOIN edges AS e INDEXED BY edges_by_to
 		ON e.to_id = n.id AND e.view_gen = n.view_gen AND e.kind = ?
 		WHERE ` + where + ` GROUP BY path`, append([]any{string(graph.EdgeImports)}, baseArgs...)}
+	edgeFilter, edgeArgs := outlineEdgePredicate(filter, "n", "target")
+	edges.sql += edgeFilter
+	edges.args = append(edges.args, edgeArgs...)
+	importFilter, importArgs := outlineEdgePredicate(filter, "source", "n")
+	if len(filter.ExcludeNodeKinds) > 0 {
+		imports.sql = strings.Replace(imports.sql, "WHERE n.view_gen", "LEFT JOIN nodes AS source ON source.id = e.from_id AND source.view_gen = e.view_gen WHERE n.view_gen", 1)
+	}
+	imports.sql = strings.Replace(imports.sql, " GROUP BY path", importFilter+" GROUP BY path", 1)
+	imports.args = append(imports.args, importArgs...)
 	return languages, edges, imports
 }
 
+func outlineEdgePredicate(filter graph.OutlineEdgeFilter, from, to string) (string, []any) {
+	var predicate string
+	var args []any
+	if len(filter.ExcludeKinds) > 0 {
+		data, _ := json.Marshal(filter.ExcludeKinds)
+		predicate += ` AND e.kind NOT IN (SELECT CAST(value AS TEXT) FROM json_each(?))`
+		args = append(args, string(data))
+	}
+	if len(filter.ExcludeNodeKinds) > 0 {
+		data, _ := json.Marshal(filter.ExcludeNodeKinds)
+		for _, alias := range []string{from, to} {
+			predicate += ` AND COALESCE(` + alias + `.kind, '') NOT IN (SELECT CAST(value AS TEXT) FROM json_each(?))`
+			args = append(args, string(data))
+		}
+	}
+	if len(filter.ExcludeNodeIDs) > 0 {
+		ids := make([]string, 0, len(filter.ExcludeNodeIDs))
+		for id, excluded := range filter.ExcludeNodeIDs {
+			if excluded {
+				ids = append(ids, id)
+			}
+		}
+		data, _ := json.Marshal(ids)
+		for _, endpoint := range []string{"from_id", "to_id"} {
+			predicate += ` AND e.` + endpoint + ` NOT IN (SELECT CAST(value AS TEXT) FROM json_each(?))`
+			args = append(args, string(data))
+		}
+	}
+	return predicate, args
+}
+
 func (s *Store) ScopedOutlineCounts(scope graph.NodeScope) graph.OutlineCounts {
-	languages, edges, imports := outlineQueries(scope, s.viewGen)
+	return s.ScopedOutlineCountsFiltered(scope, graph.OutlineEdgeFilter{})
+}
+
+func (s *Store) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter graph.OutlineEdgeFilter) graph.OutlineCounts {
+	languages, edges, imports := outlineFilteredQueries(scope, s.viewGen, filter)
 	out := graph.OutlineCounts{ByLanguage: make(map[string]int)}
 	rows, err := s.outlineRows(languages)
 	panicOnFatal(err)
@@ -111,14 +160,97 @@ func (s *Store) ScopedOutlineCounts(scope graph.NodeScope) graph.OutlineCounts {
 	if rows == nil {
 		return out
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var row graph.FileImportCountRow
 		panicOnFatal(rows.Scan(&row.FilePath, &row.Count))
 		out.FileImports = append(out.FileImports, row)
 	}
 	panicOnFatal(rows.Err())
+	_ = rows.Close()
+	if filter.ExcludeVia != "" {
+		s.subtractOutlineVia(&out, edges, imports, filter.ExcludeVia)
+	}
 	return out
+}
+
+// Metadata is not a promoted edge column and may use flat, JSON or legacy gob
+// encoding. Count ordinary edges in SQL, then decode only grouped candidates:
+// flat strings contain their literal bytes; all older encodings are admitted
+// conservatively (including escaped JSON). No whole-store edge read is needed.
+func (s *Store) subtractOutlineVia(out *graph.OutlineCounts, edges, imports outlineQuery, via string) {
+	edges, imports = outlineViaQueries(edges, imports, via)
+	counts := make(map[string]int, len(out.FileImports))
+	for _, row := range out.FileImports {
+		counts[row.FilePath] = row.Count
+	}
+	for i, query := range []outlineQuery{edges, imports} {
+		rows, err := s.outlineRows(query)
+		panicOnFatal(err)
+		if rows == nil {
+			return
+		}
+		for rows.Next() {
+			var path string
+			var meta []byte
+			var count int
+			if i == 0 {
+				err = rows.Scan(&meta, &count)
+			} else {
+				err = rows.Scan(&path, &meta, &count)
+			}
+			panicOnFatal(err)
+			if outlineMetaVia(meta, via) {
+				if i == 0 {
+					out.TotalEdges -= count
+				} else {
+					counts[path] -= count
+				}
+			}
+		}
+		panicOnFatal(rows.Err())
+		_ = rows.Close()
+	}
+	out.FileImports = nil
+	for path, count := range counts {
+		if count > 0 {
+			out.FileImports = append(out.FileImports, graph.FileImportCountRow{FilePath: path, Count: count})
+		}
+	}
+}
+
+func outlineViaQueries(edges, imports outlineQuery, via string) (outlineQuery, outlineQuery) {
+	candidate := ` AND e.meta IS NOT NULL AND length(e.meta) > 0 AND (substr(e.meta, 1, 2) <> ? OR instr(e.meta, ?) > 0)`
+	args := []any{[]byte{metaFlatMagic0, metaFlatVersion}, []byte(via)}
+	edges.sql = strings.Replace(edges.sql, `SELECT COUNT(*)`, `SELECT e.meta, COUNT(*)`, 1) + candidate + ` GROUP BY e.meta`
+	edges.args = append(edges.args, args...)
+	imports.sql = strings.Replace(imports.sql, `AS path, COUNT(*)`, `AS path, e.meta, COUNT(*)`, 1)
+	imports.sql = strings.Replace(imports.sql, ` GROUP BY path`, candidate+` GROUP BY path, e.meta`, 1)
+	imports.args = append(imports.args, args...)
+	return edges, imports
+}
+
+func outlineMetaVia(blob []byte, via string) bool {
+	if isFlatMeta(blob) {
+		// The prefilter can match a different field or a longer string.
+		// Read the actual top-level via value before subtracting anything.
+		d := &metaDecoder{buf: blob[2:]}
+		count, err := d.readCount()
+		panicOnFatal(err)
+		for range count {
+			key, err := d.readRawString()
+			panicOnFatal(err)
+			if bytes.Equal(key, []byte("via")) {
+				value, err := d.readValue()
+				panicOnFatal(err)
+				return value == via
+			}
+			panicOnFatal(d.skipValue())
+		}
+		return false
+	}
+	meta, err := decodeMeta(blob)
+	panicOnFatal(err)
+	return meta["via"] == via
 }
 
 // Cold bulk loads may temporarily drop secondary indexes. Retain exact reads
@@ -138,3 +270,5 @@ func (s *Store) outlineRows(query outlineQuery) (*sql.Rows, error) {
 }
 
 var _ graph.ScopedOutlineAggregator = (*Store)(nil)
+
+var _ graph.FilteredScopedOutlineAggregator = (*Store)(nil)
