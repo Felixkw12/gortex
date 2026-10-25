@@ -37,6 +37,9 @@ type contractAnalysisContext struct {
 	lazy          func(context.Context) error
 	lazyOnce      sync.Once
 	lazyErr       error
+	// registries reuses unchanged repository loads across requests; nil
+	// loads every repository.
+	registries *contractRegistryCache
 }
 
 func withContractAnalysisContext(ctx context.Context, binding *contractAnalysisContext) context.Context {
@@ -166,7 +169,7 @@ func (binding *contractAnalysisContext) loadRegistry(ctx context.Context) (*cont
 		sort.Strings(repos)
 		for _, repo := range repos {
 			view := binding.views[repo]
-			reg, err := contracts.LoadRegistryFromGraphChecked(ctx, view.RegistryReader, contracts.RegistryLoadOptions{RepoPrefix: repo})
+			reg, err := binding.registries.loadRepo(ctx, view, repo)
 			if err != nil {
 				binding.registryErr = err
 				return
