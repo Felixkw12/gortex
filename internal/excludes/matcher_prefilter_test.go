@@ -193,6 +193,19 @@ func TestMatchRelEitherNonmatchingNegationSkipsParents(t *testing.T) {
 	}
 }
 
+// When no negation can match a positively matched file, its parents can
+// only change which line explains it. MatchRel skips them; a nil directory
+// matcher makes any parent query fail.
+func TestMatchRelNonmatchingNegationSkipsParents(t *testing.T) {
+	for _, rel := range []string{"node_modules/pkg/index.js", "node_modules/pkg/a/b/c/d/e/f/index.js"} {
+		m := New(append(append([]string{}, Builtin...), "!.gitkeep"))
+		m.dirs = nil
+		if !m.MatchRel(rel) {
+			t.Fatalf("excluded path admitted: %s", rel)
+		}
+	}
+}
+
 func TestMatcherNegationPrefilterDifferential(t *testing.T) {
 	rng := rand.New(rand.NewSource(95103))
 	pool := []string{"gen/", "node_modules/", "*.tmp", "/**", "gen/**/", "gen/**", "a/b/*", "[ab]", "?x", `\#*\#`, "!.gitkeep", "!*.proto", "!gen/", "!gen/keep/", "!**/keep.go", "!a/**/b", "!gen?/", "!/[ab]/", `!a\*b/`, "!*", "!/**", "!café/", "!foo//", "!!bang", "!!bang/", "bang", "!#x", "src/"}
