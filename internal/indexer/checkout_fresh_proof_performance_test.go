@@ -12,10 +12,10 @@ import (
 // TestPerformanceCheckoutFreshProofLatencyProbe measures the proof against the ticket it
 // replaces on a settled route, with the coordinator's loop running at the
 // product-default quiet window. It always asserts the proof is fresh and
-// sub-second and logs both distributions; the tens-of-milliseconds bound and
-// the proof-beats-ticket comparison apply only when
-// GORTEX_FRESH_PROOF_LATENCY_GATE=1, because a loaded CI host can stretch one
-// git status well past them.
+// within a host-scaled one-second allowance (3s plain, 5s under race), and
+// logs both distributions. The unscaled 100ms bound and proof-beats-ticket
+// comparison apply only when GORTEX_FRESH_PROOF_LATENCY_GATE=1, because a
+// loaded CI host can stretch one git status well past them.
 func TestPerformanceCheckoutFreshProofLatencyProbe(t *testing.T) {
 	f := newCoordinatorFixture(t)
 	gate := NewViewBuildGate()
@@ -65,8 +65,8 @@ func TestPerformanceCheckoutFreshProofLatencyProbe(t *testing.T) {
 	if os.Getenv("GORTEX_FRESH_PROOF_LATENCY_GATE") != "1" {
 		return
 	}
-	if proofP50 >= testTimingSlack(100*time.Millisecond) {
-		t.Fatalf("the proof's p50 %v exceeded %v", proofP50, testTimingSlack(100*time.Millisecond))
+	if proofP50 >= 100*time.Millisecond {
+		t.Fatalf("the proof's p50 %v exceeded %v", proofP50, 100*time.Millisecond)
 	}
 	if proofP50 >= ticketP50 {
 		t.Fatalf("the proof (p50 %v) is not cheaper than the ticket it replaces (p50 %v)", proofP50, ticketP50)
