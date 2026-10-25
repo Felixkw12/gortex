@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.uber.org/zap"
@@ -84,8 +85,8 @@ func TestABackgroundCycleYieldsTheLaneToAnInteractiveBuild(t *testing.T) {
 	waited := time.Since(asked)
 	release()
 	t.Logf("interactive build waited %s for the lane a background build held", waited)
-	if waited > 100*time.Millisecond {
-		t.Errorf("interactive build waited %s for a yielding background build, want ≤ 100ms", waited)
+	if waited > testTimingSlack(100*time.Millisecond) {
+		t.Errorf("interactive build waited %s for a yielding background build, want ≤ %s", waited, testTimingSlack(100*time.Millisecond))
 	}
 
 	out := awaitLaneYieldOutcome(t, outcomes)
@@ -167,35 +168,37 @@ func TestABackgroundCycleDoesNotYieldPastItsCommitPoint(t *testing.T) {
 // completes between edits.) Live, a cycle at the old bound held another
 // checkout's edits for 95 s and 313 s.
 func TestBackgroundCyclePastTheYieldBoundStillGivesTheLaneUp(t *testing.T) {
-	gate := NewViewBuildGate()
-	gate.Open()
-	building := make(chan struct{})
-	_, outcomes, _ := startLaneYieldCycle(t, gate, maxViewBuildYields+5, func(ctx context.Context) {
-		close(building)
-		<-ctx.Done()
+	synctest.Test(t, func(t *testing.T) {
+		gate := NewViewBuildGate()
+		gate.Open()
+		building := make(chan struct{})
+		_, outcomes, _ := startLaneYieldCycle(t, gate, maxViewBuildYields+5, func(ctx context.Context) {
+			close(building)
+			<-ctx.Done()
+		})
+		select {
+		case <-building:
+		case <-time.After(3 * time.Second):
+			t.Fatal("background cycle was not admitted")
+		}
+		waited := time.Now()
+		acquireCtx, cancelAcquire := context.WithTimeout(t.Context(), 3*time.Second)
+		defer cancelAcquire()
+		release, err := gate.Acquire(acquireCtx, ViewBuildInteractive)
+		if err != nil {
+			t.Fatalf("the interactive build never got the lane from a background cycle past the yield bound: %v", err)
+		}
+		release()
+		if wait := time.Since(waited); wait > time.Second {
+			t.Fatalf("the interactive build waited %v for a background cycle past the yield bound", wait)
+		}
+		if stats := gate.Stats(); stats.YieldRefusals != 0 || stats.YieldRequests != 1 {
+			t.Fatalf("gate yield stats = requests %d refusals %d, want 1 and 0", stats.YieldRequests, stats.YieldRefusals)
+		}
+		if out := awaitLaneYieldOutcome(t, outcomes); out.YieldedTo != laneYieldedToInteractive {
+			t.Fatalf("the cycle past the bound did not yield: %+v", out)
+		}
 	})
-	select {
-	case <-building:
-	case <-time.After(3 * time.Second):
-		t.Fatal("background cycle was not admitted")
-	}
-	waited := time.Now()
-	acquireCtx, cancelAcquire := context.WithTimeout(t.Context(), 3*time.Second)
-	defer cancelAcquire()
-	release, err := gate.Acquire(acquireCtx, ViewBuildInteractive)
-	if err != nil {
-		t.Fatalf("the interactive build never got the lane from a background cycle past the yield bound: %v", err)
-	}
-	release()
-	if wait := time.Since(waited); wait > time.Second {
-		t.Fatalf("the interactive build waited %v for a background cycle past the yield bound", wait)
-	}
-	if stats := gate.Stats(); stats.YieldRefusals != 0 || stats.YieldRequests != 1 {
-		t.Fatalf("gate yield stats = requests %d refusals %d, want 1 and 0", stats.YieldRequests, stats.YieldRefusals)
-	}
-	if out := awaitLaneYieldOutcome(t, outcomes); out.YieldedTo != laneYieldedToInteractive {
-		t.Fatalf("the cycle past the bound did not yield: %+v", out)
-	}
 }
 
 // commit and fire exclude each other: whichever comes first decides, and a

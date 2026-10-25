@@ -206,6 +206,7 @@ func contractCoreCapabilityTable() []contractCoreCapRow {
 		{"Store", capOf[graph.Store], capDropped, "the whole backend contract; a request reader is never the store"},
 		{"AnalysisGenerationStore", capOf[graph.AnalysisGenerationStore], capDropped, capReasonBackend},
 		{"AnalysisQueryStore", capOf[graph.AnalysisQueryStore], capDropped, capReasonBackend},
+		{"TryAnalysisQueryStore", capOf[graph.TryAnalysisQueryStore], capDropped, capReasonBackend},
 		{"BundleFingerprintSink", capOf[graph.BundleFingerprintSink], capDropped, capReasonBackend},
 		{"ContractRepoProjectionReader", capOf[graph.ContractRepoProjectionReader], capDropped, capReasonBackend},
 		{"OverlayLayerContractFileNodesReader", capOf[graph.OverlayLayerContractFileNodesReader], capDropped, "checked physical-layer file nodes; graph.ContractFileNodesContext unwraps and composes the selected reader with its ownership masks instead of forwarding physical rows on the request wrapper"},

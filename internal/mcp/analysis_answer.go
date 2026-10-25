@@ -94,52 +94,61 @@ func (s *Server) answerAnalysisCacheFor(generationID int64) *answerAnalysisCache
 }
 
 // answerAnalysisNodeMetricsBatched is analysisNodeMetricsBatched through the
-// answer-path receipt.
-func (s *Server) answerAnalysisNodeMetricsBatched(nodeIDs []string) ([]graph.AnalysisNodeMetric, graph.AnalysisGenerationHeader, bool) {
+// answer-path receipt, without waiting for a store writer when supported.
+// Any failed page discards the complete batch so candidates are never partially scored.
+func (s *Server) answerAnalysisNodeMetricsBatched(nodeIDs []string) ([]graph.AnalysisNodeMetric, graph.AnalysisGenerationHeader, error) {
 	ids := dedupeStrings(nodeIDs)
 	query, header, ok := s.activeAnalysisQueryForAnswer()
 	if !ok {
-		return nil, header, false
+		return nil, header, graph.ErrAnalysisGenerationInactive
+	}
+	read := query.AnalysisNodeMetrics
+	if nonblocking, ok := query.(graph.TryAnalysisQueryStore); ok {
+		read = nonblocking.TryAnalysisNodeMetrics
 	}
 	rows := make([]graph.AnalysisNodeMetric, 0, len(ids))
 	for start := 0; start < len(ids); start += analysisGenerationQueryMax {
 		end := min(start+analysisGenerationQueryMax, len(ids))
 		page, err := boundedAnalysisIDs(ids[start:end])
 		if err != nil {
-			return nil, header, false
+			return nil, header, err
 		}
 		if len(page) == 0 {
 			continue
 		}
-		metrics, err := query.AnalysisNodeMetrics(header.GenerationID, page)
+		metrics, err := read(header.GenerationID, page)
 		if err != nil {
-			return nil, header, false
+			return nil, header, err
 		}
 		rows = append(rows, metrics...)
 	}
-	return rows, header, true
+	return rows, header, nil
 }
 
 // answerTopAnalysisMetricValue is topAnalysisMetricValue memoized per analysis
 // generation: the maximum of a metric over an immutable generation never
 // changes, so it is read once per generation instead of once per search.
-func (s *Server) answerTopAnalysisMetricValue(header graph.AnalysisGenerationHeader, metric graph.AnalysisMetric) float64 {
+func (s *Server) answerTopAnalysisMetricValue(header graph.AnalysisGenerationHeader, metric graph.AnalysisMetric) (float64, error) {
 	cache := s.answerAnalysisCacheFor(header.GenerationID)
 	cache.mu.Lock()
 	if value, ok := cache.topMetric[metric]; ok && cache.generationID == header.GenerationID {
 		cache.mu.Unlock()
-		return value
+		return value, nil
 	}
 	cache.mu.Unlock()
 	_, query := s.analysisGenerationBackends()
 	if query == nil {
-		return 0
+		return 0, graph.ErrAnalysisGenerationInactive
 	}
 	value := 0.0
-	rows, _, err := query.TopAnalysisNodeMetrics(header.GenerationID, metric, 1, nil)
+	read := query.TopAnalysisNodeMetrics
+	if nonblocking, ok := query.(graph.TryAnalysisQueryStore); ok {
+		read = nonblocking.TryTopAnalysisNodeMetrics
+	}
+	rows, _, err := read(header.GenerationID, metric, 1, nil)
 	if err != nil {
 		// Not memoized: a failed read is retried by the next request.
-		return 0
+		return 0, err
 	}
 	if len(rows) > 0 {
 		value = analysisMetricValue(rows[0], metric)
@@ -152,7 +161,7 @@ func (s *Server) answerTopAnalysisMetricValue(header graph.AnalysisGenerationHea
 		cache.topMetric[metric] = value
 	}
 	cache.mu.Unlock()
-	return value
+	return value, nil
 }
 
 // autoConceptsForAnswer is getAutoConcepts for the answer path. It never waits
