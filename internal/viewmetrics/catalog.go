@@ -17,6 +17,10 @@ import "strings"
 // Series names. The prefix is the subsystem, the suffix is the unit: _total
 // for a counter, _seconds for a duration, and a bare noun for a gauge.
 const (
+	// SearchRerankAnalysisSkippedBusy counts searches that omitted all analysis
+	// ranking signals because an optional read found the store writer busy.
+	SearchRerankAnalysisSkippedBusy = "search_rerank_analysis_skipped_busy"
+
 	// FamilyInventorySeconds is how long enumerating one checkout family's
 	// worktrees took, split by whether git answered.
 	FamilyInventorySeconds = "views_family_inventory_seconds"
@@ -629,6 +633,7 @@ func FallbackReasonCode(reason string) string {
 // catalog declares every series. It is the allow-list: a name absent from it
 // records nothing.
 var catalog = map[string]spec{
+	SearchRerankAnalysisSkippedBusy: {kind: kindCounter},
 	FamilyInventorySeconds: {kind: kindDuration, labels: []labelSpec{
 		{name: LabelOutcome, values: []string{OutcomeOK, OutcomeError}},
 	}},
