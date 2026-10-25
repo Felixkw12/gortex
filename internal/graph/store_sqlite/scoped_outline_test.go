@@ -65,7 +65,7 @@ func TestScopedOutlineQueryPlans(t *testing.T) {
 					if !strings.Contains(joined, "nodes_by_repo (repo_prefix=? AND view_gen=?)") {
 						t.Fatalf("missing repo seek: %s", joined)
 					}
-					for _, forbidden := range []string{"SCAN n", "SCAN e", "SCAN target", "SCAN nodes", "SCAN edges"} {
+					for _, forbidden := range []string{"SCAN n", "SCAN e", "SCAN target", "SCAN source", "SCAN nodes", "SCAN edges"} {
 						if strings.Contains(joined, forbidden) {
 							t.Fatalf("table scan: %s", joined)
 						}
@@ -215,7 +215,7 @@ func TestScopedOutlineCorrectionUsesOneSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	queryer := &outlineConcurrentWriter{tx: tx, write: func() {
 		for line := 1; line <= 4; line++ {
 			s.AddEdge(&graph.Edge{From: "a", To: "b", Kind: graph.EdgeImports, Line: line, Meta: map[string]any{"via": "spring.Bean"}})

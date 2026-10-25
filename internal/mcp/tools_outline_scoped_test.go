@@ -226,6 +226,12 @@ func TestOutlineOverlayReflectsUnsavedBuffers(t *testing.T) {
 	require.Contains(t, string(got), "typescript")
 	require.NotNil(t, store.GetNode("a-main"))
 	require.Nil(t, store.GetNode("unsaved-main"))
+	installContractCoreKindTestRuntime(t, s)
+	_, ok, err := scopedOutlineCountsFor(s.readerFor(WithOverlayView(ctx, view)), graph.NodeScope{WorkspaceID: "ws", RepoAllow: map[string]bool{"a": true}})
+	require.NoError(t, err)
+	require.False(t, ok, "the runtime must preserve the overlay fallback")
+	runtime := outlineJSON(t, s, WithOverlayView(ctx, view), nil)
+	require.JSONEq(t, string(got), string(runtime))
 }
 
 func TestOutlineContractRuntimeNeverScansAndPreservesFilters(t *testing.T) {

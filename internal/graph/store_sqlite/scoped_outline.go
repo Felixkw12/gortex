@@ -133,7 +133,7 @@ func (s *Store) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter graph.
 	if err != nil {
 		return graph.OutlineCounts{}, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	out, err := s.outlineCountsFrom(ctx, tx, scope, filter)
 	if err != nil {
 		return graph.OutlineCounts{}, err
