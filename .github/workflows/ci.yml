@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Run on the merged commit to verify the extended parser regression gate (#991).
+  workflow_dispatch:
 
 # One run per PR: a new push cancels the PR's older run. Every other event
 # (pushes to main, schedules) gets its own group from the run ID, so none of
@@ -19,6 +21,20 @@ env:
   CGO_CXXFLAGS: -O2 -g -fno-strict-aliasing
 
 jobs:
+  parser-stress:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Stress parser with release cgo flags
+        run: go test -race -count=50 -timeout=50m ./internal/parser/...
+
   test:
     runs-on: ${{ matrix.os }}
     # Each job compiles its packages once and runs their tests on one worker
