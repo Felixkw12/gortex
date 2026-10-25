@@ -42,7 +42,11 @@ func TestCheckoutLifecycleReconcileFamilyPersistsExpiredInaccessible(t *testing.
 	require.NoError(t, err)
 	entry = checkoutReportByID(t, expired, tracked.CheckoutID)
 	assert.Equal(t, reconcile.ActionPrimaryClosureRetired, entry.Action)
-	assert.Nil(t, f.mi.GetMetadata("event-offline"))
+	// The build the registration started can still hold the corpus, so the
+	// purge may be the cleanup runtime's to finish.
+	require.Eventually(t, func() bool {
+		return f.mi.GetMetadata("event-offline") == nil && !f.lc.RepositoryAdmissionClosed("event-offline")
+	}, 30*time.Second, 10*time.Millisecond, "its corpus is never evicted")
 	assert.NotContains(t, f.configPaths(), root, "event-driven cleanup is persisted")
 }
 

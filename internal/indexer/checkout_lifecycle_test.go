@@ -1021,15 +1021,30 @@ func TestCheckoutLifecycleInaccessibleRootIsForgottenAfterGrace(t *testing.T) {
 	assert.Equal(t, store_sqlite.CheckoutStateAvailabilityGrace, held.State)
 	assert.Zero(t, held.RemovalDetectedAt, "inaccessibility uses only one grace clock")
 
+	// A reader still holding the corpus defers its purge, so the retirement
+	// takes the path a busy daemon does: the sweep reports it done and the
+	// cleanup runtime finishes the purge once the reader lets go.
+	pin := f.lc.ViewLeases().AcquireBaseCorpus("offline-repo")
+	defer pin.Release() // An early failure must not leave Close waiting on the reader.
+	require.True(t, pin.OwnerPinned(), "the serving pin carries no repository owner")
 	f.clock.advance(lifecycleGrace.AvailabilityGrace + time.Second)
 	expired, err := f.lc.Sweep(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, expired.Removed)
+	require.NotNil(t, f.mi.GetMetadata("offline-repo"),
+		"the purge did not wait for the pinned reader, so this step proves nothing about a deferred cleanup")
+	during, err := f.lc.Sweep(ctx)
+	require.NoError(t, err, "a sweep during a deferred purge failed on it")
+	assert.Zero(t, during.Removed, "a sweep during a deferred purge retired the checkout a second time")
+
+	pin.Release()
+	require.Eventually(t, func() bool {
+		return f.mi.GetMetadata("offline-repo") == nil && !f.lc.RepositoryAdmissionClosed("offline-repo")
+	}, 30*time.Second, 10*time.Millisecond, "its corpus is never evicted")
 	_, checkoutExists, err := f.catalog.GetCheckout(ctx, tracked.CheckoutID)
 	require.NoError(t, err)
 	assert.False(t, checkoutExists, "the checkout catalog row is removed")
 	assert.False(t, f.watcher.isAttached("offline-repo"), "its watcher is detached")
-	assert.Nil(t, f.mi.GetMetadata("offline-repo"), "its corpus is evicted")
 	assert.NotContains(t, f.configPaths(), root, "the removal is persisted")
 
 	f.restart()
@@ -1059,11 +1074,14 @@ func TestCheckoutLifecycleImplicitRegistrationWritesNoIntent(t *testing.T) {
 	assert.NotContains(t, f.configPaths(), root,
 		"persisting it would make the next boot seed a manual_config intent for it")
 
-	// With no intent to revoke, forgetting it is unobstructed.
+	// With no intent to revoke, forgetting it is unobstructed. The build the
+	// registration started can still hold the corpus when Untrack returns, so
+	// the purge may be the cleanup runtime's to finish.
 	result, err := f.lc.Untrack(ctx, root)
 	require.NoError(t, err)
 	assert.Empty(t, result.Revoked)
-	assert.Nil(t, f.mi.GetMetadata("implicit-repo"))
+	require.Eventually(t, func() bool { return f.mi.GetMetadata("implicit-repo") == nil },
+		30*time.Second, 10*time.Millisecond, "its corpus is never evicted")
 }
 
 // TestCheckoutLifecycleImplicitRegistrationSurvivesRestartWithoutIntent is the

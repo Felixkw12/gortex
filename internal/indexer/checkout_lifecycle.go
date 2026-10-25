@@ -1747,7 +1747,8 @@ func (l *CheckoutLifecycle) sweep(ctx context.Context, retirePayload bool) (Swee
 	defer l.beginBatch()()
 
 	var errs []error
-	if err := l.rec.Resume(ctx); err != nil {
+	// A teardown still waiting on a reader is the cleanup runtime's to finish.
+	if err := l.rec.Resume(ctx); err != nil && !onlyRepositoryCleanupPending(err) {
 		errs = append(errs, err)
 	}
 	if _, err := l.resumeModeTransitions(ctx); err != nil {
@@ -4060,8 +4061,9 @@ func (l *CheckoutLifecycle) Seed(ctx context.Context) error {
 	// demotion may have flipped modes and journalled graph retirement while its
 	// stale config entry was still on disk; seeding that entry first would
 	// recreate the intent and graph the cleanup is about to remove.
+	// A teardown still waiting on a reader is the cleanup runtime's to finish.
 	started = stageStarted("resume_reconciler")
-	if err := l.rec.Resume(ctx); err != nil {
+	if err := l.rec.Resume(ctx); err != nil && !onlyRepositoryCleanupPending(err) {
 		stageCompleted("resume_reconciler", started, err)
 		errs = append(errs, err)
 	} else {
@@ -4199,6 +4201,12 @@ func (h cleanupHooks) PurgeCheckoutLayers(ctx context.Context, checkoutID, _ str
 	}
 	h.l.detachWatcherContext(ctx, prefix)
 	return nil
+}
+
+// CleanupDeferred tells the reconciler which ReleaseGraph errors are a purge
+// left to the cleanup runtime rather than a failure.
+func (h cleanupHooks) CleanupDeferred(err error) bool {
+	return onlyRepositoryCleanupPending(err)
 }
 
 // ReleaseGraph gives up whatever holds a dedicated graph open.

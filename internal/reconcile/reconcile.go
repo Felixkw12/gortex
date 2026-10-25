@@ -93,7 +93,10 @@ type CleanupHooks interface {
 	// grace expires, and again as a phase of forgetting it.
 	PurgeCheckoutLayers(ctx context.Context, checkoutID, incarnation string) error
 	// ReleaseGraph gives up whatever holds a dedicated graph open, so its
-	// catalog row can be deleted.
+	// catalog row can be deleted. Hooks that can defer a release, because a
+	// reader still holds the graph and they resume the saga once it drains,
+	// also implement CleanupDeferred(error) bool to tell that error apart from
+	// a failure.
 	ReleaseGraph(ctx context.Context, graphID string) error
 }
 
@@ -257,25 +260,10 @@ func (r *Reconciler) ReconcileFamily(ctx context.Context, familyID, probeDir str
 	}
 	viewmetrics.Observe(viewmetrics.FamilyInventorySeconds, elapsed, inventoryOutcome)
 
-	graphs, err := r.catalog.ListDedicatedGraphs(ctx, familyID)
-	if err != nil {
-		return FamilyReport{}, err
-	}
-	for _, graph := range graphs {
-		if graph.IsPrimaryBase {
-			pass.primaryGraphID = graph.GraphID
-			break
-		}
-	}
-
 	report := FamilyReport{
 		FamilyID:        familyID,
 		CommonDir:       family.CommonDirIdentity,
 		InventoryUsable: pass.inventoryErr == nil,
-		PrimaryGraphID:  pass.primaryGraphID,
-	}
-	if pass.primaryGraphID == "" {
-		report.Code = graphview.CodeNoPrimary
 	}
 
 	// A record with no administrative name cannot be keyed to an identity at
@@ -302,6 +290,17 @@ func (r *Reconciler) ReconcileFamily(ctx context.Context, familyID, probeDir str
 			return report, err
 		}
 		report.Checkouts = append(report.Checkouts, entry)
+	}
+
+	// Read after the known checkouts, since retiring one of them may have
+	// retired the primary.
+	pass.primaryGraphID, err = r.servingPrimary(ctx, familyID)
+	if err != nil {
+		return report, err
+	}
+	report.PrimaryGraphID = pass.primaryGraphID
+	if pass.primaryGraphID == "" {
+		report.Code = graphview.CodeNoPrimary
 	}
 
 	if pass.inventoryErr == nil {
@@ -531,6 +530,13 @@ func (r *Reconciler) applyRemoved(
 // expired inaccessibility. The caller supplies a detached context after all
 // classification and identity guards have passed, so a request timeout cannot
 // strand a half-finished cleanup saga.
+//
+// A teardown the hooks deferred counts as done. Its saga has withdrawn the
+// checkout and journaled the phase it stopped at, and the hooks' owner resumes
+// it once whatever still holds the graph lets go; until then the saga owns the
+// rows, so the caller must not write to them either way. The attempt that
+// first deferred it is the one that reports it: a later one that drives the
+// same saga, to completion or to another deferral, reports guard_lost.
 func (r *Reconciler) retireCheckout(
 	ctx context.Context,
 	pass *familyPass,
@@ -540,22 +546,58 @@ func (r *Reconciler) retireCheckout(
 	if err != nil {
 		return "", false, err
 	}
+	action := ActionForgotten
+	target := sagaTarget{Kind: sagaForgetCheckout, CheckoutID: existing.CheckoutID, Incarnation: existing.Incarnation}
+	retire := func() error { return r.ForgetCheckout(ctx, existing.CheckoutID, existing.Incarnation) }
 	if owned != nil && owned.IsPrimaryBase {
-		if err := r.RetirePrimaryClosure(ctx, owned.GraphID, pass.family.PrimaryEpoch); err != nil {
-			if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
-				return ActionGuardLost, false, nil
-			}
-			return "", false, err
-		}
-		return ActionPrimaryClosureRetired, true, nil
+		action = ActionPrimaryClosureRetired
+		target = sagaTarget{Kind: sagaRetirePrimaryClosure, GraphID: owned.GraphID}
+		retire = func() error { return r.RetirePrimaryClosure(ctx, owned.GraphID, pass.family.PrimaryEpoch) }
 	}
-	if err := r.ForgetCheckout(ctx, existing.CheckoutID, existing.Incarnation); err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
-			return ActionGuardLost, false, nil
-		}
+	prior, journaled, err := r.loadSagaTarget(ctx, target.cleanupID())
+	if err != nil {
 		return "", false, err
 	}
-	return ActionForgotten, true, nil
+	err = retire()
+	switch {
+	case errors.Is(err, store_sqlite.ErrCatalogStaleGuard):
+		return ActionGuardLost, false, nil
+	case err != nil && !r.cleanupDeferred(err):
+		return "", false, err
+	case journaled && prior.Deferred:
+		return ActionGuardLost, false, nil
+	}
+	return action, true, nil
+}
+
+// servingPrimary returns the family's primary dedicated graph, or "" when it
+// has none or its closure is journaled. A closure waiting on a reader has
+// already forgotten the checkouts that existed only because of the primary,
+// so nothing may be minted under it again.
+func (r *Reconciler) servingPrimary(ctx context.Context, familyID string) (string, error) {
+	graphs, err := r.catalog.ListDedicatedGraphs(ctx, familyID)
+	if err != nil {
+		return "", err
+	}
+	for _, graph := range graphs {
+		if !graph.IsPrimaryBase {
+			continue
+		}
+		closure := sagaTarget{Kind: sagaRetirePrimaryClosure, GraphID: graph.GraphID}
+		_, retiring, err := r.loadSagaTarget(ctx, closure.cleanupID())
+		if err != nil || retiring {
+			return "", err
+		}
+		return graph.GraphID, nil
+	}
+	return "", nil
+}
+
+// cleanupDeferred reports whether a teardown stopped only because the hooks
+// deferred it, rather than failed. Hooks that never defer need not say.
+func (r *Reconciler) cleanupDeferred(err error) bool {
+	hooks, ok := r.hooks.(interface{ CleanupDeferred(error) bool })
+	return ok && hooks.CleanupDeferred(err)
 }
 
 // observeNew decides what to do with a worktree no identity matched.
