@@ -249,7 +249,7 @@ func (s *Store) EvictRepoForShadowReplacement(ctx context.Context, repo string) 
 // shadowEvictStep releases the writer gate after every bounded transaction.
 // A queued checkout writer gets its turn before the next step; announced writes
 // waiting on a coordinator must not prevent retirement itself from progressing.
-func (s *Store) shadowEvictStep(ctx context.Context, mutate func(*sql.Tx) (int, *sqliteMutationReceiptAccumulator, error)) (int, error) {
+func (s *Store) shadowEvictStep(ctx context.Context, mutate func(*sql.Tx) (int, *sqliteMutationReceiptAccumulator, error)) (changed int, err error) {
 	if err := s.writeMu.LockContext(ctx); err != nil {
 		return 0, err
 	}
@@ -259,6 +259,11 @@ func (s *Store) shadowEvictStep(ctx context.Context, mutate func(*sql.Tx) (int, 
 		return 0, err
 	}
 	defer tx.Rollback() //nolint:errcheck // committed transactions have nothing left to roll back
+	defer func() {
+		if errors.Is(err, sql.ErrTxDone) && ctx.Err() != nil {
+			err = ctx.Err()
+		}
+	}()
 	n, delta, err := mutate(tx)
 	if err != nil {
 		return 0, err
@@ -270,9 +275,6 @@ func (s *Store) shadowEvictStep(ctx context.Context, mutate func(*sql.Tx) (int, 
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		if errors.Is(err, sql.ErrTxDone) && ctx.Err() != nil {
-			return 0, ctx.Err()
-		}
 		return 0, err
 	}
 	if invalidated {

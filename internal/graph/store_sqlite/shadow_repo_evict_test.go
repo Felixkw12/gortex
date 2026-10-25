@@ -594,30 +594,46 @@ func TestShadowEndpointRevisionIgnoresPositiveWritesAndRollback(t *testing.T) {
 }
 
 func TestShadowEvictStepNormalizesOnlyCanceledCompletedTransactions(t *testing.T) {
-	for _, canceled := range []bool{false, true} {
-		name := "live"
-		if canceled {
-			name = "canceled"
-		}
-		t.Run(name, func(t *testing.T) {
-			s, _ := shadowEvictionFixture(t, 0)
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			_, err := s.shadowEvictStep(ctx, func(tx *sql.Tx) (int, *sqliteMutationReceiptAccumulator, error) {
-				// Force the completed-rollback ordering before Commit, without
-				// depending on database/sql's rollback goroutine scheduling.
-				if err := tx.Rollback(); err != nil {
-					return 0, nil, err
-				}
+	for _, stage := range []string{"mutate", "invalidation", "commit"} {
+		t.Run(stage, func(t *testing.T) {
+			for _, canceled := range []bool{false, true} {
+				name := "live"
 				if canceled {
-					cancel()
+					name = "canceled"
 				}
-				return 0, nil, nil
-			})
-			if canceled {
-				require.ErrorIs(t, err, context.Canceled)
-			} else {
-				require.ErrorIs(t, err, sql.ErrTxDone)
+				t.Run(name, func(t *testing.T) {
+					s, _ := shadowEvictionFixture(t, 0)
+					s.analysisGenerationPresent = stage == "invalidation"
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					n, err := s.shadowEvictStep(ctx, func(tx *sql.Tx) (int, *sqliteMutationReceiptAccumulator, error) {
+						// Complete rollback before the selected operation, without
+						// depending on database/sql's rollback goroutine scheduling.
+						if err := tx.Rollback(); err != nil {
+							return 0, nil, err
+						}
+						if canceled {
+							cancel()
+						}
+						switch stage {
+						case "mutate":
+							_, err := tx.Exec(`SELECT 1`)
+							return 0, nil, err
+						case "invalidation":
+							// A successful mutation with a positive count forces the
+							// next SQL call through invalidateAnalysisViewTx.
+							return 1, nil, nil
+						default:
+							return 0, nil, nil
+						}
+					})
+					require.Zero(t, n)
+					if canceled {
+						require.ErrorIs(t, err, context.Canceled)
+					} else {
+						require.ErrorIs(t, err, sql.ErrTxDone)
+					}
+				})
 			}
 		})
 	}
