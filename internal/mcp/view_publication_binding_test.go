@@ -146,7 +146,6 @@ func (w *proofReusingWaiter) RequestCheckoutRefreshAfterProof(
 // demand-woken cycle's marks reach it.
 func TestRequireFreshAdmitsTheFallbackTicketAfterTheProofWithABoundRecord(t *testing.T) {
 	stack := newViewStack(t)
-	sampledAt := time.Now()
 	var sequence uint64 = 900_000
 	waiter := &proofReusingWaiter{provingFreshnessWaiter: &provingFreshnessWaiter{
 		fakeFreshnessWaiter: &fakeFreshnessWaiter{
@@ -158,9 +157,11 @@ func TestRequireFreshAdmitsTheFallbackTicketAfterTheProofWithABoundRecord(t *tes
 			},
 		},
 		prove: func(checkoutID, root string) (indexer.CheckoutFreshProof, error) {
+			// Sampled during the request, as proveFresh samples: the record
+			// refuses a change_observed earlier than the request's arrival.
 			return indexer.CheckoutFreshProof{
 				Reason: indexer.FreshProofSnapshotDiffers, CommitGenerationID: stack.commit, DirtyGenerationID: stack.dirty,
-				SampledAt: sampledAt, Sample: 4 * time.Millisecond, Fingerprint: "sampled-by-the-proof",
+				SampledAt: time.Now(), Sample: 4 * time.Millisecond, Fingerprint: "sampled-by-the-proof",
 			}, nil
 		},
 	}}
