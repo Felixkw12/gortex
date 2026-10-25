@@ -879,13 +879,15 @@ func insertSQLiteReindexRowsTxLimited(tx *sql.Tx, viewGen int64, rows []sqliteRe
 	return changed, statements, nil
 }
 
+// Drive from the bounded identities even when stale statistics describe a tiny
+// generation. Reversing these joins scans every generation edge per identity.
 func sqliteReindexRowsSQL(rowCount int) string {
 	return `WITH wanted(from_id, to_id, kind, file_path, line) AS (VALUES ` + multiValues(rowCount, reindexKeyParamsPerRow) + `)
 		SELECT e.from_id, e.to_id, e.kind, e.file_path, e.line,
 			e.confidence, e.confidence_label, e.origin, e.tier, e.cross_repo,
 			e.meta, e.resolve_terminal, e.resolve_terminal_reason, e.semantic_source
 		FROM wanted AS w
-		JOIN edges AS e
+		CROSS JOIN edges AS e
 		  ON e.from_id = w.from_id
 		 AND e.to_id = w.to_id
 		 AND e.kind = w.kind
@@ -899,8 +901,8 @@ func deleteSQLiteReindexRowsSQL(rowCount int) string {
 		DELETE FROM edges
 		WHERE id IN (
 			SELECT e.id
-			FROM edges AS e
-			JOIN doomed AS d
+			FROM doomed AS d
+			CROSS JOIN edges AS e
 			  ON e.from_id = d.from_id
 			 AND e.to_id = d.to_id
 			 AND e.kind = d.kind
