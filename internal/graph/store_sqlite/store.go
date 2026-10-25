@@ -82,6 +82,10 @@ type storeCore struct {
 	// walShrinkPending: the WAL reclaim reset a big log in place and its
 	// file still has to be shrunk in slices (wal_shrink.go).
 	walShrinkPending atomic.Bool
+	// walLimitKept: an in-place reset gave up on this fully copied log and
+	// left the writer's journal_size_limit lifted; the shrink restores it
+	// once the log has restarted (wal_shrink.go).
+	walLimitKept atomic.Pointer[walReclaimFrontier]
 	// rowCountersReady: generation_row_counts is installed and seeded, so
 	// NodeCount / EdgeCount read it (row_counters.go).
 	rowCountersReady atomic.Bool

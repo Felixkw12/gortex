@@ -186,10 +186,22 @@ func (s *Store) resetWALInPlaceLockedWithBusyTimeout(ctx context.Context, busyMi
 		return result, fmt.Errorf("wal in-place reset: lift the writer's journal_size_limit: %w", err)
 	}
 	defer func() {
-		// A reset that did not happen leaves nothing to shrink: give the
-		// writer its limit back (unless an earlier reset's shrink is still
-		// pending and will restore it).
-		if err != nil && !s.walShrinkPending.Load() {
+		if err == nil {
+			return
+		}
+		// The reset gave up. A log already fully copied restarts at the
+		// first commit once its readers leave (a reader refused the RESTART,
+		// or the RESTART completed after its deadline): keep the writer's
+		// limit lifted so that commit does not truncate the file in one
+		// call, and leave the file to the shrink once the log has restarted.
+		if after, ok := readWALReclaimFrontier(s.dbPath); ok && after.mx > 0 && after.backfill == after.mx {
+			s.walLimitKept.Store(&after)
+			return
+		}
+		// Otherwise nothing is left to shrink: give the writer its limit
+		// back, unless a shrink still to come (an earlier reset's, or a kept
+		// log's) will restore it.
+		if !s.walShrinkPending.Load() && s.walLimitKept.Load() == nil {
 			_ = s.setWriterJournalLimitLocked(context.Background(), walShrinkKeepBytes)
 		}
 	}()
@@ -328,8 +340,13 @@ func (s *Store) shrinkWALSliceOnce(ctx context.Context, ckptDB *sql.DB, slice in
 // walShrinkNeeded reports a -wal file larger than its live frames need by
 // more than the smallest slice: a log reset in place and not yet shrunk (or
 // one a commit restarted while the writer's journal_size_limit was lifted).
+// It also reports a kept log (walLimitKept) that has since restarted or been
+// truncated: the shrink then restores the writer's limit, whatever the size.
 func (s *Store) walShrinkNeeded() bool {
 	if s.walShrinkPending.Load() {
+		return true
+	}
+	if kept := s.walLimitKept.Load(); kept != nil && s.walKeptLogRestarted(kept) {
 		return true
 	}
 	snap, ok := readWALIndexSnapshot(s.dbPath)
@@ -338,6 +355,16 @@ func (s *Store) walShrinkNeeded() bool {
 	}
 	used := int64(32) + int64(snap.MxFrame)*(24+4096)
 	return snap.WALBytes > max(used, walShrinkKeepBytes)+walShrinkMinSlice && snap.WALBytes >= walShrinkInPlaceBytes
+}
+
+// walKeptLogRestarted reports whether a kept log has restarted (its salt
+// changed) or been emptied (a TRUNCATE elsewhere). A wal-index that cannot be
+// read consistently over a non-empty file is neither.
+func (s *Store) walKeptLogRestarted(kept *walReclaimFrontier) bool {
+	if current, ok := readWALReclaimFrontier(s.dbPath); ok {
+		return current.salt != kept.salt
+	}
+	return walFileSize(s.dbPath+"-wal") == 0
 }
 
 // shrinkWAL shrinks the -wal back to journal_size_limit in slices, releasing
@@ -404,6 +431,13 @@ func (s *Store) shrinkWAL(ctx context.Context, ckptDB *sql.DB) (slices int, shru
 	return slices, shrunk, nil
 }
 
+// restoreWriterJournalLimit gives the writer its 64 MiB journal_size_limit
+// back once the file is shrunk, and clears a kept log that has restarted. A
+// kept log that has not restarted yet keeps the limit lifted: its frames are
+// live, so no slice could cut the file, and the commit that restarts it must
+// not truncate the file in one call. walShrinkNeeded reports it once it has
+// restarted. Decided under the write gate, which a reset that keeps a log
+// also holds.
 func (s *Store) restoreWriterJournalLimit(ctx context.Context) error {
 	wctx, cancel := context.WithTimeout(ctx, walReclaimWriterWait)
 	err := s.writeMu.LockContext(wctx)
@@ -412,5 +446,11 @@ func (s *Store) restoreWriterJournalLimit(ctx context.Context) error {
 		return err
 	}
 	defer s.writeMu.Unlock()
+	if kept := s.walLimitKept.Load(); kept != nil {
+		if !s.walKeptLogRestarted(kept) {
+			return nil
+		}
+		s.walLimitKept.Store(nil)
+	}
 	return s.setWriterJournalLimitLocked(ctx, walShrinkKeepBytes)
 }
