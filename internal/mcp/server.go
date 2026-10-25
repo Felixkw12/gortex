@@ -3292,9 +3292,6 @@ func (s *Server) getHITS() *analysis.HITSResult {
 // the stale result is discarded and rebuilt against the new communities.
 // The returned slice is shared and must not be mutated by the caller.
 func (s *Server) getHotspots() []analysis.HotspotEntry {
-	if !s.ensureCommunitiesMaterialized() && s.hotspotsFn == nil {
-		return nil
-	}
 	s.analysisMu.RLock()
 	if !s.analysisSnapshotCurrentLocked() {
 		s.analysisMu.RUnlock()
@@ -3320,10 +3317,27 @@ func (s *Server) getHotspots() []analysis.HotspotEntry {
 			s.analysisMu.RUnlock()
 			return hotspots
 		}
+		s.analysisMu.RUnlock()
+		// Coalesced waiters recheck the ranking before hydrating a partition.
+		// A retained result therefore needs no full community map at all.
+		materialized := s.ensureCommunitiesMaterialized()
+		if !materialized && s.hotspotsFn == nil {
+			return nil
+		}
+		s.analysisMu.RLock()
+		if !s.analysisSnapshotCurrentLocked() {
+			s.analysisMu.RUnlock()
+			return nil
+		}
 		epoch := s.analysisEpoch
 		token := s.communitiesToken
 		communities := s.communities
 		s.analysisMu.RUnlock()
+		if materialized && communities == nil {
+			// Another request released compatibility views between hydration
+			// and this snapshot. Retry rather than rank without crossings.
+			continue
+		}
 
 		build := analysis.FindHotspots
 		if s.hotspotsFn != nil {

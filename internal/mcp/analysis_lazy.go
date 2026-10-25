@@ -168,8 +168,13 @@ func (s *Server) releaseTransientAnalysisIfIdle() bool {
 	s.adjacency = nil
 	s.autoConcepts = nil
 	s.hits = nil
-	s.hotspots = nil
-	s.hotspotsReady = false
+	// Retain the complete default ranking only within a fixed memory budget.
+	// A truncated prefix could hide a workspace's first visible result. This
+	// keeps no partition/member maps; epoch/token checks still govern hits.
+	if !hotspotResultRetainable(s.hotspots) {
+		s.hotspots = nil
+		s.hotspotsReady = false
+	}
 	return true
 }
 
