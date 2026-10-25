@@ -203,6 +203,9 @@ func TestOutlineOverlayReflectsUnsavedBuffers(t *testing.T) {
 	ctx := outlineBoundContext(s, "overlay", "ws", map[string]bool{"a": true})
 	layer := graph.NewOverlayLayer()
 	layer.MarkFile("a/main.go", false)
+	// Fixture IDs are deliberately short rather than path-qualified, so
+	// explicitly tombstone the declaration replaced by this unsaved buffer.
+	layer.MarkRemoved("main", "a-main")
 	layer.AddNode("a/main.go", &graph.Node{ID: "unsaved-main", Name: "main", Kind: graph.KindFunction, RepoPrefix: "a", WorkspaceID: "ws", ProjectID: "p", Language: "typescript", FilePath: "a/main.go"})
 	layer.AddNode("a/main.go", &graph.Node{ID: "unsaved-helper", Name: "Helper", Kind: graph.KindFunction, RepoPrefix: "a", WorkspaceID: "ws", ProjectID: "p", Language: "typescript", FilePath: "a/main.go"})
 	layer.AddEdge(&graph.Edge{From: "unsaved-main", To: "a-lib", Kind: graph.EdgeImports, FilePath: "a/main.go"})
