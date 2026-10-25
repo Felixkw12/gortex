@@ -1970,14 +1970,19 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 	passStart("cross_repo_edges")
 	crStart := time.Now()
 	crossRepoEdges := 0
+	skipped := false
 	if fullCoverage {
 		crossRepoEdges = resolver.DetectCrossRepoEdges(mi.graph)
+		skipped = crossRepoEdges == 0 && len(mi.graph.RepoPrefixes()) < 2
 	} else {
 		crossRepoEdges = resolver.DetectCrossRepoEdgesForRepos(mi.graph, scanRepoPrefixes)
 	}
-	mi.logger.Info("global pass: cross-repo edges",
-		zap.Int("edges", crossRepoEdges),
-		zap.Duration("elapsed", time.Since(crStart)))
+	fields := []zap.Field{zap.Int("edges", crossRepoEdges)}
+	if skipped {
+		fields = append(fields, zap.String("skipped", "single_repo"))
+	}
+	fields = append(fields, zap.Duration("elapsed", time.Since(crStart)))
+	mi.logger.Info("global pass: cross-repo edges", fields...)
 	mi.logger.Info("global passes complete",
 		zap.Duration("total", time.Since(globalStart)))
 }

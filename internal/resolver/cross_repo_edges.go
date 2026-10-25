@@ -28,10 +28,25 @@ const crossRepoAddBatchSize = 4096
 // Returns the count of cross-repo relationships found this pass — the
 // number of parallel edges that exist after it, modulo graph dedup.
 func DetectCrossRepoEdges(g graph.Store) int {
-	if g == nil {
+	if g == nil || !hasMultipleRepoPrefixes(g) {
 		return 0
 	}
 	return materializeCrossRepoCandidates(g, crossRepoCandidates(g))
+}
+
+func hasMultipleRepoPrefixes(g graph.Store) bool {
+	first := ""
+	for _, prefix := range g.RepoPrefixes() {
+		if prefix == "" {
+			continue
+		}
+		if first == "" {
+			first = prefix
+		} else if prefix != first {
+			return true
+		}
+	}
+	return false
 }
 
 // DetectCrossRepoEdgesForRepos materializes only relationships incident to the
