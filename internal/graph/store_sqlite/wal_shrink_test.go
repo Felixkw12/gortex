@@ -11,13 +11,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// writerJournalLimit reads journal_size_limit on the store's writer connection.
+// writerJournalLimit reads journal_size_limit on the store's active write
+// connection (the writer, or the pinned connection of a bulk window).
 func writerJournalLimit(t *testing.T, s *Store) int64 {
 	t.Helper()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	conn, release, err := s.activeWriteConnLocked(t.Context())
+	require.NoError(t, err)
+	defer release()
 	var limit int64
-	require.NoError(t, s.writerDB.QueryRow(`PRAGMA journal_size_limit`).Scan(&limit))
+	require.NoError(t, conn.QueryRowContext(t.Context(), `PRAGMA journal_size_limit`).Scan(&limit))
 	return limit
 }
 
@@ -184,4 +188,155 @@ func TestWALReclaimTruncatesASmallLogAtOnce(t *testing.T) {
 	require.Zero(t, walFileSize(path+"-wal"))
 	require.False(t, s.walShrinkNeeded())
 	require.Equal(t, int64(walShrinkKeepBytes), writerJournalLimit(t, s))
+}
+
+// Once a statement's interrupt fired during the call, the driver returns the
+// context's error even when SQLite finished the work, so an in-place reset can
+// complete just after its deadline. The reset connection's observer runs the
+// reset's statements on a context of its own and then ends the reset's
+// context, as the hold's deadline or a queued writer would. The reset reads
+// from the log, with the writer still held, whether it happened.
+//
+//   - marker: the RESTART and the marker commit completed; the log restarted,
+//     so the reset counts.
+//   - restart: only the RESTART completed; the log is fully copied but has not
+//     restarted, so the reset gave up. The next commit restarts it, and with
+//     the writer's journal_size_limit back at 64 MiB that commit would
+//     truncate the file in one call: the limit stays lifted, also through an
+//     earlier reset's shrink that finishes first, and the shrink restores it
+//     once the log has restarted.
+//   - refused: no interrupt; a reader refuses the RESTART of the copied log, so
+//     the limit stays lifted as above. A commit lands behind the reader, and a
+//     second reset gives up on a log no longer fully copied: the limit still
+//     stays lifted, since the kept log has yet to restart.
+func TestWALInPlaceResetInterruptedAfterItsWork(t *testing.T) {
+	for _, kind := range []string{"marker", "restart", "refused"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "0")
+			prevInPlace := walShrinkInPlaceBytes
+			walShrinkInPlaceBytes = 1 // every log is reset in place
+			var s *Store
+			var armed atomic.Bool
+			var cancel context.CancelFunc
+			var workErr error
+			prevObserver := walResetCheckpointConnObserver
+			walResetCheckpointConnObserver = func(_ context.Context, conn *sql.Conn) {
+				if !armed.CompareAndSwap(true, false) {
+					return
+				}
+				if kind == "marker" {
+					var result walCheckpointResult
+					workErr = s.restartWALInPlaceOn(context.Background(), conn, &result)
+				} else {
+					_, workErr = checkpointWALOnceOn(context.Background(), conn, "RESTART")
+				}
+				cancel()
+			}
+			t.Cleanup(func() { // after the store closes
+				walShrinkInPlaceBytes, walResetCheckpointConnObserver = prevInPlace, prevObserver
+			})
+			var path string
+			s, path = openWALReclaimStore(t)
+			t.Cleanup(func() { _ = s.Close() })
+			seedWALChurnTable(t, s)
+			growWAL(t, s, 4)
+			if kind == "refused" {
+				// Begun before the copy, the reader holds a read mark at the
+				// log's end: the copy completes, and the RESTART waits for it.
+				reader, err := s.db.BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+				require.NoError(t, err)
+				defer func() { _ = reader.Rollback() }()
+				var n int
+				require.NoError(t, reader.QueryRow(`SELECT count(*) FROM wal_churn`).Scan(&n))
+			}
+			ckpt, err := openWALReclaimCheckpointDB(path)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = ckpt.Close() })
+			_, err = checkpointWALOnceOn(t.Context(), ckpt, "PASSIVE")
+			require.NoError(t, err)
+			walPath := path + "-wal"
+			sizeBefore := walFileSize(walPath)
+			resetsBefore := s.WALReclaimStats().ShrinkInPlaceResets
+
+			if kind == "refused" {
+				// The pressure reset's RESTART does not wait: Busy at once.
+				s.writeMu.Lock()
+				_, err = s.resetWALForPressure(t.Context())
+				s.writeMu.Unlock()
+				require.ErrorIs(t, err, errSQLiteCheckpointIncomplete)
+				require.NotNil(t, s.walLimitKept.Load(), "the log is fully copied: it is kept")
+				require.Equal(t, int64(-1), writerJournalLimit(t, s))
+				require.NoError(t, churnWriteOnce(s, 0))
+				s.writeMu.Lock()
+				_, err = s.resetWALForPressure(t.Context())
+				s.writeMu.Unlock()
+				require.ErrorIs(t, err, errSQLiteCheckpointIncomplete)
+				after, ok := readWALReclaimFrontier(path)
+				require.True(t, ok)
+				require.Less(t, after.backfill, after.mx, "precondition: the log is no longer fully copied")
+				require.Equal(t, int64(-1), writerJournalLimit(t, s), "the kept log's restart must not truncate the file in one call")
+				return
+			}
+
+			var ctx context.Context
+			ctx, cancel = context.WithCancel(t.Context())
+			armed.Store(true)
+			s.writeMu.Lock()
+			_, err = s.resetWALForReclaim(ctx)
+			s.writeMu.Unlock()
+			cancel()
+			require.NoError(t, workErr)
+			require.False(t, armed.Load(), "precondition: the observer ran the reset's statements")
+
+			if kind == "marker" {
+				require.NoError(t, err, "the log restarted: the reset counts")
+				require.True(t, s.walShrinkPending.Load())
+				require.Equal(t, resetsBefore+1, s.WALReclaimStats().ShrinkInPlaceResets)
+				require.Equal(t, int64(-1), writerJournalLimit(t, s), "no later commit may truncate the file in one call")
+				require.Equal(t, sizeBefore, walFileSize(walPath), "the file is left to the shrink")
+				return
+			}
+			require.ErrorIs(t, err, context.Canceled)
+			require.False(t, s.walShrinkPending.Load())
+			require.Equal(t, resetsBefore, s.WALReclaimStats().ShrinkInPlaceResets)
+			require.Equal(t, int64(-1), writerJournalLimit(t, s), "the commit that restarts the log must not truncate the file in one call")
+			// An earlier reset's shrink finishing now cannot cut the kept
+			// log's live frames, and must leave the limit to its restart.
+			s.walShrinkPending.Store(true)
+			_, _, err = s.shrinkWAL(t.Context(), ckpt)
+			require.NoError(t, err)
+			require.Equal(t, int64(-1), writerJournalLimit(t, s), "the kept log has not restarted")
+			require.False(t, s.walShrinkNeeded(), "the log has not restarted yet")
+			require.NoError(t, churnWriteOnce(s, 0))
+			require.True(t, s.walShrinkNeeded(), "the log restarted: the shrink runs")
+			_, _, err = s.shrinkWAL(t.Context(), ckpt)
+			require.NoError(t, err)
+			require.Equal(t, int64(walShrinkKeepBytes), writerJournalLimit(t, s))
+			require.False(t, s.walShrinkNeeded())
+		})
+	}
+}
+
+// SQLite applies journal_size_limit when it prepares the PRAGMA, before the
+// driver looks at the context. Inside a bulk window the pinned connection is
+// used without a pool checkout that would refuse an ended context first, so a
+// reset tried after its deadline lifted the bulk connection's limit to -1,
+// returned the context's error, and left no shrink to restore the limit.
+func TestWALInPlaceResetOnAnEndedContextLeavesTheLimit(t *testing.T) {
+	// Every log is reset in place; restored after the store closes.
+	prevInPlace := walShrinkInPlaceBytes
+	walShrinkInPlaceBytes = 1
+	t.Cleanup(func() { walShrinkInPlaceBytes = prevInPlace })
+	s, _ := finalBackfillFixture(t)
+	engaged, err := s.BeginGenerationBulkLoad(77)
+	require.NoError(t, err)
+	require.True(t, engaged)
+	defer func() { require.NoError(t, s.EndGenerationBulkLoadFor(77)) }()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	s.writeMu.Lock()
+	_, err = s.resetWALForReclaim(ctx)
+	s.writeMu.Unlock()
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, int64(walShrinkKeepBytes), writerJournalLimit(t, s), "a reset on an ended context changes no limit")
 }
