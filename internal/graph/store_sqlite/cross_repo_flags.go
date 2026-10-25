@@ -96,6 +96,7 @@ func (s *Store) markEdgesCrossRepo(edges []*graph.Edge) (changed, statements int
 	return changed, statements, nil
 }
 
+// CROSS JOIN keeps the identity list outer under stale planner statistics.
 func crossRepoFlagStatement(viewGen int64, edges []*graph.Edge) (string, []any) {
 	var query strings.Builder
 	query.WriteString("WITH requested(from_id,to_id,kind,file_path,line) AS (VALUES ")
@@ -123,7 +124,7 @@ WHERE cross_repo = 0
   AND id IN (
     SELECT e.id
     FROM requested AS r
-    JOIN edges AS e
+    CROSS JOIN edges AS e
       ON e.from_id = r.from_id
      AND e.to_id = r.to_id
      AND e.kind = r.kind
