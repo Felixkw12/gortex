@@ -320,54 +320,7 @@ type SearchTimings struct {
 // boundary on by-id and whole-graph handlers that don't route through
 // the engine's scoped traversal.
 func (o QueryOptions) ScopeAllows(n *graph.Node) bool {
-	if n == nil {
-		return true
-	}
-	// A synthetic global external (the type checker's `ext::go:fmt::Errorf`
-	// at `external::go:fmt`: no repository, no workspace, a path that is no
-	// repository source) is visible from every scope by construction, as the
-	// repo narrow below already treats it. An unowned node at a source path
-	// stays subject to the workspace check.
-	if o.WorkspaceID != "" && !isGlobalExternal(n) {
-		ws := n.WorkspaceID
-		if ws == "" {
-			ws = n.RepoPrefix
-		}
-		if ws != o.WorkspaceID {
-			return false
-		}
-	}
-	// A repository narrow disambiguates a project without pretending that
-	// the repository is its own workspace. Unqualified project-only options
-	// keep their existing behavior; synthetic global externals stay visible.
-	if o.ProjectID != "" && (o.WorkspaceID != "" || len(o.RepoAllow) > 0) && !isGlobalExternal(n) {
-		proj := n.ProjectID
-		if proj == "" {
-			proj = n.RepoPrefix
-		}
-		if proj != o.ProjectID {
-			return false
-		}
-	}
-	// A node with an empty RepoPrefix is not owned by any repository, so a
-	// repo narrow can only ever be satisfied vacuously — the RepoAllow keys
-	// are registry prefixes, which such nodes never carry. Admit it: the
-	// workspace / project checks above still bound it for scoped sessions.
-	//
-	// Two populations land here. Synthetic global externals (dep::,
-	// external::, non-Go module::) model third-party symbols owned by no
-	// repo and are visible from every scope by construction — that is the
-	// durable reason. Nodes minted in single-repo (unprefixed) mode are the
-	// historical one, and go away once prefixing is unconditional.
-	//
-	// This is the same carve-out the MCP layer's filterNodes / field-query /
-	// API-impact filters apply. Every repo-narrow predicate in the codebase
-	// must agree on it: one that rejects instead of admitting turns a scoped
-	// query into an empty result rather than a narrower one.
-	if len(o.RepoAllow) > 0 && n.RepoPrefix != "" && !o.RepoAllow[n.RepoPrefix] {
-		return false
-	}
-	return true
+	return (graph.NodeScope{WorkspaceID: o.WorkspaceID, ProjectID: o.ProjectID, RepoAllow: o.RepoAllow}).Allows(n)
 }
 
 func (o QueryOptions) hasScopeFilter() bool {
