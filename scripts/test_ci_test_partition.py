@@ -20,7 +20,7 @@ WORKFLOW = Path(__file__).parents[1] / ".github/workflows/ci.yml"
 class LayoutTests(unittest.TestCase):
     def test_workflow_runs_every_group_once_on_each_os(self):
         layout = planner.check_layout(planner.workflow_rows(WORKFLOW.read_text()))
-        self.assertEqual(sorted(layout), ["macos-latest", "ubuntu-latest", "windows-latest"])
+        self.assertEqual(sorted(layout), ["macos-latest", "ubuntu-24.04", "windows-latest"])
 
     def test_layout_rejects_a_missing_or_doubled_shard(self):
         complete = [("linux", "indexer:1/2"), ("linux", "indexer:2/2"), ("linux", "mcp+store"),
