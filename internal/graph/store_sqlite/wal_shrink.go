@@ -121,31 +121,39 @@ var walResetCheckpointConnObserver func(context.Context, *sql.Conn)
 // withWriterResetConn runs fn on the writer connection with its busy timeout
 // lowered to walResetBusyMillis (or what is left of ctx's deadline), restored
 // afterwards. The caller holds
-// writeMu. A store without a separate writer pool (in-memory) or inside a
-// bulk window uses the active write connection as it is.
+// writeMu. A bulk window reuses its pinned connection with the same bounded
+// busy policy, then restores that connection's previous timeout.
 func (s *Store) withWriterResetConn(ctx context.Context, fn func(conn *sql.Conn) error) error {
 	return s.withWriterResetConnWithBusyTimeout(ctx, int64(walResetBusyMillis), fn)
 }
 
 func (s *Store) withWriterResetConnWithBusyTimeout(ctx context.Context, busyMillis int64, fn func(conn *sql.Conn) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	conn, release, err := s.activeWriteConnLocked(ctx)
 	if err != nil {
 		return err
 	}
 	defer release()
-	if s.bulkConn == nil {
-		busy := busyMillis
-		if deadline, ok := ctx.Deadline(); ok {
-			if left := time.Until(deadline).Milliseconds(); left < busy {
-				busy = max(left, 0)
-			}
-		}
-		if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout = %d`, busy)); err != nil {
-			return err
-		}
-		defer func() {
-			_, _ = conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, sqliteBusyTimeoutMillis))
-		}()
+	var previous int64
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&previous); err != nil {
+		return err
+	}
+	busy := max(busyMillis, 0)
+	if deadline, ok := ctx.Deadline(); ok {
+		busy = min(busy, max(time.Until(deadline).Milliseconds(), 0))
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Prepare may apply a PRAGMA even when ExecContext reports cancellation.
+	// Own restoration before issuing it, including on a pinned bulk connection.
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, previous))
+	}()
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout = %d`, busy)); err != nil {
+		return err
 	}
 	if observe := walResetCheckpointConnObserver; observe != nil {
 		observe(ctx, conn)
