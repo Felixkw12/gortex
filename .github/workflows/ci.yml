@@ -13,6 +13,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
+# Match the release builds, including dependency grammars and C++ scanners (#821).
+env:
+  CGO_CFLAGS: -O2 -g -fno-strict-aliasing
+  CGO_CXXFLAGS: -O2 -g -fno-strict-aliasing
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}

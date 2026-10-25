@@ -487,6 +487,8 @@ jobs:
         shell: bash
         env:
           CGO_ENABLED: "1"
+          CGO_CFLAGS: -O2 -g -fno-strict-aliasing
+          CGO_CXXFLAGS: -O2 -g -fno-strict-aliasing
         run: |
           set -euo pipefail
           VER="${GITHUB_REF#refs/tags/}"
