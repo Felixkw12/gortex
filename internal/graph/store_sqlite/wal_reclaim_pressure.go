@@ -51,10 +51,6 @@ var (
 	// walIdleResetHook, when set by a test, runs once a reset hold has the
 	// write gate. nil in production.
 	walIdleResetHook func()
-	// walIdleResetResultHook, when set by a test, replaces a reset hold's
-	// error (an interrupt that arrives after the reset completed). nil in
-	// production.
-	walIdleResetResultHook func(error) error
 	// walReclaimPressureSmallFrames: the remainder the writer step may copy.
 	walReclaimPressureSmallFrames uint32 = 256
 	// walPressureOff disables the pressure mode, for the mutation checks
@@ -258,12 +254,6 @@ func (s *Store) reclaimWALPressureResetOnce(ctx context.Context, ckptDB *sql.DB,
 		defer stopYield()
 	}
 	result, err := s.resetWALForPressure(resetCtx)
-	if err != nil && walLogIsReset(s.dbPath, s.dbPath+"-wal") {
-		// The reset completed and the interrupt (the hold ran out, or a
-		// writer queued) arrived after it: the log is reset, and counted so.
-		// Checked before the writer is released, so no write can refill it.
-		err = nil
-	}
 	if preemptible && err != nil && errors.Is(context.Cause(resetCtx), errWALReclaimWriterWaiting) {
 		err = errWALReclaimWriterWaiting
 	}
