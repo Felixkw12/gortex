@@ -145,12 +145,19 @@ func TestContractJobLogCountsSharedPublicationOnce(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, batch.Targets, 2)
-	require.Positive(t, batch.Cohort.PublishDuration, "the real shared publication must be observed")
-	var payload time.Duration
+	require.True(t, batch.Cohort.Published, "the real shared publication must be observed")
 	for _, target := range batch.Targets {
 		require.True(t, target.Report.Published)
 		require.Equal(t, batch.Cohort.PublishDuration, target.Report.PublishDuration)
-		payload += target.Report.PayloadDuration
+	}
+	// Windows' clock ticks in ~0.5-15 ms steps, so the fast transaction can
+	// time as zero, and a zero shared duration reads the same counted once or
+	// once per target. The log line below reads a known nonzero one.
+	batch.Cohort.PublishDuration = time.Millisecond
+	var payload time.Duration
+	for i := range batch.Targets {
+		batch.Targets[i].Report.PublishDuration = batch.Cohort.PublishDuration
+		payload += batch.Targets[i].Report.PayloadDuration
 	}
 	for _, tc := range []struct {
 		name, outcome            string
