@@ -1972,8 +1972,7 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 	crossRepoEdges := 0
 	skipped := false
 	if fullCoverage {
-		crossRepoEdges = resolver.DetectCrossRepoEdges(mi.graph)
-		skipped = crossRepoEdges == 0 && len(mi.graph.RepoPrefixes()) < 2
+		crossRepoEdges, skipped = resolver.DetectCrossRepoEdgesWithSkip(mi.graph)
 	} else {
 		crossRepoEdges = resolver.DetectCrossRepoEdgesForRepos(mi.graph, scanRepoPrefixes)
 	}

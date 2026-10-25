@@ -62,7 +62,9 @@ func TestDetectCrossRepoEdgesSingleRepoSkipsCandidates(t *testing.T) {
 				}
 				store.AddNode(&graph.Node{ID: "repo/b.go::B", Kind: graph.KindFunction, FilePath: "repo/b.go", RepoPrefix: prefix})
 				store.AddEdge(&graph.Edge{From: "repo/a.go::A", To: "repo/b.go::B", Kind: graph.EdgeCalls, FilePath: "repo/a.go", Line: 1})
-				assert.Zero(t, DetectCrossRepoEdges(store))
+				edges, skipped := DetectCrossRepoEdgesWithSkip(store)
+				assert.Zero(t, edges)
+				assert.True(t, skipped)
 				assert.Zero(t, store.candidateCalls)
 				require.Len(t, store.AllEdges(), 1)
 				assert.False(t, store.AllEdges()[0].CrossRepo)
@@ -132,7 +134,9 @@ func TestDetectCrossRepoEdgesMultiRepoMatchesUnguardedPass(t *testing.T) {
 			// The parent commit's complete implementation, without the prefix guard.
 			want := materializeCrossRepoCandidates(baseline, crossRepoCandidates(baseline))
 			require.Equal(t, 3, want)
-			assert.Equal(t, want, DetectCrossRepoEdges(guarded))
+			edges, skipped := DetectCrossRepoEdgesWithSkip(guarded)
+			assert.Equal(t, want, edges)
+			assert.False(t, skipped)
 			require.Len(t, guarded.AllEdges(), 7)
 			// Includes every identity field (from, to, kind, file, line) and CrossRepo,
 			// on both the base and parallel edges, not only the emitted count.
