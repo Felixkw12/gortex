@@ -794,6 +794,15 @@ func (s *Store) searchSymbolsPathScopedContext(ctx context.Context, query string
 		}
 	}
 
+	// A generation that is not one narrow run, the base corpus above all, is
+	// ranked in its span with the other generations' runs cut out when that
+	// skips enough of the table; see symbolFTSHoleShare.
+	if len(pathPrefixes) == 0 {
+		if hits, handled, err := s.searchSymbolFTSRangePlan(ctx, match, s.viewGen, repoAllow, limit); handled {
+			return hits, err
+		}
+	}
+
 	// symbol_fts is one shared virtual table across every generation, so the
 	// MATCH alone would rank rows this handle cannot see. The rowid map carries
 	// the generation and its symbol_fts_rowid_by_rowid index is UNIQUE on

@@ -24,9 +24,11 @@ import (
 // as documents); bounding the MATCH with that run makes FTS5 seek every
 // doclist to the run's first rowid and stop at its last, so the cost is the
 // generation's own matches instead of every generation's. The base corpus is
-// re-indexed in place, its rowids scatter over the whole table, and it keeps
-// the unbounded plan. The bound never decides membership (the sidecar join
-// does), so a run that happens to be wide only costs speed, never rows.
+// re-indexed in place and its rowids scatter over the whole table, so it is
+// never measured or bounded through symbolFTSGenerationSpan and dense(); the
+// range plan (symbolFTSHoleShare) cuts the other generations' runs out of its
+// span instead. The bound never decides membership (the sidecar join does), so
+// a run that happens to be wide only costs speed, never rows.
 const (
 	symbolFTSSpanFraction = 4
 	symbolFTSSpanFloor    = 4096
@@ -79,7 +81,8 @@ SELECT
   (SELECT MAX(fts_rowid) FROM symbol_fts_rowid)`
 
 // symbolFTSGenerationSpan reads one derived generation's rowid run from the
-// ownership sidecar. The base generation is never bounded and is not measured.
+// ownership sidecar. The base generation is not measured, so dense() never
+// bounds it; the range plan (symbolFTSHoleShare) handles it instead.
 func (s *Store) symbolFTSGenerationSpan(ctx context.Context, generation int64) (symbolFTSSpan, bool, error) {
 	span := symbolFTSSpan{generation: generation}
 	if generation <= baseViewGeneration {
@@ -108,7 +111,12 @@ func (s *Store) symbolFTSGenerationSpan(ctx context.Context, generation int64) (
 // used (it counts every row); the batch reads without it and stops after limit
 // non-empty ids, which is how the shared stream counts.
 func symbolFTSSpanQuery(repos int, withLimit bool) string {
-	q := `SELECT symbol_fts.node_id, bm25(symbol_fts)
+	return symbolFTSBoundedQuery(`symbol_fts.node_id, bm25(symbol_fts)`, repos, withLimit)
+}
+
+// symbolFTSBoundedQuery is symbolFTSSpanQuery selecting columns.
+func symbolFTSBoundedQuery(columns string, repos int, withLimit bool) string {
+	q := `SELECT ` + columns + `
 FROM symbol_fts
 CROSS JOIN symbol_fts_rowid
 WHERE symbol_fts MATCH ?
