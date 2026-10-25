@@ -36,12 +36,12 @@ func TestScopedOutlineQueryPlans(t *testing.T) {
 		}
 		for _, generation := range []int64{0, 3} {
 			scope := graph.NodeScope{WorkspaceID: "ws", ProjectID: "p", RepoAllow: map[string]bool{"repo": true, "other03": true}}
-			languages, edges, imports := outlineQueries(scope, generation)
-			_, filteredEdges, filteredImports := outlineFilteredQueries(scope, generation, graph.OutlineEdgeFilter{
-				ExcludeKinds: []graph.EdgeKind{graph.EdgeMatches}, ExcludeNodeKinds: []graph.NodeKind{graph.KindContract}, ExcludeVia: "spring.Bean",
-			})
-			viaEdges, viaImports := outlineViaQueries(filteredEdges, filteredImports, "spring.Bean")
-			for name, query := range map[string]outlineQuery{"languages": languages, "edges": edges, "imports": imports, "filtered_edges": filteredEdges, "filtered_imports": filteredImports, "via_edges": viaEdges, "via_imports": viaImports} {
+			for name, filter := range map[string]graph.OutlineEdgeFilter{
+				"unfiltered": {},
+				"contract":   {ExcludeKinds: []graph.EdgeKind{graph.EdgeMatches}, ExcludeNodeKinds: []graph.NodeKind{graph.KindContract}, ExcludeVia: "spring.Bean"},
+				"identities": {ExcludeNodeIDs: map[string]bool{"hidden": true}},
+			} {
+				query := outlineAggregateQuery(scope, generation, filter)
 				t.Run(name, func(t *testing.T) {
 					rows, err := db.Query("EXPLAIN QUERY PLAN "+query.sql, query.args...)
 					if err != nil {
@@ -65,15 +65,15 @@ func TestScopedOutlineQueryPlans(t *testing.T) {
 					if !strings.Contains(joined, "nodes_by_repo (repo_prefix=? AND view_gen=?)") {
 						t.Fatalf("missing repo seek: %s", joined)
 					}
-					for _, forbidden := range []string{"SCAN n", "SCAN e", "SCAN target", "SCAN source", "SCAN nodes", "SCAN edges"} {
+					for _, forbidden := range []string{"SCAN n", "SCAN e", "SCAN source", "SCAN nodes", "SCAN edges"} {
 						if strings.Contains(joined, forbidden) {
 							t.Fatalf("table scan: %s", joined)
 						}
 					}
-					if strings.HasSuffix(name, "edges") && !strings.Contains(joined, "edges_by_from (view_gen=? AND from_id=?)") {
+					if !strings.Contains(joined, "edges_by_from (view_gen=? AND from_id=?)") {
 						t.Fatalf("missing outgoing seek: %s", joined)
 					}
-					if strings.HasSuffix(name, "imports") && !strings.Contains(joined, "edges_by_to (view_gen=? AND to_id=? AND kind=?)") {
+					if !strings.Contains(joined, "edges_by_to (view_gen=? AND to_id=? AND kind=?)") {
 						t.Fatalf("missing incoming seek: %s", joined)
 					}
 				})
@@ -178,6 +178,11 @@ func TestScopedOutlineMetadataEncodings(t *testing.T) {
 			}
 		}
 	}
+	for _, kind := range []string{"calls", "imports"} {
+		if _, err := s.writerDB.Exec(`INSERT INTO edges(from_id,to_id,kind,line,view_gen,meta) VALUES('a','b',?,100,0,?)`, kind, `{"via":"spring.Bean"}`); err != nil {
+			t.Fatal(err)
+		}
+	}
 	got, err := s.ScopedOutlineCountsFiltered(graph.NodeScope{RepoAllow: map[string]bool{"repo": true}}, graph.OutlineEdgeFilter{ExcludeVia: "spring.Bean"})
 	if err != nil {
 		t.Fatal(err)
@@ -187,21 +192,7 @@ func TestScopedOutlineMetadataEncodings(t *testing.T) {
 	}
 }
 
-type outlineConcurrentWriter struct {
-	tx      *sql.Tx
-	write   func()
-	queries int
-}
-
-func (q *outlineConcurrentWriter) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	q.queries++
-	if q.queries == 4 {
-		q.write()
-	} // totals have been read; correction has not.
-	return q.tx.QueryContext(ctx, query, args...)
-}
-
-func TestScopedOutlineCorrectionUsesOneSnapshot(t *testing.T) {
+func TestScopedOutlineUsesOneSnapshot(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "snapshot.sqlite"))
 	if err != nil {
 		t.Fatal(err)
@@ -216,19 +207,36 @@ func TestScopedOutlineCorrectionUsesOneSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	queryer := &outlineConcurrentWriter{tx: tx, write: func() {
-		for line := 1; line <= 4; line++ {
-			s.AddEdge(&graph.Edge{From: "a", To: "b", Kind: graph.EdgeImports, Line: line, Meta: map[string]any{"via": "spring.Bean"}})
-		}
-	}}
 	scope := graph.NodeScope{RepoAllow: map[string]bool{"repo": true}}
 	filter := graph.OutlineEdgeFilter{ExcludeVia: "spring.Bean"}
-	got, err := s.outlineCountsFrom(t.Context(), queryer, scope, filter)
-	if err != nil {
+	var edges, imports int
+	written := false
+	if err := scanOutlineQuery(t.Context(), tx, outlineAggregateQuery(scope, 0, filter), func(rows *sql.Rows) error {
+		var section, key string
+		var count int
+		if err := rows.Scan(&section, &key, &count); err != nil {
+			return err
+		}
+		if !written {
+			// The language row pins the snapshot before either edge section.
+			written = true
+			for line := 1; line <= 4; line++ {
+				s.AddEdge(&graph.Edge{From: "a", To: "b", Kind: graph.EdgeImports, Line: line, Meta: map[string]any{"via": "spring.Bean"}})
+			}
+			s.AddEdge(&graph.Edge{From: "a", To: "b", Kind: graph.EdgeImports, Line: 5})
+		}
+		if section == "edge" {
+			edges += count
+		}
+		if section == "import" {
+			imports += count
+		}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if got.TotalEdges != 1 || len(got.FileImports) != 1 || got.FileImports[0].Count != 1 {
-		t.Fatalf("writer changed pinned snapshot: %+v", got)
+	if !written || edges != 1 || imports != 1 {
+		t.Fatalf("writer changed pinned snapshot: written=%v edges=%d imports=%d", written, edges, imports)
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
@@ -237,14 +245,14 @@ func TestScopedOutlineCorrectionUsesOneSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fresh.TotalEdges != 1 || len(fresh.FileImports) != 1 || fresh.FileImports[0].Count != 1 {
+	if fresh.TotalEdges != 2 || len(fresh.FileImports) != 1 || fresh.FileImports[0].Count != 2 {
 		t.Fatalf("fresh filtered counts: %+v", fresh)
 	}
 	all, err := s.ScopedOutlineCounts(scope)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if all.TotalEdges != 5 {
+	if all.TotalEdges != 6 {
 		t.Fatalf("writer did not insert concurrent edges: %+v", all)
 	}
 }
@@ -264,5 +272,23 @@ func TestScopedOutlineCancellationAndClosedStore(t *testing.T) {
 	}
 	if _, err := s.ScopedOutlineCounts(graph.NodeScope{}); err == nil {
 		t.Fatal("closed store returned a successful outline")
+	}
+}
+
+func TestScopedOutlineMetadataErrorsPropagate(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "invalid-meta.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.AddBatch([]*graph.Node{
+		{ID: "a", Kind: graph.KindFunction, RepoPrefix: "repo", FilePath: "repo/a.go"},
+		{ID: "b", Kind: graph.KindFunction, RepoPrefix: "repo", FilePath: "repo/b.go"},
+	}, nil)
+	if _, err := s.writerDB.Exec(`INSERT INTO edges(from_id,to_id,kind,view_gen,meta) VALUES('a','b','calls',0,?)`, []byte("invalid-gob")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ScopedOutlineCountsFiltered(graph.NodeScope{RepoAllow: map[string]bool{"repo": true}}, graph.OutlineEdgeFilter{ExcludeVia: "spring.Bean"}); err == nil {
+		t.Fatal("invalid metadata returned a successful filtered outline")
 	}
 }

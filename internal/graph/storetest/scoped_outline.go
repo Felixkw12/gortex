@@ -124,6 +124,7 @@ func RunFilteredScopedOutline(t *testing.T, factory Factory) {
 		"explicit-identities": {ExcludeNodeIDs: map[string]bool{"b": true, "a": false}},
 		"empty-identities":    {ExcludeNodeIDs: map[string]bool{}},
 		"false-identities":    {ExcludeNodeIDs: map[string]bool{"a": false}},
+		"empty-kind":          {ExcludeNodeKinds: []graph.NodeKind{""}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			scope := graph.NodeScope{RepoAllow: map[string]bool{"repo": true}}
