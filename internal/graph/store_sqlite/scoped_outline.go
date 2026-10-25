@@ -112,7 +112,7 @@ func outlineViaPredicate(via string) (string, []any) {
 	// escaped JSON strings retain the same visibility as fully decoded edges.
 	return ` AND CASE WHEN e.meta IS NOT NULL
 		AND (substr(e.meta, 1, 2) <> ? OR instr(e.meta, ?) > 0)
-		THEN gortex_outline_via_is(e.meta, ?) ELSE 0 END = 0`,
+		THEN gortex_outline_via_is(CAST(e.meta AS BLOB), CAST(? AS BLOB)) ELSE 0 END = 0`,
 		[]any{[]byte{metaFlatMagic0, metaFlatVersion}, []byte(via), via}
 }
 

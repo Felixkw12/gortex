@@ -296,3 +296,23 @@ func TestScopedOutlineMetadataErrorsPropagate(t *testing.T) {
 		t.Fatal("invalid metadata returned a successful filtered outline")
 	}
 }
+
+func TestScopedOutlineMetadataViaContainsNUL(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "nul-via.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	const via = "custom\x00via"
+	s.AddBatch([]*graph.Node{
+		{ID: "a", Kind: graph.KindFunction, RepoPrefix: "repo", FilePath: "repo/a.go"},
+		{ID: "b", Kind: graph.KindFunction, RepoPrefix: "repo", FilePath: "repo/b.go"},
+	}, []*graph.Edge{{From: "a", To: "b", Kind: graph.EdgeImports, Meta: map[string]any{"via": via}}})
+	counts, err := s.ScopedOutlineCountsFiltered(graph.NodeScope{RepoAllow: map[string]bool{"repo": true}}, graph.OutlineEdgeFilter{ExcludeVia: via})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.TotalEdges != 0 || len(counts.FileImports) != 0 {
+		t.Fatalf("NUL via value was truncated: %+v", counts)
+	}
+}
