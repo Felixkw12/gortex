@@ -757,7 +757,7 @@ func (b *SparseGenerationBuilder) buildReservedGenerationWithCallbacks(ctx conte
 			physicalErr = closeErr
 		}()
 		passClock := newPhaseClock(&report.PassSteps)
-		if err := window.open(); err != nil {
+		if err := window.openSettling(ctx); err != nil {
 			return err
 		}
 		passClock.lap("window_open")

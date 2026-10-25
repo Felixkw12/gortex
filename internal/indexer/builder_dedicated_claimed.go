@@ -318,7 +318,7 @@ func (b *SparseGenerationBuilder) buildClaimedDedicatedBase(ctx context.Context,
 		buildErr = closeErr
 	}()
 	prepare := func(ctx context.Context) (source.ContentSource, buildPlan, BuildReport, error) {
-		if err := window.openContext(ctx); err != nil {
+		if err := window.openSettling(ctx); err != nil {
 			return nil, buildPlan{}, BuildReport{}, err
 		}
 		target, plan, report, err := route(ctx)
@@ -585,6 +585,45 @@ func (w *generationBulkWindow) openContext(ctx context.Context) error {
 	}
 	w.opened = opened
 	return nil
+}
+
+// generationWindowSettleBudget bounds how long openSettling waits out bulk
+// checkpoint coordination before it aborts the attempt after all: about two of
+// the periodic PASSIVE's one-second windows.
+const generationWindowSettleBudget = 2 * time.Second
+
+// openSettling is openContext for a build that has written nothing yet, where
+// a coordination refusal costs a pause rather than the attempt.
+//
+// The refusal is usually not a checkpoint at all. Every other build's open and
+// close holds the store's checkpoint lease for a moment without an installed
+// writer, so two builds that reach their windows together — a ref view and the
+// committed-base publication its selection asked for, or a checkout's commit
+// layer beside either — refuse each other for the millisecond or so the winner
+// spends installing. Aborting there would throw the pass away, and the two
+// drivers with no poll to retry on, a ref view's selection and the
+// committed-base publisher, would report a failed selection and a failed
+// publication. A retry moments later finds the winner installed (this build
+// writes beside it, as on any refused begin) or gone (this build takes the
+// window). Only a refusal that outlasts the budget aborts, for the reason
+// openContext gives.
+func (w *generationBulkWindow) openSettling(ctx context.Context) error {
+	deadline := time.Now().Add(generationWindowSettleBudget)
+	pause := 10 * time.Millisecond
+	for {
+		err := w.openContext(ctx)
+		if !errors.Is(err, store_sqlite.ErrGenerationBulkCheckpointBusy) || time.Now().Add(pause).After(deadline) {
+			return err
+		}
+		retry := time.NewTimer(pause)
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+			return ctx.Err()
+		case <-retry.C:
+		}
+		pause = min(2*pause, 250*time.Millisecond)
+	}
 }
 
 // close releases a window this build holds. It is idempotent and inert for a
