@@ -2063,6 +2063,10 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	// 2. Search for relevant symbols using each keyword.
 	seen := make(map[string]bool)
 	var relevantSymbols []*graph.Node
+	// A one-word task is its own keyword: the retrieval note below reuses
+	// that ranking instead of running the identical search again.
+	var taskRanked []*rerank.Candidate
+	taskRankedKnown := false
 	for _, kw := range keywords {
 		if len(kw) < 3 {
 			continue
@@ -2073,6 +2077,9 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 		ranked := s.engineFor(ctx).SearchSymbolsRankedContext(ctx, kw, 10, query.QueryOptions{}, nil)
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if kw == task {
+			taskRanked, taskRankedKnown = ranked, true
 		}
 		matches := make([]*graph.Node, 0, len(ranked))
 		for _, candidate := range ranked {
@@ -2459,7 +2466,7 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	// routing the agent to Gortex's richer escape hatches. Suppressed for
 	// single-symbol / distinctive-identifier lookups, so a confident exact
 	// query never draws a hedge.
-	if note := s.lowConfidenceRetrievalNote(ctx, task, relevantSymbols); note != nil {
+	if note := s.lowConfidenceRetrievalNote(ctx, task, relevantSymbols, taskRanked, taskRankedKnown); note != nil {
 		result["retrieval_note"] = note
 	}
 
