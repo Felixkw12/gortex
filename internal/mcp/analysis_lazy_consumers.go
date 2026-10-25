@@ -2,11 +2,13 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"sort"
 
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/search/rerank"
+	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
 // analysisNodeMetricsBatched keeps callers on the normalized analysis store
@@ -179,14 +181,27 @@ func (s *Server) rerankBoundedCentrality(ctx context.Context, seeds, candidateID
 //
 // It reads through the answer-path receipt (analysis_answer.go), so a symbol
 // search never waits for a running analysis pass, and the two maxima are read
-// once per analysis generation rather than once per search.
+// once per analysis generation rather than once per search. A busy store
+// writer drops the entire analysis signal, including on a maximum cache miss.
 func (s *Server) rerankAnalysisMetrics(nodeIDs []string) map[string]rerank.AnalysisMetric {
-	rows, header, ok := s.answerAnalysisNodeMetricsBatched(nodeIDs)
-	if !ok || len(rows) == 0 {
+	rows, header, err := s.answerAnalysisNodeMetricsBatched(nodeIDs)
+	if err != nil {
+		s.recordRerankAnalysisSkipped(err)
 		return nil
 	}
-	maxAuthority := s.answerTopAnalysisMetricValue(header, graph.AnalysisMetricAuthority)
-	maxHub := s.answerTopAnalysisMetricValue(header, graph.AnalysisMetricHub)
+	if len(rows) == 0 {
+		return nil
+	}
+	maxAuthority, err := s.answerTopAnalysisMetricValue(header, graph.AnalysisMetricAuthority)
+	if err != nil {
+		s.recordRerankAnalysisSkipped(err)
+		return nil
+	}
+	maxHub, err := s.answerTopAnalysisMetricValue(header, graph.AnalysisMetricHub)
+	if err != nil {
+		s.recordRerankAnalysisSkipped(err)
+		return nil
+	}
 	metrics := make(map[string]rerank.AnalysisMetric, len(rows))
 	for _, row := range rows {
 		metric := rerank.AnalysisMetric{CommunityID: row.CommunityID}
@@ -199,4 +214,12 @@ func (s *Server) rerankAnalysisMetrics(nodeIDs []string) map[string]rerank.Analy
 		metrics[row.NodeID] = metric
 	}
 	return metrics
+}
+
+// Count a fallback once per search, regardless of which page or maximum was
+// busy. Other unavailable analysis signals are not writer-contention skips.
+func (s *Server) recordRerankAnalysisSkipped(err error) {
+	if errors.Is(err, graph.ErrAnalysisStoreBusy) {
+		viewmetrics.Count(viewmetrics.SearchRerankAnalysisSkippedBusyTotal)
+	}
 }
