@@ -803,7 +803,7 @@ func deleteSQLiteReindexRowsTxLimited(tx *sql.Tx, viewGen int64, keys []sqliteRe
 		}
 		args = append(args, viewGen)
 
-		query := deleteSQLiteReindexRowsSQL(rowCount)
+		query := edgeExactDeleteByIdentitySQL(multiValues(rowCount, reindexKeyParamsPerRow))
 		result, err := tx.Exec(query, args...)
 		if tooManySQLVariables(err) && rowCount > 1 {
 			rowLimit = lowerBatchVariableLimit(variableLimit, reindexKeyParamsPerRow, rowCount)
@@ -880,7 +880,7 @@ func insertSQLiteReindexRowsTxLimited(tx *sql.Tx, viewGen int64, rows []sqliteRe
 }
 
 // Drive from the bounded identities even when stale statistics describe a tiny
-// generation. Reversing these joins scans every generation edge per identity.
+// generation. Reversing this join scans every generation edge per identity.
 func sqliteReindexRowsSQL(rowCount int) string {
 	return `WITH wanted(from_id, to_id, kind, file_path, line) AS (VALUES ` + multiValues(rowCount, reindexKeyParamsPerRow) + `)
 		SELECT e.from_id, e.to_id, e.kind, e.file_path, e.line,
@@ -894,20 +894,4 @@ func sqliteReindexRowsSQL(rowCount int) string {
 		 AND e.file_path = w.file_path
 		 AND e.line = w.line
 		 AND e.view_gen = ?`
-}
-
-func deleteSQLiteReindexRowsSQL(rowCount int) string {
-	return `WITH doomed(from_id, to_id, kind, file_path, line) AS (VALUES ` + multiValues(rowCount, reindexKeyParamsPerRow) + `)
-		DELETE FROM edges
-		WHERE id IN (
-			SELECT e.id
-			FROM doomed AS d
-			CROSS JOIN edges AS e
-			  ON e.from_id = d.from_id
-			 AND e.to_id = d.to_id
-			 AND e.kind = d.kind
-			 AND e.file_path = d.file_path
-			 AND e.line = d.line
-			 AND e.view_gen = ?
-		)`
 }
