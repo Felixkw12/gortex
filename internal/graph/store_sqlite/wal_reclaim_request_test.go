@@ -2,6 +2,7 @@ package store_sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"sync/atomic"
@@ -74,14 +75,26 @@ func stepFoldAgainstABusyLane(t *testing.T, s *Store, lane *fakeBuildLane, fold 
 // reclaim polls every 25 ms (production 5 s). The log sits at 8 MiB, over the
 // fold's mark, and the lane never goes idle. A refused step asks for the
 // reclaim, the reclaim resets the log inside the busy lane, and the fold
-// finishes.
+// finishes. Each reset inside the lane restarts the log and then sees its
+// hold run out, as on a loaded host where the 50 ms hold ended after the
+// reset and the reset returned the deadline error: it still counts as a reset.
 func TestARefusedFoldGetsTheReclaimInsideABusyLane(t *testing.T) {
 	prevMark := chainFoldWALMark
 	chainFoldWALMark = 4 << 20
 	t.Cleanup(func() { chainFoldWALMark = prevMark })
+	var lateInterrupt atomic.Bool
+	prevObserver := walResetCheckpointConnObserver
+	walResetCheckpointConnObserver = func(ctx context.Context, conn *sql.Conn) {
+		if _, ok := ctx.Deadline(); ok && lateInterrupt.Load() {
+			_, _ = checkpointWALOnceOn(context.Background(), conn, "TRUNCATE")
+			<-ctx.Done()
+		}
+	}
+	t.Cleanup(func() { walResetCheckpointConnObserver = prevObserver }) // after the store closes
 	s, path, lane := pressureStore(t, 0)
 	fold := beginTestFold(t, s)
 	lane.held.Store(true) // an edit burst from here on: nothing reclaims the log in a gap
+	lateInterrupt.Store(true)
 	// The log as the fold measures it (frames, not the file's size: a log
 	// restarted after a complete copy keeps its file). An attempt the loop
 	// began before the lane was held may still reset it meanwhile, so grow
@@ -99,6 +112,7 @@ func TestARefusedFoldGetsTheReclaimInsideABusyLane(t *testing.T) {
 	require.Less(t, size, int64(16<<20), "precondition: under the pressure mark")
 	before := s.WALCopyStats()
 	done, refusals := stepFoldAgainstABusyLane(t, s, lane, fold, 20*time.Second)
+	lateInterrupt.Store(false)
 	after := s.WALCopyStats()
 	t.Logf("fold done=%t refusals=%d pressure_runs=%d pressure_resets=%d", done, refusals, after.PressureRuns-before.PressureRuns, after.PressureResets-before.PressureResets)
 	require.True(t, done, "the fold never got under its mark inside the busy lane")
