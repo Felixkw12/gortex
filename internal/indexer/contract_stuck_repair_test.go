@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -346,26 +347,28 @@ func TestContractStuckRepairWaitsForABusyLane(t *testing.T) {
 }
 
 func TestContractStuckRepairBusyPassSchedulesAnotherPass(t *testing.T) {
-	mi := &MultiIndexer{}
-	release, ok := mi.TryRepositoryMutationLanes([]string{"fixture"})
-	require.True(t, ok)
-	defer release()
-	core, logs := observer.New(zapcore.InfoLevel)
-	r := &ContractStuckRepair{
-		options: ContractStuckRepairOptions{MultiIndexer: mi, Logger: zap.New(core)},
-		// Expire the pass budget so the first failed lane acquisition takes
-		// the busy branch, with no poll or background watcher to wake it.
-		period: -time.Nanosecond,
-		ctx:    t.Context(),
-	}
-	state := &contractRepoRepair{repo: "fixture", wake: make(chan struct{}, 1)}
-	r.pass(state)
-	require.Len(t, logs.FilterMessage("contract stuck repair").FilterField(zap.String("outcome", "busy")).All(), 1)
-	select {
-	case <-state.wake:
-	default:
-		t.Fatal("a busy pass must schedule another pass without a watcher event")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		mi := &MultiIndexer{}
+		release, ok := mi.TryRepositoryMutationLanes([]string{"fixture"})
+		require.True(t, ok)
+		defer release()
+		core, logs := observer.New(zapcore.InfoLevel)
+		r := &ContractStuckRepair{
+			options: ContractStuckRepairOptions{MultiIndexer: mi, Logger: zap.New(core)},
+			period:  contractRepairTestPeriod,
+			ctx:     t.Context(),
+		}
+		state := &contractRepoRepair{repo: "fixture", wake: make(chan struct{}, 1)}
+		start := time.Now()
+		r.pass(state)
+		require.Equal(t, contractRepairTestPeriod, time.Since(start), "a busy pass must consume exactly its fake-time period")
+		require.Len(t, logs.FilterMessage("contract stuck repair").FilterField(zap.String("outcome", "busy")).All(), 1)
+		select {
+		case <-state.wake:
+		default:
+			t.Fatal("a busy pass must schedule another pass without a watcher event")
+		}
+	})
 }
 
 func TestContractRepairAdmissionHonorsTheBatchGate(t *testing.T) {
@@ -403,7 +406,7 @@ func busyLaneRepair(t *testing.T, dispatchTime, repairTime func(time.Duration)) 
 		return len(f.logs.FilterMessage("contract stuck repair").FilterField(zap.String("outcome", "busy")).All()) > 0
 	}
 	for !busy() {
-		require.Less(t, time.Since(held), 20*time.Second, "a pass found the lane busy for its period")
+		require.Less(t, time.Since(held), testTimingSlack(20*time.Second), "a pass found the lane busy for its period")
 		// A request is dispatched while the repair waits for the lane:
 		// its inputs are pending, so the dispatcher parks it on their
 		// acceptance at once.

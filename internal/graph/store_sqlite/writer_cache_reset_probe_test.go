@@ -10,7 +10,7 @@ import (
 // An idle reset that completed and then saw its interrupt (a writer queued,
 // or the hold ran out, after the log was already reset) is counted as a reset,
 // not as a skipped attempt: the log is at its start. The interrupt is injected
-// after a real reset (walIdleResetResultHook).
+// after a real reset (walResetResultHook).
 func TestAnIdleResetInterruptedAfterItCompletedCountsAsAReset(t *testing.T) {
 	t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "0") // drive attempts directly
 	s, path := openWALReclaimStore(t)
@@ -22,13 +22,13 @@ func TestAnIdleResetInterruptedAfterItCompletedCountsAsAReset(t *testing.T) {
 	ckpt, err := openWALReclaimCheckpointDB(s.dbPath)
 	require.NoError(t, err)
 	defer func() { _ = ckpt.Close() }()
-	walIdleResetResultHook = func(err error) error {
+	walResetResultHook = func(err error) error {
 		if err == nil {
 			return context.Canceled
 		}
 		return err
 	}
-	defer func() { walIdleResetResultHook = nil }()
+	defer func() { walResetResultHook = nil }()
 	resetsBefore := s.WALReclaimStats().Resets
 	cfg := walReclaimConfig{thresholdBytes: 64 << 20, drainDeadline: defaultWALReclaimDrainDeadline, truncateBudget: walReclaimTruncateBudget, readerWait: defaultWALReclaimReaderWait}
 	res := s.reclaimWALOnce(cfg, ckpt, path+"-wal")
