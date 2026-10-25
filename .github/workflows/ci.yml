@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Run on the merged commit to verify the extended parser regression gate (#991).
+  workflow_dispatch:
 
 # One run per PR: a new push cancels the PR's older run. Every other event
 # (pushes to main, schedules) gets its own group from the run ID, so none of
@@ -13,7 +15,29 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
+# Match the release builds, including dependency grammars and C++ scanners (#821).
+env:
+  CGO_CFLAGS: -O2 -g -fno-strict-aliasing
+  CGO_CXXFLAGS: -O2 -g -fno-strict-aliasing
+
+# Keep Linux compiler/header behavior stable while forest/perl v1.9.9
+# still declares bsearch, which collides with the C23 glibc macro (#1114).
+# Upstream tree-sitter-perl PR220 fixes the name; forest has no fixed release yet.
 jobs:
+  parser-stress:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Stress parser with release cgo flags
+        run: go test -race -count=50 -timeout=50m ./internal/parser/...
+
   test:
     runs-on: ${{ matrix.os }}
     # Each job compiles its packages once and runs their tests on one worker
@@ -25,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
         partition: ["indexer:1/2", "indexer:2/2", "mcp+store", "rest"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,14 +65,14 @@ jobs:
 
       # Linux's build jobs already build the binary.
       - name: Build
-        if: matrix.partition == 'rest' && matrix.os != 'ubuntu-latest'
+        if: matrix.partition == 'rest' && matrix.os != 'ubuntu-24.04'
         run: go build -o gortex ./cmd/gortex/
 
       - name: Test
         shell: bash
         env:
           TEST_PARTITION: ${{ matrix.partition }}
-          TEST_RACE: ${{ matrix.os == 'ubuntu-latest' }}
+          TEST_RACE: ${{ matrix.os == 'ubuntu-24.04' }}
           TEST_WINDOWS: ${{ matrix.os == 'windows-latest' }}
         run: |
           if [[ "$TEST_WINDOWS" == true ]]; then
@@ -58,7 +82,7 @@ jobs:
           fi
 
       - name: Upload coverage
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: coverage.out
@@ -79,10 +103,10 @@ jobs:
     # dep that needs a runtime dlopen, breaks it. The release-time build hook
     # catches that at tag time; this catches it on the PR that introduces it.
     #
-    # ubuntu-latest is the same Ubuntu 24.04 / GCC 13 generation as the
-    # goreleaser-cross image, so it reproduces the same GLIBCXX floor the
+    # Ubuntu 24.04 uses the same GCC 13 generation as goreleaser-cross,
+    # so it reproduces the same GLIBCXX floor the
     # dynamic build used to inherit — without pulling that multi-GB image.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -123,13 +147,16 @@ jobs:
           done
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      - name: Cgo aliasing flags
+        run: sh scripts/check-cgo-flags.sh
 
       - name: CI test layout
         run: python3 -m unittest scripts/test_ci_test_partition.py
@@ -156,7 +183,7 @@ jobs:
           fi
 
   build-onnx:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -193,7 +220,7 @@ jobs:
         run: go build -tags embeddings_gomlx -o gortex-gomlx-noxla ./cmd/gortex/
 
   benchmark:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

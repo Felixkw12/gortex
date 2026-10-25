@@ -19,6 +19,7 @@ package gitcmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -90,7 +91,9 @@ func currentSem() *semaphore.Weighted {
 //
 // On a non-nil exec error, Run returns
 // fmt.Errorf("git %s: %w: %s", args[0], err, bytes.TrimSpace(stderr)).
-// The captured stdout is always returned, even on error.
+// When ctx has ended by the time git fails (as it has when its cancellation
+// killed git), the error also wraps ctx.Err(). The captured stdout is always
+// returned, even on error.
 func Run(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	return run(ctx, dir, nil, nil, args...)
 }
@@ -145,6 +148,12 @@ func run(ctx context.Context, dir string, env []string, configure func(*exec.Cmd
 		name := "git"
 		if len(args) > 0 {
 			name = args[0]
+		}
+		// A child the context killed exits on the signal, and exec reports
+		// that exit status, not ctx.Err(). Wrap both, so a caller can tell its
+		// own cancellation from a git failure and still read the exit status.
+		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+			return stdout.Bytes(), fmt.Errorf("git %s: %w: %s (%w)", name, err, bytes.TrimSpace(stderr.Bytes()), ctxErr)
 		}
 		return stdout.Bytes(), fmt.Errorf("git %s: %w: %s", name, err, bytes.TrimSpace(stderr.Bytes()))
 	}

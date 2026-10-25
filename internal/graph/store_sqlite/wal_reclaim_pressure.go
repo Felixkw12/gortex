@@ -51,10 +51,6 @@ var (
 	// walIdleResetHook, when set by a test, runs once a reset hold has the
 	// write gate. nil in production.
 	walIdleResetHook func()
-	// walIdleResetResultHook, when set by a test, replaces a reset hold's
-	// error (an interrupt that arrives after the reset completed). nil in
-	// production.
-	walIdleResetResultHook func(error) error
 	// walReclaimPressureSmallFrames: the remainder the writer step may copy.
 	walReclaimPressureSmallFrames uint32 = 256
 	// walPressureOff disables the pressure mode, for the mutation checks

@@ -405,6 +405,8 @@ func (cm *ConfigManager) repoConfig(repoPrefix string, ws *Config, repoPath stri
 	out.Exclude = effective
 	out.Index.Exclude = effective
 	out.Watch.Exclude = effective
+	out.Index.Include = out.Include
+	out.Watch.Include = out.Include
 	// Plumb semantic.skip_embed through to the indexer's config so the
 	// embedder can filter without a new setter. Workspace > compiled
 	// defaults.
@@ -456,6 +458,17 @@ func (cm *ConfigManager) repoConfig(repoPrefix string, ws *Config, repoPath stri
 // append reallocates rather than writing through the shared backing array.
 func (cm *ConfigManager) EffectiveExclude(repoPrefix string) []string {
 	return cm.effectiveExcludeForRoot(repoPrefix, "")
+}
+
+// EffectiveInclude returns the workspace's shared immutable force-includes.
+// Workspace configs are replaced, never mutated in place.
+func (cm *ConfigManager) EffectiveInclude(repoPrefix string) []string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if ws := cm.workspace[repoPrefix]; ws != nil {
+		return ws.Include[:len(ws.Include):len(ws.Include)]
+	}
+	return nil
 }
 
 // EffectiveExcludeForRoot keeps configured repository layers while reading
@@ -531,23 +544,6 @@ func (cm *ConfigManager) effectiveExclude(repoPrefix string, gc *GlobalConfig, w
 		if len(ws.Exclude) == 0 {
 			out = append(out, ws.Index.Exclude...)
 			out = append(out, ws.Watch.Exclude...)
-		}
-	}
-
-	// Force-include last so it wins: each Include entry becomes a gitignore
-	// `!pattern` re-include over every exclude layer above (builtin,
-	// .gitignore, global, repo). This is the readable form of hand-writing
-	// negations, for a vendored/generated tree you want indexed anyway.
-	if ws != nil {
-		for _, inc := range ws.Include {
-			inc = strings.TrimSpace(inc)
-			if inc == "" {
-				continue
-			}
-			if !strings.HasPrefix(inc, "!") {
-				inc = "!" + inc
-			}
-			out = append(out, inc)
 		}
 	}
 

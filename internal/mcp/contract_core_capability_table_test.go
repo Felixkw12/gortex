@@ -208,6 +208,7 @@ func contractCoreCapabilityTable() []contractCoreCapRow {
 		{"Store", capOf[graph.Store], capDropped, "the whole backend contract; a request reader is never the store"},
 		{"AnalysisGenerationStore", capOf[graph.AnalysisGenerationStore], capDropped, capReasonBackend},
 		{"AnalysisQueryStore", capOf[graph.AnalysisQueryStore], capDropped, capReasonBackend},
+		{"TryAnalysisQueryStore", capOf[graph.TryAnalysisQueryStore], capDropped, capReasonBackend},
 		{"ScopedAnalysisCommunityReader", capOf[graph.ScopedAnalysisCommunityReader], capDropped, "private outline adapter probes the selected reader; contract-core node lookups are unchanged, composed and overlay readers retain fallback"},
 		{"BundleFingerprintSink", capOf[graph.BundleFingerprintSink], capDropped, capReasonBackend},
 		{"ContractRepoProjectionReader", capOf[graph.ContractRepoProjectionReader], capDropped, capReasonBackend},

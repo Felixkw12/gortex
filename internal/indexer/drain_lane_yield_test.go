@@ -21,7 +21,6 @@ import (
 // within the bound: the drain stops at its next sub-batch boundary, the
 // background build fails with the cancellation and publishes nothing.
 func TestBackgroundDrainGivesTheLaneToAnEditWithinTheBound(t *testing.T) {
-	const bound = 2 * time.Second
 	dir := t.TempDir()
 	var b strings.Builder
 	b.WriteString("package big\n\n")
@@ -48,10 +47,9 @@ func TestBackgroundDrainGivesTheLaneToAnEditWithinTheBound(t *testing.T) {
 	}
 
 	var (
-		mu        sync.Mutex
-		subs      int
-		requested time.Time
-		granted   = make(chan time.Time, 1)
+		mu      sync.Mutex
+		subs    int
+		granted = make(chan struct{}, 1)
 	)
 	prevRows, prevHook := drainYieldRows, drainSubBatchHook
 	drainYieldRows = 2
@@ -62,20 +60,21 @@ func TestBackgroundDrainGivesTheLaneToAnEditWithinTheBound(t *testing.T) {
 		mu.Unlock()
 		if first {
 			// The edit arrives while the drain is flushing.
-			mu.Lock()
-			requested = time.Now()
-			mu.Unlock()
 			go func() {
 				release, err := gate.Acquire(context.Background(), ViewBuildInteractive)
 				if err != nil {
 					t.Error(err)
 					return
 				}
-				granted <- time.Now()
+				granted <- struct{}{}
 				release()
 			}()
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+				t.Error("background drain did not yield to the waiting edit")
+			}
 		}
-		time.Sleep(40 * time.Millisecond) // a slow flush, as on a loaded host
 	}
 	t.Cleanup(func() { drainYieldRows, drainSubBatchHook = prevRows, prevHook })
 
@@ -86,20 +85,16 @@ func TestBackgroundDrainGivesTheLaneToAnEditWithinTheBound(t *testing.T) {
 	yield.close()
 	releaseBackground()
 
-	var got time.Time
 	select {
-	case got = <-granted:
+	case <-granted:
 	case <-time.After(time.Minute):
 		t.Fatal("the edit never got the lane")
 	}
 	mu.Lock()
-	waited, drained := got.Sub(requested), subs
+	drained := subs
 	mu.Unlock()
-	if requested.IsZero() {
-		t.Fatal("the fixture's drain never ran a sub-batch")
-	}
-	if waited > bound {
-		t.Fatalf("the edit waited %s for the lane (drain ran %d sub-batches), want <= %s", waited, drained, bound)
+	if drained != 1 {
+		t.Fatalf("drain ran %d sub-batches after yielding, want exactly one", drained)
 	}
 	if !yield.Yielded() || indexErr == nil || !errors.Is(indexErr, context.Canceled) {
 		t.Fatalf("the background build did not stop for the lane: yielded=%v err=%v", yield.Yielded(), indexErr)
