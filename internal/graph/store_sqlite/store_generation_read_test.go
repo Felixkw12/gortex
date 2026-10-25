@@ -1229,6 +1229,25 @@ func generationReadProbes() []genProbe {
 			}
 			return outlineCountTokens(counts)
 		}},
+		{name: "ScopedAnalysisCommunitySummaries", run: func(t *testing.T, s *Store) []string {
+			mark := genZeroMark
+			if s.ViewGeneration() != 0 {
+				mark = genOneMark
+			}
+			community := "community-" + mark
+			id := publishOutlineCommunities(t, s,
+				[]graph.AnalysisCommunitySummary{{ID: community, Label: mark, Size: 1}},
+				[]graph.AnalysisNodeMetric{{NodeID: genOnlyID(mark), CommunityID: community}})
+			rows, _, err := s.ScopedAnalysisCommunitySummaries(id, graph.NodeScope{RepoAllow: map[string]bool{genReadRepo: true}}, 1, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out []string
+			for _, row := range rows {
+				out = append(out, row.ID+" "+row.Label)
+			}
+			return out
+		}},
 		{name: "ScopedOutlineCountsFiltered", run: func(t *testing.T, s *Store) []string {
 			counts, err := s.ScopedOutlineCountsFiltered(graph.NodeScope{WorkspaceID: genReadRepo, RepoAllow: map[string]bool{genReadRepo: true}}, graph.OutlineEdgeFilter{
 				ExcludeKinds: []graph.EdgeKind{graph.EdgeReferences}, ExcludeNodeKinds: []graph.NodeKind{graph.KindContract}, ExcludeVia: "spring.Bean",
@@ -2006,6 +2025,7 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.AnalysisGenerationStore)(nil), skip: skipSidecar},
 		{iface: (*graph.AnalysisPageBinder)(nil), probe: "BindAnalysisPages"},
 		{iface: (*graph.AnalysisQueryStore)(nil), skip: skipSidecar},
+		{iface: (*graph.ScopedAnalysisCommunityReader)(nil), probe: "ScopedAnalysisCommunitySummaries"},
 		{iface: (*graph.AtomicVectorCorpusInstaller)(nil), skip: skipSidecar},
 		{iface: (*graph.BFSCapable)(nil), probe: "BFS"},
 		{iface: (*graph.BlameEnrichmentReader)(nil), skip: skipSidecar},

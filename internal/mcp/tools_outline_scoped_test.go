@@ -26,6 +26,7 @@ type outlineCountingReader struct {
 	allNodes, allNodesLight, allEdges, aggregates int
 	lookedUp                                      []string
 	lookupBatches                                 [][]string
+	communityQueries                              int
 	source                                        *outlineCountingReader
 }
 
@@ -54,6 +55,11 @@ func (r *outlineCountingReader) ScopedOutlineCounts(scope graph.NodeScope) (grap
 func (r *outlineCountingReader) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter graph.OutlineEdgeFilter) (graph.OutlineCounts, error) {
 	r.counters().aggregates++
 	return r.Store.ScopedOutlineCountsFiltered(scope, filter)
+}
+
+func (r *outlineCountingReader) ScopedAnalysisCommunitySummaries(id int64, scope graph.NodeScope, limit int, cursor string) ([]graph.AnalysisCommunitySummary, string, error) {
+	r.counters().communityQueries++
+	return r.Store.ScopedAnalysisCommunitySummaries(id, scope, limit, cursor)
 }
 
 func (r *outlineCountingReader) counters() *outlineCountingReader {

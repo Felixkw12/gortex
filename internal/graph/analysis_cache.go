@@ -191,3 +191,13 @@ type AnalysisQueryStore interface {
 	ListAnalysisConcepts(generationID int64, limit int, cursorToken string) (AnalysisConceptQueryResult, string, error)
 	LoadAnalysisBlob(generationID int64, component AnalysisBlobComponent) ([]byte, bool, error)
 }
+
+// ScopedAnalysisCommunityReader returns only community metadata, in community
+// ID order, when at least one persisted member exists in this reader's payload
+// generation and passes scope. Files and member IDs are deliberately omitted.
+// An inactive or foreign-generation receipt returns ErrAnalysisGenerationInactive.
+// Overlay/composed readers omit this capability so their node visibility is
+// still decided through the selected reader.
+type ScopedAnalysisCommunityReader interface {
+	ScopedAnalysisCommunitySummaries(generationID int64, scope NodeScope, limit int, cursorID string) ([]AnalysisCommunitySummary, string, error)
+}

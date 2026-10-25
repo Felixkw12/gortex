@@ -172,9 +172,25 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	// Communities — top N by member count, filtered to communities
 	// with at least one member inside the session's workspace.
 	communitiesSection := map[string]any{"count": 0}
-	if comms := s.getCommunities(); comms != nil && len(comms.Communities) > 0 {
+	var comms *analysis.CommunityResult
+	generationCommunities := false
+	if aggregated != nil {
+		var err error
+		comms, generationCommunities, err = s.outlineGenerationCommunities(ctx, reader, graph.NodeScope{
+			WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !generationCommunities {
+		comms = s.getCommunities()
+	}
+	if comms != nil && (generationCommunities || len(comms.Communities) > 0) {
 		sorted := make([]analysis.Community, 0, len(comms.Communities))
-		if aggregated != nil {
+		if generationCommunities {
+			sorted = append(sorted, comms.Communities...)
+		} else if aggregated != nil {
 			sorted = outlineCommunitiesInScope(comms.Communities, loadCandidates, candidateScope)
 		} else {
 			for _, c := range comms.Communities {
