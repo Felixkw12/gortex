@@ -372,6 +372,22 @@ func (s *Store) GetOutEdgesByNodeIDsContext(ctx context.Context, ids []string, l
 }
 
 func (s *Store) GetInEdgesByNodeIDsContext(ctx context.Context, ids []string, limit int) (map[string][]*graph.Edge, bool, error) {
+	return s.boundedInEdgesByNodeIDs(ctx, ids, limit, false)
+}
+
+// GetInEdgesByNodeIDsWithMetaContext is GetInEdgesByNodeIDsContext with every
+// edge's metadata decoded, for a caller that filters the rows it reads on that
+// metadata. It costs one metadata decode per row.
+func (s *Store) GetInEdgesByNodeIDsWithMetaContext(ctx context.Context, ids []string, limit int) (map[string][]*graph.Edge, bool, error) {
+	return s.boundedInEdgesByNodeIDs(ctx, ids, limit, true)
+}
+
+func (s *Store) boundedInEdgesByNodeIDs(ctx context.Context, ids []string, limit int, withMeta bool) (map[string][]*graph.Edge, bool, error) {
+	cols, scan := edgeColsLight, s.scanEdgeLight
+	if withMeta {
+		cols = lookupEdgeCols
+		scan = func(rows interface{ Scan(...any) error }) (*graph.Edge, error) { return s.scanEdgeCursor(rows) }
+	}
 	uniq := dedupeNonEmpty(ids)
 	if len(uniq) == 0 {
 		return nil, false, nil
@@ -392,7 +408,7 @@ func (s *Store) GetInEdgesByNodeIDsContext(ctx context.Context, ids []string, li
 		// remaining may be zero: fetch one proof row from later chunks so
 		// exactly-limit and greater-than-limit are distinguishable.
 		queryLimit := remaining + 1
-		q := `SELECT ` + edgeColsLight + ` FROM edges WHERE to_id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ? LIMIT ?`
+		q := `SELECT ` + cols + ` FROM edges WHERE to_id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ? LIMIT ?`
 		args := toAnyArgs(chunk)
 		args = append(args, s.viewGen, queryLimit)
 		rows, err := s.db.QueryContext(ctx, q, args...)
@@ -400,7 +416,7 @@ func (s *Store) GetInEdgesByNodeIDsContext(ctx context.Context, ids []string, li
 			return out, true, err
 		}
 		for rows.Next() {
-			e, scanErr := s.scanEdgeLight(rows)
+			e, scanErr := scan(rows)
 			if scanErr != nil {
 				_ = rows.Close()
 				return out, true, scanErr

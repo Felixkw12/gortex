@@ -93,7 +93,7 @@ func TestComputeCancellationBoundsNodeHydration(t *testing.T) {
 	defer cancel()
 
 	started := time.Now()
-	_, truncated := compute(ctx, store, ids[1])
+	_, truncated := compute(ctx, store, ids[1], nil)
 	elapsed := time.Since(started)
 	if !truncated {
 		t.Fatal("compute must mark a cancelled node hydration as truncated")

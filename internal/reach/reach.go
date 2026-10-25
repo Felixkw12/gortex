@@ -426,7 +426,7 @@ func BuildIndexCtx(ctx context.Context, g graph.Store) *Stats {
 		if ctx.Err() != nil || build != atomic.LoadUint64(&buildCounter) {
 			break
 		}
-		tiers, truncated := compute(ctx, g, n.ID)
+		tiers, truncated := compute(ctx, g, n.ID, nil)
 		pending = append(pending, pendingRecord{id: n.ID, tiers: tiers, truncated: truncated})
 		if len(pending) == reachPublishBatchSize && !publish() {
 			break
@@ -522,7 +522,12 @@ func writeRecord(meta map[string]any, build uint64, tiers [3]tier, truncated boo
 // filtered with ReachableEdge so the result matches AnalyzeImpact;
 // file / import nodes are walked through for fan-out but excluded
 // from the tier slices.
-func compute(ctx context.Context, g graph.Store, seedID string) ([3]tier, bool) {
+//
+// A non-nil keep narrows each level's bounded read to the edges a caller's
+// reader shows; that read carries each edge's metadata so keep can inspect it.
+// The edge budget is charged for the rows read before keep runs, so a hidden
+// edge still bounds I/O and can only make the result a lower bound sooner.
+func compute(ctx context.Context, g graph.Store, seedID string, keep EdgeFilter) ([3]tier, bool) {
 	var result [3]tier
 	truncated := false
 	edgesRemaining := maxLookupEdges
@@ -539,12 +544,15 @@ func compute(ctx context.Context, g graph.Store, seedID string) ([3]tier, bool) 
 		// O(reachable-nodes) query storm that turned a single
 		// AnalyzeImpact live walk into a multi-minute (timeout) call on
 		// a disk backend. GetInEdgesByNodeIDs collapses it to one query per depth.
-		inEdges, limited, err := getInEdgesBounded(ctx, g, current, edgesRemaining)
+		inEdges, limited, err := getInEdgesBounded(ctx, g, current, edgesRemaining, keep != nil)
 		if err != nil {
 			truncated = true
 			break
 		}
 		edgesRemaining -= edgeCount(inEdges)
+		if keep != nil {
+			inEdges = keep(inEdges)
+		}
 
 		// First pass: discover this level's new From-nodes in
 		// deterministic (current-order, edge-order) order, recording the
@@ -615,8 +623,20 @@ type boundedIncomingEdgeReader interface {
 	GetInEdgesByNodeIDsContext(context.Context, []string, int) (map[string][]*graph.Edge, bool, error)
 }
 
-func getInEdgesBounded(ctx context.Context, g graph.Store, ids []string, limit int) (map[string][]*graph.Edge, bool, error) {
-	if reader, ok := g.(boundedIncomingEdgeReader); ok {
+// boundedIncomingMetaEdgeReader is the bounded read whose edges keep their
+// metadata; the plain bounded read may leave it out.
+type boundedIncomingMetaEdgeReader interface {
+	GetInEdgesByNodeIDsWithMetaContext(context.Context, []string, int) (map[string][]*graph.Edge, bool, error)
+}
+
+// getInEdgesBounded reads at most limit incoming edges of ids. withMeta asks
+// for edges that carry their metadata; the unbounded fallback always does.
+func getInEdgesBounded(ctx context.Context, g graph.Store, ids []string, limit int, withMeta bool) (map[string][]*graph.Edge, bool, error) {
+	if withMeta {
+		if reader, ok := g.(boundedIncomingMetaEdgeReader); ok {
+			return reader.GetInEdgesByNodeIDsWithMetaContext(ctx, ids, limit)
+		}
+	} else if reader, ok := g.(boundedIncomingEdgeReader); ok {
 		return reader.GetInEdgesByNodeIDsContext(ctx, ids, limit)
 	}
 	if err := ctx.Err(); err != nil {
@@ -812,6 +832,23 @@ func getNodesContext(ctx context.Context, g graph.Store, ids []string) (map[stri
 }
 
 func LookupContext(parent context.Context, g graph.Store, seedID string) (d1, d2, d3 []Entry, hit, truncated bool) {
+	return lookupContext(parent, g, seedID, nil)
+}
+
+// EdgeFilter narrows one breadth-first level's incoming edges, keyed by the
+// node they enter, to the edges a reader shows.
+type EdgeFilter func(map[string][]*graph.Edge) map[string][]*graph.Edge
+
+// LookupFilteredContext is LookupContext over the edges keep retains from each
+// level's bounded read, for a reader that hides part of the store's adjacency.
+// It never reads a published record: those were built over every edge, hidden
+// ones included. The edge budget still counts every row read. A nil keep makes
+// it LookupContext.
+func LookupFilteredContext(parent context.Context, g graph.Store, seedID string, keep EdgeFilter) (d1, d2, d3 []Entry, hit, truncated bool) {
+	return lookupContext(parent, g, seedID, keep)
+}
+
+func lookupContext(parent context.Context, g graph.Store, seedID string, keep EdgeFilter) (d1, d2, d3 []Entry, hit, truncated bool) {
 	if g == nil {
 		return nil, nil, nil, false, false
 	}
@@ -843,14 +880,18 @@ func LookupContext(parent context.Context, g graph.Store, seedID string) (d1, d2
 			releaseTopology()
 			return nil, nil, nil, false, false
 		}
-		if d1, d2, d3, cachedTruncated, cached := readCached(n, currentBuild); cached {
-			stable := currentBuild == atomic.LoadUint64(&buildCounter)
-			mu.Unlock()
-			releaseTopology()
-			if stable {
-				return d1, d2, d3, true, cachedTruncated
+		// A published record describes unfiltered adjacency, so a filtered
+		// lookup always computes.
+		if keep == nil {
+			if d1, d2, d3, cachedTruncated, cached := readCached(n, currentBuild); cached {
+				stable := currentBuild == atomic.LoadUint64(&buildCounter)
+				mu.Unlock()
+				releaseTopology()
+				if stable {
+					return d1, d2, d3, true, cachedTruncated
+				}
+				continue
 			}
-			continue
 		}
 		mu.Unlock()
 		releaseTopology()
@@ -866,7 +907,7 @@ func LookupContext(parent context.Context, g graph.Store, seedID string) (d1, d2
 		// returns its bounded lower-bound evidence directly; a concurrent graph
 		// generation change marks that evidence truncated rather than retrying
 		// or publishing a mixed snapshot.
-		tiers, traversalTruncated := compute(ctx, g, seedID)
+		tiers, traversalTruncated := compute(ctx, g, seedID, keep)
 		if ctx.Err() != nil {
 			return entriesForTier(tiers[0]), entriesForTier(tiers[1]), entriesForTier(tiers[2]), true, true
 		}

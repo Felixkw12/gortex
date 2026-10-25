@@ -767,6 +767,13 @@ func generationReadProbes() []genProbe {
 			}
 			return edgeSliceMapTokens(m)
 		}},
+		{name: "GetInEdgesByNodeIDsWithMetaContext", run: func(t *testing.T, s *Store) []string {
+			m, _, err := s.GetInEdgesByNodeIDsWithMetaContext(context.Background(), genReadProbeIDs(), 64)
+			if err != nil {
+				t.Fatalf("GetInEdgesByNodeIDsWithMetaContext: %v", err)
+			}
+			return edgeSliceMapTokens(m)
+		}},
 		{name: "GetRepoEdges", run: func(t *testing.T, s *Store) []string {
 			return edgeTokens(s.GetRepoEdges(genReadRepo))
 		}},

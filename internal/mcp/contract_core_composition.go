@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/reach"
 	"github.com/zzet/gortex/internal/search/rerank"
 )
 
@@ -200,6 +201,21 @@ func (r *contractCoreEdges) GetOutEdgesByNodeIDs(ids []string) map[string][]*gra
 func (r *contractCoreEdges) GetInEdgesByNodeIDs(ids []string) map[string][]*graph.Edge {
 	return r.filterBatch(r.Reader.GetInEdgesByNodeIDs(ids))
 }
+
+// ImpactReachContext gives impact the bounded reach traversal over the edges
+// this wrapper shows: each level's bounded read passes through filterBatch,
+// while the traversal budget counts the rows read. Only a store has the
+// traversal; a selected reader that is not one, such as an overlay or a
+// composed view, misses, so impact walks the filtered edges live, as it does
+// without the wrapper.
+func (r *contractCoreEdges) ImpactReachContext(ctx context.Context, seedID string) (d1, d2, d3 []reach.Entry, hit, truncated bool) {
+	store, ok := r.Reader.(graph.Store)
+	if !ok {
+		return nil, nil, nil, false, false
+	}
+	return reach.LookupFilteredContext(ctx, store, seedID, r.filterBatch)
+}
+
 func (r *contractCoreEdges) filterBatch(rows map[string][]*graph.Edge) map[string][]*graph.Edge {
 	var all []*graph.Edge
 	for _, edges := range rows {
