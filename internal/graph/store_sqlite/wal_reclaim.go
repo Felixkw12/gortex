@@ -941,6 +941,16 @@ func (s *Store) walAttemptHandsOverToRequest(res *walReclaimResult) bool {
 	return !res.pressure && !res.hardCap && s.buildLaneBusy() && s.walReclaimRequestPending(time.Now())
 }
 
+// walLaneHoldCap caps the in-lane writer hold (the last resort, a bulk
+// completion, the closed gate): walReclaimMaxWriterHold unless a test has
+// lowered it.
+func (s *Store) walLaneHoldCap() time.Duration {
+	if s.walLaneHoldOverride > 0 {
+		return s.walLaneHoldOverride
+	}
+	return walReclaimMaxWriterHold
+}
+
 func (s *Store) reclaimWALInLane(ctx context.Context, cfg walReclaimConfig, ckptDB *sql.DB, res *walReclaimResult) error {
 	urgent := res.urgent
 	// A mutation already waiting for the writer wins outright (unless the log
@@ -973,7 +983,7 @@ func (s *Store) reclaimWALInLane(ctx context.Context, cfg walReclaimConfig, ckpt
 		res.reason = "adaptive_completion_deferred"
 		return errWALReclaimReadersInFlight
 	}
-	allowance := walReclaimMaxWriterHold
+	allowance := s.walLaneHoldCap()
 	if res.lastResortPromotion != nil {
 		allowance -= res.writerSpent
 		if allowance <= 0 {
@@ -1520,16 +1530,6 @@ func logWALReclaimOutcome(res walReclaimResult, next time.Duration, skips *walRe
 			skips.count, skips.last = 0, now
 		}
 	}
-}
-
-// walLogIsReset reports whether the log is at its start: an empty file, or a
-// wal-index with no frames. The caller holds the write gate.
-func walLogIsReset(dbPath, walPath string) bool {
-	if walFileSize(walPath) == 0 {
-		return true
-	}
-	snap, ok := readWALIndexSnapshot(dbPath)
-	return ok && snap.MxFrame == 0
 }
 
 // The in-lane reset's open-gate stage. The wait for older readers runs
