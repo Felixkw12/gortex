@@ -22,6 +22,10 @@ const testCommonDir = "/repo/.git"
 // saga stops exactly where a crashed process would have.
 var errHookFailed = errors.New("hook refused on purpose")
 
+// errReleaseDeferred is what a fake release returns while a test holds the
+// graph, standing in for a reader the real owner waits out.
+var errReleaseDeferred = errors.New("release deferred on purpose")
+
 // The fakes have to keep matching the extension points they stand in for. A
 // signature drift shows up here as one compile error rather than as a
 // confusing argument mismatch at every wiring site.
@@ -40,6 +44,8 @@ type recordingHooks struct {
 	calls       []string
 	failPurge   int
 	failRelease int
+	// deferRelease names a graph whose release is deferred until it is reset.
+	deferRelease string
 	// onPurge runs inside the purge, which is where the layer owner stops the
 	// builder that has been routing for this checkout. The cycle that builder
 	// was already running finishes during the stop, so this is the one place a
@@ -69,7 +75,21 @@ func (h *recordingHooks) ReleaseGraph(_ context.Context, graphID string) error {
 		h.failRelease--
 		return errHookFailed
 	}
+	if graphID == h.deferRelease {
+		return errReleaseDeferred
+	}
 	return nil
+}
+
+func (h *recordingHooks) CleanupDeferred(err error) bool {
+	return errors.Is(err, errReleaseDeferred)
+}
+
+// setDeferRelease defers graphID's release, or stops deferring with "".
+func (h *recordingHooks) setDeferRelease(graphID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.deferRelease = graphID
 }
 
 // snapshot returns the calls recorded so far.

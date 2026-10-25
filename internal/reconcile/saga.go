@@ -117,6 +117,10 @@ type sagaTarget struct {
 	FamilyID        string    `json:"family_id,omitempty"`
 	GraphID         string    `json:"graph_id,omitempty"`
 	PrimaryEpoch    int64     `json:"primary_epoch,omitempty"`
+	// Deferred records that a phase stopped because the hooks deferred it.
+	// Every entry point reports a deferred teardown as done, so a later
+	// attempt that finds this set must not report it again.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 // cleanupID is the journal key. It is derived from the target rather than
@@ -340,6 +344,9 @@ func (r *Reconciler) runSaga(ctx context.Context, target sagaTarget) error {
 			}
 		}
 		if err := r.runPhase(ctx, target); err != nil {
+			if r.cleanupDeferred(err) {
+				target.Deferred = true
+			}
 			return errors.Join(err, r.persistPhase(ctx, id, target, store_sqlite.CleanupPhaseFailed))
 		}
 	}

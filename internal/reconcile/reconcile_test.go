@@ -719,6 +719,117 @@ func TestRemovalGuardLossKeepsThePassGoing(t *testing.T) {
 	})
 }
 
+// TestDeferredReleaseKeepsThePassGoing covers a forget saga whose graph
+// release is deferred because a reader still holds the graph. The checkout is
+// withdrawn and its saga journaled, so the pass reports it forgotten and still
+// reconciles the rest of the family. A later pass drives the same saga again,
+// and reports it neither while the holder stays nor when the saga finishes.
+func TestDeferredReleaseKeepsThePassGoing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := Config{AvailabilityGrace: time.Minute, RemovalGrace: time.Minute}
+		f := newFixture(t, cfg)
+		f.seedPrimaryGraph("graph-primary")
+		// The admin names order the pass: the held one is reconciled first, so
+		// a pass that aborted on its deferral would never reach the other.
+		f.git.setRecords(presentRecord("wt-a", "/repo/wt-a"), presentRecord("wt-b", "/repo/wt-b"))
+		f.git.samples["/repo/wt-a"] = gitSampleExisting(volumeA)
+		f.git.samples["/repo/wt-b"] = gitSampleExisting(volumeA)
+		first := f.reconcile()
+		held := f.entry(first, "wt-a")
+		calm := f.entry(first, "wt-b")
+		f.seedOwnedGraph("graph-held", held.CheckoutID)
+		f.hooks.setDeferRelease("graph-held")
+
+		f.git.setRecords()
+		f.reconcile()
+		synctest.Sleep(cfg.RemovalGrace)
+		report := f.reconcile()
+
+		if entry := f.entry(report, "wt-a"); entry.Action != ActionForgotten || entry.State != "" {
+			t.Fatalf("deferred checkout = %+v, want forgotten", entry)
+		}
+		if entry := f.entry(report, "wt-b"); entry.Action != ActionForgotten {
+			t.Fatalf("the pass stopped at the deferred release: wt-b = %q", entry.Action)
+		}
+		f.checkout(held.CheckoutID) // The saga has not deleted the row before its release.
+		f.assertNoCheckoutRows(calm.CheckoutID)
+
+		if entry := f.entry(f.reconcile(), "wt-a"); entry.Action != ActionGuardLost {
+			t.Fatalf("a pass during the deferral = %q, want guard_lost", entry.Action)
+		}
+		f.hooks.failRelease = 1
+		if _, err := f.rec.ReconcileFamily(context.Background(), f.familyID, "/repo"); !errors.Is(err, errHookFailed) {
+			t.Fatalf("a release that failed rather than deferred = %v, want the failure", err)
+		}
+
+		f.hooks.setDeferRelease("")
+		if entry := f.entry(f.reconcile(), "wt-a"); entry.Action != ActionGuardLost {
+			t.Fatalf("the pass that finished the deferred saga = %q, want guard_lost", entry.Action)
+		}
+		f.assertNoCheckoutRows(held.CheckoutID)
+		if entries := f.journal(); len(entries) != 0 {
+			t.Fatalf("the finished saga left journal entries: %+v", entries)
+		}
+	})
+}
+
+// TestDeferredPrimaryClosureMintsNothingUnderIt covers a primary closure whose
+// release is deferred while git still lists a worktree the closure forgot. A
+// second dedicated graph keeps the family alive, so nothing but the journaled
+// closure says the primary is going: a pass during the deferral must not mint
+// the forgotten worktree a new identity under it.
+func TestDeferredPrimaryClosureMintsNothingUnderIt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		cfg := Config{AvailabilityGrace: time.Minute, RemovalGrace: time.Minute}
+		f := newFixture(t, cfg)
+		f.seedPrimaryGraph("graph-primary")
+		f.git.setRecords(presentRecord("dep", "/repo/dep"), presentRecord("ded", "/repo/ded"), presentRecord("wt", "/repo/wt"))
+		for _, root := range []string{"/repo/dep", "/repo/ded", "/repo/wt"} {
+			f.git.samples[root] = gitSampleExisting(volumeA)
+		}
+		first := f.reconcile()
+		owner := f.entry(first, "wt")
+		ded := f.entry(first, "ded")
+		if err := f.catalog.UpsertDedicatedGraph(ctx, store_sqlite.DedicatedGraph{
+			GraphID: "graph-primary", OwnerCheckoutID: owner.CheckoutID, RepoPrefix: "prefix-graph-primary",
+			FamilyID: f.familyID, IsPrimaryBase: true, State: "graph_ready",
+		}); err != nil {
+			t.Fatalf("give the primary an owner: %v", err)
+		}
+		row := f.checkout(ded.CheckoutID)
+		row.DesiredMode, row.EffectiveMode = store_sqlite.CheckoutModeDedicated, store_sqlite.CheckoutModeDedicated
+		if err := f.catalog.UpsertCheckout(ctx, row); err != nil {
+			t.Fatalf("make ded dedicated: %v", err)
+		}
+		f.seedOwnedGraph("graph-ded", ded.CheckoutID)
+		f.hooks.setDeferRelease("graph-primary")
+
+		f.git.setRecords(presentRecord("dep", "/repo/dep"), presentRecord("ded", "/repo/ded"))
+		f.reconcile()
+		synctest.Sleep(cfg.RemovalGrace)
+		if entry := f.entry(f.reconcile(), "wt"); entry.Action != ActionPrimaryClosureRetired {
+			t.Fatalf("deferred owner = %q, want primary_closure_retired", entry.Action)
+		}
+
+		during := f.reconcile()
+		if during.PrimaryGraphID != "" || during.Code != graphview.CodeNoPrimary {
+			t.Fatalf("a pass during the deferral serves primary %q (code %q)", during.PrimaryGraphID, during.Code)
+		}
+		if entry := f.entry(during, "dep"); entry.Action != ActionObserved {
+			t.Fatalf("forgotten dependent = %q, want observed", entry.Action)
+		}
+
+		f.hooks.setDeferRelease("")
+		f.reconcile()
+		for _, checkout := range f.checkouts() {
+			if checkout.CheckoutID != ded.CheckoutID {
+				t.Fatalf("the finished closure left %s (%s) behind", checkout.AdminName, checkout.EffectiveMode)
+			}
+		}
+	})
+}
+
 // TestPrimaryClosureGuardLossIsReported covers the other saga entry point a
 // removal can reach. The family's primary epoch moves after the pass read it,
 // which is the catalog telling the pass that the primary it was about to
