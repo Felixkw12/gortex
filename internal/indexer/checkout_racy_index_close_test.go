@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/gitstate"
+	"github.com/zzet/gortex/internal/graphview"
 )
 
 func TestCoordinatorCloseJoinsItsStartTimeIndexHeal(t *testing.T) {
@@ -181,11 +182,31 @@ func TestCheckoutLifecycleSeedHealersStopAndJoinOnClose(t *testing.T) {
 	default:
 		t.Fatal("Close returned before the refresh finished")
 	}
-	// A later Seed can fail because admission is closed, but must not refresh.
-	_ = f.lc.Seed(t.Context())
-	select {
-	case <-entered:
-		t.Fatal("Seed started a refresh after Close")
-	case <-time.After(100 * time.Millisecond):
+	// Seed itself refuses the closed repository admission before its heal loop.
+	require.ErrorIs(t, f.lc.Seed(t.Context()), graphview.ErrRepositoryAdmissionsStopped)
+}
+
+func TestCheckoutLifecycleClosedAdmissionRefusesSeedHealer(t *testing.T) {
+	f := newCoordinatorFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	l := &CheckoutLifecycle{catalog: f.catalog, transitionCtx: ctx}
+	refreshes := 0
+	old := racyIndexRefresh
+	racyIndexRefresh = func(context.Context, *gitstate.DirtySampler) (gitstate.RacyIndexReport, gitstate.RacyIndexReport, bool, error) {
+		refreshes++
+		return gitstate.RacyIndexReport{}, gitstate.RacyIndexReport{}, false, nil
 	}
+	t.Cleanup(func() { racyIndexRefresh = old })
+	// Both ready checkouts must reach the refresh seam with a live context.
+	l.healFamilyRacyIndexes(ctx, f.familyID)
+	require.Equal(t, 2, refreshes)
+	refreshes = 0
+	l.transitionMu.Lock()
+	l.transitionClosed = true
+	l.transitionMu.Unlock()
+	l.startFamilyRacyIndexHeal(ctx, f.familyID)
+	l.transitionWG.Wait()
+	require.NoError(t, ctx.Err(), "only closed admission may refuse this healer")
+	require.Zero(t, refreshes, "closed transition admission started a healer")
 }
