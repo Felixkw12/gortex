@@ -821,7 +821,9 @@ func (g *Graph) reindexStoredEdges(batch []EdgeReindex) {
 		if moving[old] {
 			continue // A preceding move already consumed this old identity.
 		}
-		if !r.RefreshIdentity && !created[old] && g.storedEdge(old) == nil {
+		// A refresh of a row the delta does not hold is a no-op too, and it must
+		// not mark its new identity created for the rows after it.
+		if !created[old] && g.storedEdge(old) == nil {
 			continue
 		}
 		prepared = append(prepared, r)

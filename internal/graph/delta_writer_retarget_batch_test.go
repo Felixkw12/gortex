@@ -257,6 +257,39 @@ func TestDeltaWriterReindexDuplicateOldIdentitySameTarget(t *testing.T) {
 	}
 }
 
+func TestDeltaWriterReindexAfterMissingRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name, refreshTo, dependentTo string
+	}{
+		{"moved_then_updated", "b::Z", "b::Z"},
+		{"moved_then_retargeted", "b::Z", "b::X"},
+		{"refreshed_then_updated", "b::Y", "b::Y"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := New()
+			other := &Edge{From: "c::C", To: "b::X", Kind: EdgeCalls, FilePath: "c.go", Line: 1}
+			base.AddEdge(cloneDeltaEdge(other))
+			dw := NewDeltaWriter(base, nil)
+			// No a::A -> b::Y row exists, so the refresh is a no-op and the
+			// dependent row names an identity nothing created.
+			refreshed := &Edge{From: "a::A", To: tc.refreshTo, Kind: EdgeCalls, FilePath: "a.go", Line: 10, Origin: "refresh"}
+			dependent := &Edge{From: "a::A", To: tc.dependentTo, Kind: EdgeCalls, FilePath: "a.go", Line: 10, Origin: "dependent"}
+			dw.ReindexEdges([]EdgeReindex{
+				{Edge: refreshed, OldTo: "b::Y", RefreshIdentity: true, OldFilePath: "a.go", OldLine: 10},
+				{Edge: dependent, OldTo: tc.refreshTo},
+			})
+			assert.Empty(t, dw.GetOutEdges("a::A"))
+			for _, target := range []string{"b::X", "b::Y", "b::Z"} {
+				for _, row := range dw.GetInEdges(target) {
+					assert.NotEqual(t, "a::A", row.From, "incoming row at %s has no outgoing slot", target)
+				}
+			}
+			assert.Equal(t, []*Edge{other}, dw.AllEdges())
+			assert.NoError(t, dw.VerifyEdgeIdentities())
+		})
+	}
+}
+
 func TestDeltaWriterRetargetPreservesExistingDestinationPayload(t *testing.T) {
 	for _, target := range []string{"b::Y", "unresolved::Y"} {
 		t.Run(target, func(t *testing.T) {
