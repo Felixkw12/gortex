@@ -178,9 +178,13 @@ func TestScopedOutlineMetadataEncodings(t *testing.T) {
 			}
 		}
 	}
-	for _, kind := range []string{"calls", "imports"} {
-		if _, err := s.writerDB.Exec(`INSERT INTO edges(from_id,to_id,kind,line,view_gen,meta) VALUES('a','b',?,100,0,?)`, kind, `{"via":"spring.Bean"}`); err != nil {
-			t.Fatal(err)
+	for i, text := range []string{`{"via":"spring.Bean"}`, string(flat)} {
+		// SQLite TEXT may contain the flat codec's leading NUL; length(TEXT)
+		// would report zero, while the decoder still sees the complete bytes.
+		for _, kind := range []string{"calls", "imports"} {
+			if _, err := s.writerDB.Exec(`INSERT INTO edges(from_id,to_id,kind,line,view_gen,meta) VALUES('a','b',?,?,0,?)`, kind, 100+i, text); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	got, err := s.ScopedOutlineCountsFiltered(graph.NodeScope{RepoAllow: map[string]bool{"repo": true}}, graph.OutlineEdgeFilter{ExcludeVia: "spring.Bean"})
