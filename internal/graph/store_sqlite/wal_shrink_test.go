@@ -185,3 +185,64 @@ func TestWALReclaimTruncatesASmallLogAtOnce(t *testing.T) {
 	require.False(t, s.walShrinkNeeded())
 	require.Equal(t, int64(walShrinkKeepBytes), writerJournalLimit(t, s))
 }
+
+// Once a statement's interrupt fired during the call, the driver returns the
+// context's error even when SQLite finished the work, so an in-place reset can
+// complete just after its deadline. The reset connection's observer runs the
+// reset's statements on a context of its own and then ends the reset's
+// context, as the hold's deadline or a queued writer would. The reset reads
+// from the log, with the writer still held, whether it happened.
+func TestWALInPlaceResetInterruptedAfterItsWork(t *testing.T) {
+	for _, kind := range []string{"marker"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "0")
+			prevInPlace := walShrinkInPlaceBytes
+			walShrinkInPlaceBytes = 1 // every log is reset in place
+			var s *Store
+			var armed atomic.Bool
+			var cancel context.CancelFunc
+			var workErr error
+			prevObserver := walResetCheckpointConnObserver
+			walResetCheckpointConnObserver = func(_ context.Context, conn *sql.Conn) {
+				if !armed.CompareAndSwap(true, false) {
+					return
+				}
+				var result walCheckpointResult
+				workErr = s.restartWALInPlaceOn(context.Background(), conn, &result)
+				cancel()
+			}
+			t.Cleanup(func() { // after the store closes
+				walShrinkInPlaceBytes, walResetCheckpointConnObserver = prevInPlace, prevObserver
+			})
+			var path string
+			s, path = openWALReclaimStore(t)
+			t.Cleanup(func() { _ = s.Close() })
+			seedWALChurnTable(t, s)
+			growWAL(t, s, 4)
+			ckpt, err := openWALReclaimCheckpointDB(path)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = ckpt.Close() })
+			_, err = checkpointWALOnceOn(t.Context(), ckpt, "PASSIVE")
+			require.NoError(t, err)
+			walPath := path + "-wal"
+			sizeBefore := walFileSize(walPath)
+			resetsBefore := s.WALReclaimStats().ShrinkInPlaceResets
+
+			var ctx context.Context
+			ctx, cancel = context.WithCancel(t.Context())
+			armed.Store(true)
+			s.writeMu.Lock()
+			_, err = s.resetWALForReclaim(ctx)
+			s.writeMu.Unlock()
+			cancel()
+			require.NoError(t, workErr)
+			require.False(t, armed.Load(), "precondition: the observer ran the reset's statements")
+
+			require.NoError(t, err, "the log restarted: the reset counts")
+			require.True(t, s.walShrinkPending.Load())
+			require.Equal(t, resetsBefore+1, s.WALReclaimStats().ShrinkInPlaceResets)
+			require.Equal(t, int64(-1), writerJournalLimit(t, s), "no later commit may truncate the file in one call")
+			require.Equal(t, sizeBefore, walFileSize(walPath), "the file is left to the shrink")
+		})
+	}
+}

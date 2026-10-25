@@ -1532,16 +1532,6 @@ func logWALReclaimOutcome(res walReclaimResult, next time.Duration, skips *walRe
 	}
 }
 
-// walLogIsReset reports whether the log is at its start: an empty file, or a
-// wal-index with no frames. The caller holds the write gate.
-func walLogIsReset(dbPath, walPath string) bool {
-	if walFileSize(walPath) == 0 {
-		return true
-	}
-	snap, ok := readWALIndexSnapshot(dbPath)
-	return ok && snap.MxFrame == 0
-}
-
 // The in-lane reset's open-gate stage. The wait for older readers runs
 // without the writer, and edits go on meanwhile; the writer is taken only for
 // the last backfill and the reset, at most walReclaimResetHold each time (the
@@ -1855,15 +1845,6 @@ func (s *Store) reclaimWALResetHoldOnce(ctx context.Context, cfg walReclaimConfi
 	_, terr := s.resetWALForReclaim(writer.resetContext(yctx))
 	if observer := walReclaimRoundObserver; observer != nil {
 		observer("short_reset_after", 0, 0, terr)
-	}
-	if hook := walIdleResetResultHook; hook != nil {
-		terr = hook(terr)
-	}
-	if terr != nil && walLogIsReset(s.dbPath, s.dbPath+"-wal") {
-		// The reset completed and the interrupt (a writer queued, or the
-		// hold ran out) arrived after it: the log is reset, and counted so.
-		// Checked before the gate is released, so no write can refill it.
-		terr = nil
 	}
 	if terr == nil {
 		res.openGate = true

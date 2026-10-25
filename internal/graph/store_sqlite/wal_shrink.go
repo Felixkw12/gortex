@@ -75,7 +75,9 @@ var errWALResetNotRestarted = errors.New("store_sqlite: wal in-place reset: the 
 
 // resetWALForReclaim is the reclaim's reset: a TRUNCATE checkpoint for a small
 // log, the in-place reset (and a pending shrink) for a big one. The caller
-// holds the write gate and has backfilled the log.
+// holds the write gate and has backfilled the log. A reset that completed
+// after its context ended returns nil (see walResetInterrupted), so every
+// caller counts it the same way.
 // The reset of the log runs on the writer connection (the caller holds
 // writeMu), never on the reclaim's checkpoint connection: a connection
 // discards its page cache when another connection changes the log's header,
@@ -102,9 +104,26 @@ func (s *Store) resetWALForReclaimWithBusyTimeout(ctx context.Context, busyMilli
 			result, err = checkpointWALOnceOn(ctx, conn, "TRUNCATE")
 			return err
 		})
+		if walResetInterrupted(err) && walFileSize(walPath) == 0 {
+			// The TRUNCATE emptied the file: the log is reset. mxFrame 0
+			// alone would not show it, since the header is reset before the
+			// ftruncate, which can still fail. The writer is held, so no
+			// commit can have refilled the file.
+			return result, nil
+		}
 		return result, err
 	}
 	return s.resetWALInPlaceLockedWithBusyTimeout(ctx, busyMillis)
+}
+
+// walResetInterrupted reports a reset whose error is only its context ending.
+// Once a statement's interrupt fired during the call, the driver returns
+// ctx.Err() in place of its result even when SQLite finished the work, and
+// SQLite's wait for readers to leave the log never checks the interrupt, so a
+// reset can complete just after its deadline. The reset then reads from the
+// log whether it happened, while the writer is still held.
+func walResetInterrupted(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 // walResetBusyMillis bounds how long a reset on the writer connection waits on
@@ -162,6 +181,7 @@ func (s *Store) withWriterResetConnWithBusyTimeout(ctx context.Context, busyMill
 }
 
 func (s *Store) resetWALInPlaceLockedWithBusyTimeout(ctx context.Context, busyMillis int64) (result walCheckpointResult, err error) {
+	before, beforeOK := readWALReclaimFrontier(s.dbPath)
 	if err := s.setWriterJournalLimitLocked(ctx, -1); err != nil {
 		return result, fmt.Errorf("wal in-place reset: lift the writer's journal_size_limit: %w", err)
 	}
@@ -176,6 +196,16 @@ func (s *Store) resetWALInPlaceLockedWithBusyTimeout(ctx context.Context, busyMi
 	err = s.withWriterResetConnWithBusyTimeout(ctx, busyMillis, func(conn *sql.Conn) error {
 		return s.restartWALInPlaceOn(ctx, conn, &result)
 	})
+	if walResetInterrupted(err) && beforeOK {
+		// The marker committed: the log restarted at its first frame under a
+		// new salt. Decided before the deferred restore above, so the reset
+		// counts with its shrink pending and the writer's limit still lifted.
+		// A RESTART that completed late does not count: without the marker
+		// the log has not restarted, and it restarts only at the next commit.
+		if after, ok := readWALReclaimFrontier(s.dbPath); ok && after.salt != before.salt && after.mx <= walShrinkMaxRestartFrames {
+			err = nil
+		}
+	}
 	if err != nil {
 		return result, err
 	}
