@@ -38,7 +38,7 @@ func TestResolverProjectionRowsIgnoreMetadata(t *testing.T) {
 	store.AddBatch([]*graph.Node{
 		{
 			ID: "a::src/main.go", Kind: graph.KindFile, Name: "main.go",
-			FilePath: "a::src/main.go", RepoPrefix: "a", WorkspaceID: "workspace-a",
+			FilePath: "a::src/main.go", RepoPrefix: "a", WorkspaceID: "workspace-a", Language: "go",
 			Meta: map[string]any{"large": make([]byte, 1<<20)},
 		},
 		{
@@ -48,7 +48,7 @@ func TestResolverProjectionRowsIgnoreMetadata(t *testing.T) {
 		},
 		{
 			ID: "b::lib.go", Kind: graph.KindFile, Name: "lib.go",
-			FilePath: "b::lib.go", RepoPrefix: "b", WorkspaceID: "workspace-b",
+			FilePath: "b::lib.go", RepoPrefix: "b", WorkspaceID: "workspace-b", Language: "go",
 			Meta: map[string]any{"large": make([]byte, 1<<20)},
 		},
 	}, nil)
@@ -70,8 +70,8 @@ func TestResolverProjectionRowsIgnoreMetadata(t *testing.T) {
 
 	globalFiles := collectResolverProjection(store.FileNodeIdentitiesSeq(nil))
 	wantGlobalFiles := []graph.FileNodeIdentity{
-		{ID: "a::src/main.go", FilePath: "a::src/main.go", RepoPrefix: "a", WorkspaceID: "workspace-a"},
-		{ID: "b::lib.go", FilePath: "b::lib.go", RepoPrefix: "b", WorkspaceID: "workspace-b"},
+		{ID: "a::src/main.go", FilePath: "a::src/main.go", RepoPrefix: "a", WorkspaceID: "workspace-a", Language: "go"},
+		{ID: "b::lib.go", FilePath: "b::lib.go", RepoPrefix: "b", WorkspaceID: "workspace-b", Language: "go"},
 	}
 	if !reflect.DeepEqual(globalFiles, wantGlobalFiles) {
 		t.Fatalf("global file identities = %#v, want %#v", globalFiles, wantGlobalFiles)

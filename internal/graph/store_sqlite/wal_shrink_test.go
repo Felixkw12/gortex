@@ -30,6 +30,12 @@ func writerJournalLimit(t *testing.T, s *Store) int64 {
 // would hold the writer for most of a second.
 func TestWALReclaimShrinksABigLogInBoundedSlices(t *testing.T) {
 	t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "0")
+	// The case asks for the reset itself, so it must own the one background
+	// checkpoint slot. With the reclaim loop off, the store's pressure PASSIVE
+	// starts at its 5 s poll while the log is still growing under the pinned
+	// reader; on a slow host that pass is still running when the reset is
+	// asked for, and the reset skips (checkpoint_in_flight).
+	t.Setenv("GORTEX_SQLITE_WAL_AUTOCHECKPOINT_PAGES", "0")
 	const sliceCap = 32 << 20
 	prevInPlace, prevCap, prevTruncate := walShrinkInPlaceBytes, walShrinkSliceCap, walShrinkTruncate
 	walShrinkInPlaceBytes, walShrinkSliceCap = 128<<20, sliceCap
