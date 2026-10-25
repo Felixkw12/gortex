@@ -118,11 +118,10 @@ var walResetBusyMillis = sqliteCheckpointBusyTimeoutMillis
 // The callback must not retain the connection or start asynchronous work.
 var walResetCheckpointConnObserver func(context.Context, *sql.Conn)
 
-// withWriterResetConn runs fn on the writer connection with its busy timeout
+// withWriterResetConn runs fn on the active write connection (the writer, or
+// the pinned bulk connection inside a bulk window) with its busy timeout
 // lowered to walResetBusyMillis (or what is left of ctx's deadline), restored
-// afterwards. The caller holds
-// writeMu. A store without a separate writer pool (in-memory) or inside a
-// bulk window uses the active write connection as it is.
+// afterwards. The caller holds writeMu.
 func (s *Store) withWriterResetConn(ctx context.Context, fn func(conn *sql.Conn) error) error {
 	return s.withWriterResetConnWithBusyTimeout(ctx, int64(walResetBusyMillis), fn)
 }
@@ -133,19 +132,28 @@ func (s *Store) withWriterResetConnWithBusyTimeout(ctx context.Context, busyMill
 		return err
 	}
 	defer release()
-	if s.bulkConn == nil {
-		busy := busyMillis
-		if deadline, ok := ctx.Deadline(); ok {
-			if left := time.Until(deadline).Milliseconds(); left < busy {
-				busy = max(left, 0)
-			}
+	// SQLite's wait for readers to leave the log never checks the interrupt,
+	// so this timeout, not ctx, bounds how long a reset keeps the writer. The
+	// pinned bulk connection needs it as much as the writer's: left at its
+	// 5 s, a bulk completion's reset held the writer 3.9 s and 5.1 s against
+	// the 2 s cap.
+	busy := busyMillis
+	if deadline, ok := ctx.Deadline(); ok {
+		if left := time.Until(deadline).Milliseconds(); left < busy {
+			busy = max(left, 0)
 		}
-		if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout = %d`, busy)); err != nil {
-			return err
-		}
-		defer func() {
-			_, _ = conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, sqliteBusyTimeoutMillis))
-		}()
+	}
+	var prev int64
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&prev); err != nil {
+		return err
+	}
+	// Restored on every exit: SQLite applies the PRAGMA when it prepares it,
+	// so even a call that reports ctx's error may have lowered it.
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, prev))
+	}()
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout = %d`, busy)); err != nil {
+		return err
 	}
 	if observe := walResetCheckpointConnObserver; observe != nil {
 		observe(ctx, conn)

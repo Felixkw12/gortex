@@ -71,9 +71,10 @@ type storeCore struct {
 
 	// Test-only overrides of fixed real-time budgets. Zero means the
 	// production constant; tests set them before the store does any work.
-	// See retirementQuantum and walPressureHold.
+	// See retirementQuantum, walPressureHold and walLaneHoldCap.
 	retirementQuantumOverride time.Duration
 	walPressureHoldOverride   time.Duration
+	walLaneHoldOverride       time.Duration
 
 	// derivedCorrectionEpochs counts finished derived-row corrections per
 	// generation (generation id → *atomic.Uint64); see derivation_stamps.go.
