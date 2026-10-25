@@ -180,7 +180,7 @@ func (s *Store) NodeIdentityMaskSummariesContext(ctx context.Context, masks []No
 
 func nodeIdentitySummaryQuery(count int) string {
 	return `SELECT ` + lookupNodeSummaryCols + `
-FROM nodes WHERE view_gen = ? AND id IN (` + strings.TrimSuffix(strings.Repeat("?,", count), ",") + `) ORDER BY id`
+FROM ` + nodesByIDSource + ` WHERE view_gen = ? AND id IN (` + strings.TrimSuffix(strings.Repeat("?,", count), ",") + `) ORDER BY id`
 }
 
 // validateNodeIdentityMasks runs after the publisher seals and drains writers.

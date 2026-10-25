@@ -3851,10 +3851,11 @@ func (s *Store) queryNodesSQL(q string, args ...any) []*graph.Node {
 // avoids surprising the parser on monster lists.
 const lookupChunkSize = 5000
 
-// GetNodesByIDs collapses N per-id SELECTs into ⌈N/chunk⌉ queries
-// of the form `SELECT … FROM nodes WHERE id IN (?, ?, …)`. The
-// resolver fires hundreds of thousands of these on a large pass;
-// chunking turns hundreds of seconds into single-digit seconds.
+// GetNodesByIDs collapses N per-id SELECTs into ⌈N/chunk⌉ queries of the
+// form `SELECT … FROM nodes INDEXED BY sqlite_autoindex_nodes_1 WHERE id IN
+// (?, ?, …) AND view_gen = ?` (see nodesByIDSource). The resolver fires
+// hundreds of thousands of these on a large pass; chunking turns hundreds of
+// seconds into single-digit seconds.
 func (s *Store) GetNodesByIDs(ids []string) map[string]*graph.Node {
 	if len(ids) == 0 {
 		return nil
@@ -3878,7 +3879,7 @@ func (s *Store) GetNodesByIDs(ids []string) map[string]*graph.Node {
 		end := minInt(i+lookupChunkSize, len(uniq))
 		chunk := uniq[i:end]
 		placeholders := strings.Repeat(",?", len(chunk))[1:]
-		q := `SELECT ` + nodeCols + ` FROM nodes WHERE id IN (` + placeholders + `) AND view_gen = ?`
+		q := `SELECT ` + nodeCols + ` FROM ` + nodesByIDSource + ` WHERE id IN (` + placeholders + `) AND view_gen = ?`
 		args := make([]any, 0, len(chunk)+1)
 		for _, id := range chunk {
 			args = append(args, id)

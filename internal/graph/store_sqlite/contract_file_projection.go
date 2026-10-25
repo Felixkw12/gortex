@@ -99,7 +99,7 @@ func (s *Store) loadContractProjection(ctx context.Context, paths, ids []string,
 	for start := 0; start < len(ids); start += lookupChunkSize {
 		chunk := ids[start:min(start+lookupChunkSize, len(ids))]
 		args := append(toAnyArgs(chunk), s.viewGen, budget+1)
-		query := `SELECT ` + lookupNodeCols + ` FROM nodes WHERE id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ? LIMIT ?`
+		query := `SELECT ` + lookupNodeCols + ` FROM ` + nodesByIDSource + ` WHERE id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ? LIMIT ?`
 		nodes, err := s.contractProjectionNodes(ctx, tx, query, args, &budget)
 		if err != nil {
 			return graph.ContractFileProjection{}, err

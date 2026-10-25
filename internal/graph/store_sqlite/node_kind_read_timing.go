@@ -28,7 +28,7 @@ func (s *Store) observedNodeKindsBatch(ctx context.Context, ids []string, observ
 		}
 		observer(timing)
 	}()
-	query := `SELECT id, kind, file_path, repo_prefix FROM nodes WHERE id IN (` + inPlaceholders(len(ids)) + `) AND view_gen = ?`
+	query := `SELECT id, kind, file_path, repo_prefix FROM ` + nodesByIDSource + ` WHERE id IN (` + inPlaceholders(len(ids)) + `) AND view_gen = ?`
 	driverTiming := nodeKindDriverTiming{}
 	queryCtx := context.WithValue(ctx, nodeKindGateTimingKey{}, &driverTiming)
 	queryStart := time.Now()

@@ -43,6 +43,23 @@ const lookupNodeColsLight = lookupNodeColsLightPrefix
 // Meta map (or retain docs/signatures) for every node.
 var lookupNodeSummaryCols = strings.SplitN(lookupNodeCols, ", signature", 2)[0]
 
+// nodesPrimaryKeyIndexName is the name SQLite gives the (id, view_gen) primary
+// key of the WITHOUT ROWID nodes table; pragma index_list reports it with
+// origin 'pk'. The key has no sqlite_schema row of its own: SQLite derives the
+// name from the table's declaration on every schema load, so it holds as well
+// for a table rebuilt under another name and renamed to nodes.
+const nodesPrimaryKeyIndexName = "sqlite_autoindex_nodes_1"
+
+// nodesByIDSource is the FROM source of every read that loads node columns for
+// a list of ids on one generation: it pins the primary key, one probe per id.
+// Left to the planner, nodes_by_generation (view_gen, id) keys the same
+// predicate, and SQLite settles the near tie between the two by the believed
+// table size, not by either index's statistics: a 188k-node store took the
+// generation index (an index seek plus a primary-key probe per id), and a
+// truthful statistics row for the key did not move it. Reads that project only
+// id keep nodes_by_generation, which covers them.
+const nodesByIDSource = `nodes INDEXED BY ` + nodesPrimaryKeyIndexName
+
 const lookupEdgeCols = `from_id, to_id, kind, file_path, line, confidence, confidence_label, origin, tier, cross_repo, meta, resolve_terminal, resolve_terminal_reason, semantic_source`
 const lookupQualifiedEdgeCols = `e.from_id, e.to_id, e.kind, e.file_path, e.line, e.confidence, e.confidence_label, e.origin, e.tier, e.cross_repo, e.meta, e.resolve_terminal, e.resolve_terminal_reason, e.semantic_source`
 
@@ -262,7 +279,7 @@ func (s *Store) GetNodesByIDsContext(ctx context.Context, ids []string) (map[str
 		}
 		end := minInt(i+lookupChunkSize, len(uniq))
 		chunk := uniq[i:end]
-		q := `SELECT ` + lookupNodeCols + ` FROM nodes WHERE id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ?`
+		q := `SELECT ` + lookupNodeCols + ` FROM ` + nodesByIDSource + ` WHERE id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ?`
 		rows, err := s.db.QueryContext(ctx, q, append(toAnyArgs(chunk), s.viewGen)...)
 		if err != nil {
 			return out, fmt.Errorf("get nodes by ids: %w", err)

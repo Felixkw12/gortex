@@ -698,7 +698,7 @@ func (s *Store) contractSeedNodesContext(ctx context.Context, repo string, after
 		for _, id := range keys {
 			args = append(args, id)
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT `+lookupNodeCols+` FROM nodes WHERE view_gen=? AND id IN (`+inPlaceholders(len(keys))+`)`, args...)
+		rows, err := tx.QueryContext(ctx, `SELECT `+lookupNodeCols+` FROM `+nodesByIDSource+` WHERE view_gen=? AND id IN (`+inPlaceholders(len(keys))+`)`, args...)
 		if err != nil {
 			return nil, err
 		}

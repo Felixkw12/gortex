@@ -53,7 +53,7 @@ func (s *Store) ReadConstantValueProjectionContext(ctx context.Context, ids []st
 		if err := rows.Close(); err != nil {
 			return graph.ConstantValueProjection{}, err
 		}
-		rows, err = tx.QueryContext(ctx, `SELECT id,file_path FROM nodes WHERE view_gen=? AND id IN (`+inPlaceholders(len(chunk))+`)`, args...)
+		rows, err = tx.QueryContext(ctx, `SELECT id,file_path FROM `+nodesByIDSource+` WHERE view_gen=? AND id IN (`+inPlaceholders(len(chunk))+`)`, args...)
 		if err != nil {
 			return graph.ConstantValueProjection{}, err
 		}

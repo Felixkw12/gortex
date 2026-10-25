@@ -116,7 +116,7 @@ func (s *Store) findFilteredNameCandidatesIndexed(ctx context.Context, tx *sql.T
 		for _, id := range chunk {
 			args = append(args, id)
 		}
-		q := `SELECT ` + nameCandidateCols + ` FROM nodes WHERE view_gen = ? AND id IN (` + inPlaceholders(len(chunk)) + `) ORDER BY id`
+		q := `SELECT ` + nameCandidateCols + ` FROM ` + nodesByIDSource + ` WHERE view_gen = ? AND id IN (` + inPlaceholders(len(chunk)) + `) ORDER BY id`
 		remaining := 0
 		if limit > 0 {
 			remaining = limit - len(kept)
@@ -147,7 +147,7 @@ func hydrateNameCandidateIDs(ctx context.Context, tx *sql.Tx, generation int64, 
 			return nil, err
 		}
 		chunk := ids[start:min(start+generationNameIndexFetchChunk, len(ids))]
-		q := `SELECT ` + lookupNodeCols + ` FROM nodes WHERE view_gen = ? AND id IN (` + inPlaceholders(len(chunk)) + `) ORDER BY id`
+		q := `SELECT ` + lookupNodeCols + ` FROM ` + nodesByIDSource + ` WHERE view_gen = ? AND id IN (` + inPlaceholders(len(chunk)) + `) ORDER BY id`
 		args := []any{generation}
 		for _, id := range chunk {
 			args = append(args, id)
