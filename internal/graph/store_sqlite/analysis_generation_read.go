@@ -141,6 +141,24 @@ func (s *Store) AnalysisNodeMetrics(generationID int64, nodeIDs []string) ([]gra
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	return s.analysisNodeMetricsLocked(generationID, ids)
+}
+
+// TryAnalysisNodeMetrics omits this optional ranking signal when a writer is
+// active, rather than queueing a search behind the graph mutation.
+func (s *Store) TryAnalysisNodeMetrics(generationID int64, nodeIDs []string) ([]graph.AnalysisNodeMetric, error) {
+	ids, err := sortedUniqueAnalysisStrings(nodeIDs, "node id")
+	if err != nil || len(ids) == 0 {
+		return nil, err
+	}
+	if !s.writeMu.TryLock() {
+		return nil, graph.ErrAnalysisStoreBusy
+	}
+	defer s.writeMu.Unlock()
+	return s.analysisNodeMetricsLocked(generationID, ids)
+}
+
+func (s *Store) analysisNodeMetricsLocked(generationID int64, ids []string) ([]graph.AnalysisNodeMetric, error) {
 	if err := s.ensureAnalysisGenerationReadableLocked(generationID); err != nil {
 		return nil, err
 	}
@@ -244,6 +262,31 @@ func (s *Store) TopAnalysisNodeMetrics(generationID int64, metric graph.Analysis
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	return s.topAnalysisNodeMetricsLocked(generationID, metric, column, limit, cursor)
+}
+
+// TryTopAnalysisNodeMetrics is the non-blocking counterpart used to fill a
+// search's normalization cache. Busy reads must be retried by a later search.
+func (s *Store) TryTopAnalysisNodeMetrics(generationID int64, metric graph.AnalysisMetric, limit int, cursor *graph.AnalysisMetricCursor) ([]graph.AnalysisNodeMetric, *graph.AnalysisMetricCursor, error) {
+	column, err := analysisMetricColumn(metric)
+	if err != nil {
+		return nil, nil, err
+	}
+	limit, err = boundedAnalysisLimit(limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	if cursor != nil && (!validAnalysisFloat(cursor.Score) || cursor.RowID <= 0) {
+		return nil, nil, fmt.Errorf("analysis generation: invalid metric cursor")
+	}
+	if !s.writeMu.TryLock() {
+		return nil, nil, graph.ErrAnalysisStoreBusy
+	}
+	defer s.writeMu.Unlock()
+	return s.topAnalysisNodeMetricsLocked(generationID, metric, column, limit, cursor)
+}
+
+func (s *Store) topAnalysisNodeMetricsLocked(generationID int64, metric graph.AnalysisMetric, column string, limit int, cursor *graph.AnalysisMetricCursor) ([]graph.AnalysisNodeMetric, *graph.AnalysisMetricCursor, error) {
 	if err := s.ensureAnalysisGenerationReadableLocked(generationID); err != nil {
 		return nil, nil, err
 	}
