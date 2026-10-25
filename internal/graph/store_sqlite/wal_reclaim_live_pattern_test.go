@@ -291,7 +291,8 @@ func checkLongReaderContract(t *testing.T, s *Store, run longReaderRun, threshol
 
 // Reclaim keeps the writer free while its pinned-reader wait is parked.
 // Both urgency classes admit and commit mutations before the reader retires.
-// checkLongReaderContract separately checks the short writer-hold cap.
+// The default TestAReclaimHoldHandsTheWriterBackWhenTheLogIsNotReady checks
+// writer-hold and gate-wait caps. checkLongReaderContract adds opt-in coverage.
 func TestWALReclaimKeepsWriterFreeDuringParkedReaderWait(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
