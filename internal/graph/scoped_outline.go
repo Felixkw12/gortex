@@ -146,6 +146,9 @@ func (g *Graph) ScopedOutlineCountsFiltered(scope NodeScope, filter OutlineEdgeF
 			continue
 		}
 		n := g.GetNode(e.To)
+		if n == nil {
+			continue
+		}
 		path := n.FilePath
 		if path == "" {
 			path = n.ID
