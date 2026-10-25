@@ -1222,6 +1222,22 @@ func generationReadProbes() []genProbe {
 			sort.Strings(out)
 			return out
 		}},
+		{name: "ScopedOutlineCounts", run: func(t *testing.T, s *Store) []string {
+			counts, err := s.ScopedOutlineCounts(graph.NodeScope{WorkspaceID: genReadRepo, RepoAllow: map[string]bool{genReadRepo: true}})
+			if err != nil {
+				t.Fatalf("ScopedOutlineCounts: %v", err)
+			}
+			return outlineCountTokens(counts)
+		}},
+		{name: "ScopedOutlineCountsFiltered", run: func(t *testing.T, s *Store) []string {
+			counts, err := s.ScopedOutlineCountsFiltered(graph.NodeScope{WorkspaceID: genReadRepo, RepoAllow: map[string]bool{genReadRepo: true}}, graph.OutlineEdgeFilter{
+				ExcludeKinds: []graph.EdgeKind{graph.EdgeReferences}, ExcludeNodeKinds: []graph.NodeKind{graph.KindContract}, ExcludeVia: "spring.Bean",
+			})
+			if err != nil {
+				t.Fatalf("ScopedOutlineCountsFiltered: %v", err)
+			}
+			return outlineCountTokens(counts)
+		}},
 		{name: "FileImporters", run: func(t *testing.T, s *Store) []string {
 			var out []string
 			for _, mark := range []string{genZeroMark, genOneMark} {
@@ -1614,6 +1630,17 @@ func crossRepoTokens(rows []graph.CrossRepoCandidateRow) []string {
 		out = append(out, fmt.Sprintf("xcand %s->%s|%s|%s|%s", r.Edge.From, r.Edge.To, r.Edge.Kind, r.Edge.Origin, r.FromRepo+"/"+r.ToRepo))
 	}
 	sort.Strings(out)
+	return out
+}
+
+// Include both scalar aggregates and marked import targets: a generation-
+// blind outline must fail even when an aggregate happens to have equal counts.
+func outlineCountTokens(counts graph.OutlineCounts) []string {
+	out := []string{fmt.Sprintf("outline nodes=%d edges=%d", counts.TotalNodes, counts.TotalEdges)}
+	out = append(out, sortedCountTokens("language", counts.ByLanguage)...)
+	for _, row := range counts.FileImports {
+		out = append(out, fmt.Sprintf("outline import %s=%d", row.FilePath, row.Count))
+	}
 	return out
 }
 
@@ -2056,6 +2083,8 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.FileBatchEvicter)(nil), skip: skipWrite, writeFence: "TestGenerationScopedFileEvict"},
 		{iface: (*graph.FileEditingContext)(nil), probe: "FileEditingContext"},
 		{iface: (*graph.FileImportAggregator)(nil), probe: "FileImportCounts"},
+		{iface: (*graph.ScopedOutlineAggregator)(nil), probe: "ScopedOutlineCounts"},
+		{iface: (*graph.FilteredScopedOutlineAggregator)(nil), probe: "ScopedOutlineCountsFiltered"},
 		{iface: (*graph.FileImporters)(nil), probe: "FileImporters"},
 		{iface: (*graph.FileIndexFailureReader)(nil), skip: "v21 generation-keyed sidecar; read/write isolation and recovery covered by TestFileIndexFailuresPersistAndScope"},
 		{iface: (*graph.FileIndexFailureWriter)(nil), skip: "v21 generation-keyed sidecar; read/write isolation and recovery covered by TestFileIndexFailuresPersistAndScope"},
