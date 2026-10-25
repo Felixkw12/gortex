@@ -480,11 +480,14 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 	removedDuplicates := healDuplicateRepos(state.configManager.Global(), logger)
 	finishHeal(zap.Int("removed", removedDuplicates))
 
-	repos := state.configManager.Global().Repos
-	// This snapshot is warmup's job set, so it is also the set that reads as
-	// loading. Re-announced after the duplicate heal above, which can drop a
-	// second spelling of one directory the boot-time announcement still held.
-	state.multiIndexer.ExpectRepos(repos)
+	configuredRepos := state.configManager.Global().Repos
+	// Every configured entry reads as loading, including one that prefix
+	// resolution below skips; the settle loop after the job loop ends that one
+	// as failed with the prefix's owner. Re-announced after the duplicate heal
+	// above, which can drop a second spelling of one directory the boot-time
+	// announcement still held.
+	state.multiIndexer.ExpectRepos(configuredRepos)
+	repos := state.multiIndexer.ResolveConfiguredRepos(ctx, configuredRepos)
 
 	// Purge orphaned repo prefixes BEFORE the warmup loop re-registers the
 	// tracked repos, while the store still reflects the prior run's state. A
@@ -507,8 +510,11 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 		if purger, ok := state.graph.(interface{ PurgeRepo(string) error }); ok {
 			orphanSupported = true
 			finishScan := startWarmupStep(logger, "orphan_prefix_scan", zap.Int("repos", len(repos)))
-			known := make([]string, 0, len(repos))
-			for _, entry := range repos {
+			// A rejected collision still names a configured prefix, not an orphan.
+			knownRepos := append([]config.RepoEntry(nil), state.configManager.Global().Repos...)
+			knownRepos = append(knownRepos, repos...)
+			known := make([]string, 0, len(knownRepos))
+			for _, entry := range knownRepos {
 				p := strings.TrimPrefix(indexer.EffectiveRepoPrefix(state.configManager, entry), "/")
 				if p != "" {
 					known = append(known, p)
@@ -862,6 +868,11 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 	// every repository a job already settled.
 	for _, entry := range repos {
 		state.multiIndexer.FinishRepoLoad(entry.Path, errors.New("warmup ended before this repository was loaded"))
+	}
+	// A configured entry that prefix resolution skipped had no job. Settling
+	// it with no job error records the prefix's registered owner as the reason.
+	for _, entry := range configuredRepos {
+		state.multiIndexer.FinishRepoLoad(entry.Path, nil)
 	}
 	// RunRepositoryTopologyBatch has joined every parse worker and finalized
 	// the coordinated bulk loader. No producer still needs the canonical
