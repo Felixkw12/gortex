@@ -254,3 +254,14 @@ func TestOutlineContractRuntimeNeverScansAndPreservesFilters(t *testing.T) {
 		require.Equal(t, count, aggregated.TotalEdges)
 	}
 }
+
+func TestOutlineHotspotsStopAfterVisibleRankedHead(t *testing.T) {
+	s, store := outlineFixture(t)
+	for i := 0; i < 1024; i++ {
+		s.hotspots = append(s.hotspots, analysis.HotspotEntry{ID: fmt.Sprintf("hot-stale-%d", i)})
+	}
+	reader := &outlineCountingReader{Store: store}
+	outlineJSON(t, s, outlineBoundContext(s, "hotspot-head", "", map[string]bool{"a": true, "b": true, "c": true, "legacy": true}), reader)
+	require.NotContains(t, reader.lookedUp, "hot-stale-128")
+	require.LessOrEqual(t, len(reader.lookedUp), 128+10, "only the first hotspot head and analyzer/main candidates are needed")
+}

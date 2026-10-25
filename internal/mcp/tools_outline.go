@@ -87,8 +87,10 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 					checked[id] = true
 				}
 			}
-			for id, n := range reader.GetNodesByIDs(missing) {
-				candidateScope[id] = opts.ScopeAllows(n)
+			if len(missing) > 0 {
+				for id, n := range reader.GetNodesByIDs(missing) {
+					candidateScope[id] = opts.ScopeAllows(n)
+				}
 			}
 			for _, id := range chunk {
 				if candidateScope[id] {
@@ -196,24 +198,26 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	// Post-filtered to the session's workspace.
 	hotspotsSection := []map[string]any{}
 	hs := s.getHotspots()
-	if aggregated != nil {
-		ids := make([]string, 0, len(hs))
-		for _, h := range hs {
-			ids = append(ids, h.ID)
-		}
-		// Populate the bounded candidate set in batches, including candidates
-		// beyond an early match so ranking retains the legacy order.
-		for start := 0; start < len(ids); start += 128 {
-			chunk := ids[start:min(start+128, len(ids))]
-			for id, n := range reader.GetNodesByIDs(chunk) {
-				candidateScope[id] = opts.ScopeAllows(n)
-				checked[id] = true
-			}
-		}
-	}
-	for _, h := range hs {
+	for i, h := range hs {
 		if len(hotspotsSection) >= topHotspotsN {
 			break
+		}
+		if aggregated != nil && i%128 == 0 {
+			// Resolve one ranked head at a time; stop once the outline has
+			// enough visible hotspots rather than hydrating the entire list.
+			end := min(i+128, len(hs))
+			ids := make([]string, 0, end-i)
+			for _, candidate := range hs[i:end] {
+				if !checked[candidate.ID] {
+					ids = append(ids, candidate.ID)
+					checked[candidate.ID] = true
+				}
+			}
+			if len(ids) > 0 {
+				for id, n := range reader.GetNodesByIDs(ids) {
+					candidateScope[id] = opts.ScopeAllows(n)
+				}
+			}
 		}
 		if bound && !allowsAny([]string{h.ID}) {
 			continue
