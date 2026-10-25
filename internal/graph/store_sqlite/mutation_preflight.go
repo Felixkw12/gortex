@@ -89,9 +89,6 @@ func (s *Store) batchContainsNewEdgeLocked(edges []*graph.Edge) (bool, int, erro
 	return len(found) != len(keys), statements, nil
 }
 
-// batchContainsAnalysisNodeChangeLocked compares every analysis-facing node
-// field in bounded VALUES joins. The old AddBatch path called the single-node
-// preflight once per input row, yielding one SELECT + Meta decode per node.
 // CROSS JOIN keeps the identity list outer under stale planner statistics.
 func existingEdgeIdentitiesSQL(values string) string {
 	return `WITH wanted(from_id, to_id, kind, file_path, line) AS (VALUES ` + values + `)
@@ -103,6 +100,9 @@ func existingEdgeIdentitiesSQL(values string) string {
               AND e.view_gen = ?`
 }
 
+// batchContainsAnalysisNodeChangeLocked compares every analysis-facing node
+// field in bounded VALUES joins. The old AddBatch path called the single-node
+// preflight once per input row, yielding one SELECT + Meta decode per node.
 func (s *Store) batchContainsAnalysisNodeChangeLocked(nodes []*graph.Node) (bool, int, error) {
 	const idsPerQuery = 450
 	incoming := make(map[string][]*graph.Node, len(nodes))
