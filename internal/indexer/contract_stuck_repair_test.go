@@ -162,29 +162,55 @@ func (f *contractJobFixture) saveQuiet(name, text string) error {
 }
 
 // TestContractStuckRepairUnderASteadyEventStream: the same failed body with a
-// 1 Hz writer saving an unrelated file throughout: every save is accepted
-// and announced, none closes the stuck window, and the repair still runs
-// while the writer saves.
+// 1 Hz writer saving an unrelated file throughout: a save over the stuck
+// window is accepted and announced and leaves the window open, and the
+// repair still runs while the writer saves.
 func TestContractStuckRepairUnderASteadyEventStream(t *testing.T) {
 	repairUnderSteadyEvents(t, nil)
 }
 
 func repairUnderSteadyEvents(t *testing.T, observe func(time.Duration)) {
 	t.Helper()
-	f := newContractRepairFixture(t, nil)
+	// The repair takes the failed body's window once its orphan grace
+	// passed, a second after the failure. Once armed, a pass waits for the
+	// first save, so that save always lands over the open window.
+	var armed atomic.Bool
+	firstSaved := make(chan struct{})
+	f := newContractRepairFixture(t, func(f *contractRepairFixture, r *ContractStuckRepair) {
+		r.beforeLane = func(string) {
+			if armed.Load() {
+				select {
+				case <-firstSaved:
+				case <-r.ctx.Done():
+				}
+			}
+		}
+	})
 	f.strict(t, time.Minute)
 	repaired := repairCount("stuck_receipt")
 	consts := jobConsts + "// a failed apply\n"
+	armed.Store(true)
 	f.failBody(t, "consts.go", consts)
 	var failedAt time.Time
 	if observe != nil {
 		failedAt = time.Now()
 	}
+	var helper atomic.Value
+	save := func() error {
+		text := jobHelper + "// tick " + time.Now().Format(time.RFC3339Nano) + "\n"
+		if err := f.saveQuiet("helper.go", text); err != nil {
+			return err
+		}
+		helper.Store(text)
+		return nil
+	}
+	announced := f.publishedCount("fixture")
+	require.NoError(t, save())
+	require.Greater(t, f.publishedCount("fixture"), announced, "the save was announced")
+	require.NotEmpty(t, f.store.OrphanedContractCoreWindows("fixture"), "the save left the failed body's window open and orphaned")
+	close(firstSaved)
 	stop := make(chan struct{})
 	var written sync.WaitGroup
-	var helper atomic.Value
-	var saves atomic.Int64
-	helper.Store(jobHelper)
 	written.Add(1)
 	go func() {
 		defer written.Done()
@@ -194,13 +220,10 @@ func repairUnderSteadyEvents(t *testing.T, observe func(time.Duration)) {
 				return
 			case <-time.After(time.Second):
 			}
-			text := jobHelper + "// tick " + time.Now().Format(time.RFC3339Nano) + "\n"
-			if err := f.saveQuiet("helper.go", text); err != nil {
+			if err := save(); err != nil {
 				t.Error(err)
 				return
 			}
-			helper.Store(text)
-			saves.Add(1)
 		}
 	}()
 	var stopOnce sync.Once
@@ -221,7 +244,6 @@ func repairUnderSteadyEvents(t *testing.T, observe func(time.Duration)) {
 		observe(lines[0].Time.Sub(failedAt))
 	}
 	stopWriter()
-	require.Positive(t, saves.Load(), "the writer saved throughout")
 	require.Equal(t, repaired+1, repairCount("stuck_receipt"))
 	got := f.strict(t, 20*time.Second)
 	require.Contains(t, contractIDs(got), "http::POST::/edited")

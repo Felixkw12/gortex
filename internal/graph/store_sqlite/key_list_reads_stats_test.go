@@ -151,6 +151,15 @@ func smallStoreStats(t *testing.T, s *Store) func(t *testing.T, s *Store) {
 // statistics whole.
 func TestKeyListReadsAndNameLookupsSeekUnderEveryStatisticsState(t *testing.T) {
 	s := openPayloadStore(t)
+	// The observer below sees every statement the read pool runs, the
+	// store's own background work included: 30 s after the open the lazy
+	// index loop (which the checkpoint loop joins) seeds the row counters
+	// with a full count over nodes_by_generation, and the maintenance lane
+	// can refresh the statistics a state put in place. Both loops stop
+	// before the graph is built, however long building it takes, so every
+	// statement observed during a read is that read's.
+	s.stopCheckpointLoop()
+	s.stopMaintenanceLane()
 	small := smallStoreStats(t, s)
 	_, names, _ := keyListGraph(t, s, 2000)
 	type read struct {

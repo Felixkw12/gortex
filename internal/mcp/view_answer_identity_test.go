@@ -209,7 +209,6 @@ func TestRequireFreshAnsweredByTheProofTakesNoTicket(t *testing.T) {
 // was observed and the ticket's completion.
 func TestRequireFreshFallsBackToTheTicketWhenTheProofRefuses(t *testing.T) {
 	stack := newViewStack(t)
-	sampledAt := time.Now()
 	waiter := &provingFreshnessWaiter{
 		fakeFreshnessWaiter: &fakeFreshnessWaiter{
 			answer: func(call int, checkoutID, root string) (*indexer.CheckoutRefreshTicket, error) {
@@ -217,9 +216,11 @@ func TestRequireFreshFallsBackToTheTicketWhenTheProofRefuses(t *testing.T) {
 			},
 		},
 		prove: func(checkoutID, root string) (indexer.CheckoutFreshProof, error) {
+			// Sampled during the request, as proveFresh samples: the record
+			// refuses a change_observed earlier than the request's arrival.
 			return indexer.CheckoutFreshProof{
 				Reason: indexer.FreshProofSnapshotDiffers, CommitGenerationID: stack.commit, DirtyGenerationID: stack.dirty,
-				SampledAt: sampledAt, Sample: 3 * time.Millisecond,
+				SampledAt: time.Now(), Sample: 3 * time.Millisecond,
 			}, nil
 		},
 	}
