@@ -144,7 +144,7 @@ var walResetBusyMillis = sqliteCheckpointBusyTimeoutMillis
 // The callback must not retain the connection or start asynchronous work.
 var walResetCheckpointConnObserver func(context.Context, *sql.Conn)
 
-// walResetResultHook injects an interrupt after SQL for reset outcome tests.
+// walResetResultHook injects an error after SQL for reset outcome tests.
 // Nil in production; recognition still runs while the write gate is held.
 var walResetResultHook func(error) error
 
@@ -233,10 +233,15 @@ func (s *Store) resetWALInPlaceLockedWithBusyTimeout(ctx context.Context, busyMi
 		err = hook(err)
 	}
 	after := readWALWriteMark(s.dbPath)
-	if (err == nil || walResetInterrupted(err)) && walInPlaceResetCompleted(before, after) {
+	if walInPlaceResetCompleted(before, after) {
+		// A physical restart owes bounded cleanup even when an unrelated
+		// driver error must still be returned. Restoring the limit here would
+		// let a later commit truncate the restarted file in one call.
 		s.walShrinkPending.Store(true)
-		s.walReclaim.update(func(st *WALReclaimStats) { st.ShrinkInPlaceResets++ })
-		return result, nil
+		if err == nil || walResetInterrupted(err) {
+			s.walReclaim.update(func(st *WALReclaimStats) { st.ShrinkInPlaceResets++ })
+			return result, nil
+		}
 	}
 	if err != nil {
 		return result, err

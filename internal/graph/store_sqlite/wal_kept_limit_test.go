@@ -2,6 +2,7 @@ package store_sqlite
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -155,4 +156,43 @@ func TestWALShrinkInterveningResetRetainsNewCleanup(t *testing.T) {
 	require.EqualValues(t, walShrinkKeepBytes, activeWriterJournalLimit(t, s))
 	require.False(t, s.walShrinkPending.Load())
 	require.False(t, s.walShrinkNeeded())
+}
+
+// A driver error after the real marker commit must keep the error visible
+// without discarding the physical reset's cleanup obligation.
+func TestWALInPlaceResetNonContextErrorRetainsCleanup(t *testing.T) {
+	previous := walShrinkInPlaceBytes
+	walShrinkInPlaceBytes = 1
+	t.Cleanup(func() { walShrinkInPlaceBytes = previous; walResetResultHook = nil })
+	s, checkpoint := finalBackfillFixture(t)
+	walPath := s.dbPath + "-wal"
+	const largeBytes = walShrinkKeepBytes + walShrinkMinSlice
+	require.NoError(t, os.Truncate(walPath, largeBytes))
+	before := readWALWriteMark(s.dbPath)
+	require.True(t, before.Valid)
+	injected := errors.New("driver error after marker commit")
+	observed := false
+	walResetResultHook = func(err error) error {
+		observed = true
+		require.NoError(t, err, "the real reset must complete before error injection")
+		return injected
+	}
+	s.writeMu.Lock()
+	_, err := s.resetWALForReclaim(t.Context())
+	s.writeMu.Unlock()
+	walResetResultHook = nil
+	require.True(t, observed)
+	require.ErrorIs(t, err, injected, "a non-context error must remain observable")
+	require.True(t, walInPlaceResetCompleted(before, readWALWriteMark(s.dbPath)))
+	require.Zero(t, s.WALReclaimStats().ShrinkInPlaceResets, "the error must not become a success count")
+	require.True(t, s.walShrinkPending.Load())
+	require.EqualValues(t, -1, activeWriterJournalLimit(t, s))
+	_, err = checkpointWALOnceOn(t.Context(), checkpoint, "PASSIVE")
+	require.NoError(t, err)
+	require.NoError(t, churnWriteOnce(s, 0))
+	require.EqualValues(t, largeBytes, walFileSize(walPath), "a later commit truncated the restarted file")
+	_, _, err = s.shrinkWAL(t.Context(), checkpoint)
+	require.NoError(t, err)
+	require.EqualValues(t, walShrinkKeepBytes, activeWriterJournalLimit(t, s))
+	require.False(t, s.walShrinkPending.Load())
 }
