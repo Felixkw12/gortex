@@ -13,10 +13,11 @@ const hotspotResultRetentionBytes = 1 << 20
 // caller, then released; a top-N prefix would change scoped ranking semantics.
 func hotspotResultRetainable(entries []analysis.HotspotEntry) bool {
 	entryBytes := int(unsafe.Sizeof(analysis.HotspotEntry{}))
-	if cap(entries) > hotspotResultRetentionBytes/entryBytes {
+	remaining := hotspotResultRetentionBytes - int(unsafe.Sizeof(entries))
+	if cap(entries) > remaining/entryBytes {
 		return false
 	}
-	remaining := hotspotResultRetentionBytes - cap(entries)*entryBytes
+	remaining -= cap(entries) * entryBytes
 	for _, entry := range entries[:cap(entries)] {
 		for _, value := range []string{entry.ID, entry.Name, entry.Kind, entry.FilePath} {
 			if len(value) > remaining {

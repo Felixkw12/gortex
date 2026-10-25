@@ -44,7 +44,8 @@ func TestReleaseTransientAnalysisDropsOversizeHotspots(t *testing.T) {
 
 func TestHotspotResultRetentionIncludesStringsAndSpareCapacity(t *testing.T) {
 	entryBytes := int(unsafe.Sizeof(analysis.HotspotEntry{}))
-	entries := []analysis.HotspotEntry{{ID: strings.Repeat("x", hotspotResultRetentionBytes-entryBytes)}}
+	sliceBytes := int(unsafe.Sizeof([]analysis.HotspotEntry(nil)))
+	entries := []analysis.HotspotEntry{{ID: strings.Repeat("x", hotspotResultRetentionBytes-entryBytes-sliceBytes)}}
 	if !hotspotResultRetainable(entries) {
 		t.Fatal("exact budget rejected")
 	}
