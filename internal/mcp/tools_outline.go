@@ -67,21 +67,9 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	// one member matches instead of fetching every member of large groups.
 	checked := make(map[string]bool)
 	candidateScope := make(map[string]bool)
-	allowsAny := func(ids []string) bool {
-		if !bound {
-			return true
-		}
-		if aggregated == nil {
-			for _, id := range ids {
-				if inScope[id] {
-					return true
-				}
-			}
-			return false
-		}
-		const batchSize = 128
-		for start := 0; start < len(ids); start += batchSize {
-			chunk := ids[start:min(start+batchSize, len(ids))]
+	loadCandidates := func(ids []string) {
+		for start := 0; start < len(ids); start += outlineCandidateBatchSize {
+			chunk := ids[start:min(start+outlineCandidateBatchSize, len(ids))]
 			var missing []string
 			for _, id := range chunk {
 				if !checked[id] {
@@ -91,13 +79,23 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 			}
 			if len(missing) > 0 {
 				for id, n := range reader.GetNodesByIDs(missing) {
-					candidateScope[id] = opts.ScopeAllows(n)
+					candidateScope[id] = n != nil && opts.ScopeAllows(n)
 				}
 			}
-			for _, id := range chunk {
-				if candidateScope[id] {
-					return true
-				}
+		}
+	}
+	allowsAny := func(ids []string) bool {
+		if !bound {
+			return true
+		}
+		allowed := inScope
+		if aggregated != nil {
+			loadCandidates(ids)
+			allowed = candidateScope
+		}
+		for _, id := range ids {
+			if allowed[id] {
+				return true
 			}
 		}
 		return false
@@ -176,9 +174,13 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	communitiesSection := map[string]any{"count": 0}
 	if comms := s.getCommunities(); comms != nil && len(comms.Communities) > 0 {
 		sorted := make([]analysis.Community, 0, len(comms.Communities))
-		for _, c := range comms.Communities {
-			if allowsAny(c.Members) {
-				sorted = append(sorted, c)
+		if aggregated != nil {
+			sorted = outlineCommunitiesInScope(comms.Communities, loadCandidates, candidateScope)
+		} else {
+			for _, c := range comms.Communities {
+				if allowsAny(c.Members) {
+					sorted = append(sorted, c)
+				}
 			}
 		}
 		sort.Slice(sorted, func(i, j int) bool {
@@ -204,22 +206,15 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 		if len(hotspotsSection) >= topHotspotsN {
 			break
 		}
-		if aggregated != nil && i%128 == 0 {
+		if aggregated != nil && i%outlineCandidateBatchSize == 0 {
 			// Resolve one ranked head at a time; stop once the outline has
 			// enough visible hotspots rather than hydrating the entire list.
-			end := min(i+128, len(hs))
+			end := min(i+outlineCandidateBatchSize, len(hs))
 			ids := make([]string, 0, end-i)
 			for _, candidate := range hs[i:end] {
-				if !checked[candidate.ID] {
-					ids = append(ids, candidate.ID)
-					checked[candidate.ID] = true
-				}
+				ids = append(ids, candidate.ID)
 			}
-			if len(ids) > 0 {
-				for id, n := range reader.GetNodesByIDs(ids) {
-					candidateScope[id] = opts.ScopeAllows(n)
-				}
-			}
+			loadCandidates(ids)
 		}
 		if bound && !allowsAny([]string{h.ID}) {
 			continue

@@ -25,6 +25,7 @@ type outlineCountingReader struct {
 	*store_sqlite.Store
 	allNodes, allNodesLight, allEdges, aggregates int
 	lookedUp                                      []string
+	lookupBatches                                 [][]string
 	source                                        *outlineCountingReader
 }
 
@@ -42,6 +43,7 @@ func (r *outlineCountingReader) AllEdges() []*graph.Edge {
 }
 func (r *outlineCountingReader) GetNodesByIDs(ids []string) map[string]*graph.Node {
 	r.counters().lookedUp = append(r.counters().lookedUp, ids...)
+	r.counters().lookupBatches = append(r.counters().lookupBatches, append([]string(nil), ids...))
 	return r.Store.GetNodesByIDs(ids)
 }
 func (r *outlineCountingReader) ScopedOutlineCounts(scope graph.NodeScope) (graph.OutlineCounts, error) {
@@ -185,7 +187,7 @@ func TestOutlineUnboundKeepsExistingSummaryPath(t *testing.T) {
 	require.Zero(t, reader.allNodesLight)
 }
 
-func TestOutlineCommunityStopsAfterMatchingBatch(t *testing.T) {
+func TestOutlineCommunityStopsAtFirstVisibleMember(t *testing.T) {
 	s, store := outlineFixture(t)
 	members := []string{"a-main"}
 	for i := 0; i < 1024; i++ {
@@ -195,7 +197,112 @@ func TestOutlineCommunityStopsAfterMatchingBatch(t *testing.T) {
 	s.hotspotsReady = true
 	reader := &outlineCountingReader{Store: store}
 	outlineJSON(t, s, outlineBoundContext(s, "community", "ws", map[string]bool{"a": true}), reader)
-	require.LessOrEqual(t, len(reader.lookedUp), 128+6, "stop after the first matching community batch, plus main candidates")
+	require.NotContains(t, reader.lookedUp, "stale-0")
+	require.LessOrEqual(t, len(reader.lookedUp), 1+6, "one community candidate, plus main candidates")
+}
+
+func TestOutlineCommunityFrontiersBatchAcrossGroups(t *testing.T) {
+	s, store := outlineFixture(t)
+	const groups = 200
+	nodes := make([]*graph.Node, 0, groups)
+	communities := make([]analysis.Community, 0, groups)
+	for i := 0; i < groups; i++ {
+		id := fmt.Sprintf("visible-%03d", i)
+		nodes = append(nodes, &graph.Node{ID: id, Kind: graph.KindFunction, RepoPrefix: "a", WorkspaceID: "ws", Language: "go", FilePath: fmt.Sprintf("a/group-%03d.go", i)})
+		members := []string{id}
+		for j := 1; j < 128; j++ {
+			members = append(members, fmt.Sprintf("unused-%03d-%03d", i, j))
+		}
+		communities = append(communities, analysis.Community{ID: fmt.Sprintf("group-%03d", i), Size: len(members), Members: members})
+	}
+	store.AddBatch(nodes, nil)
+	installCommunitiesForTest(s, &analysis.CommunityResult{Communities: communities})
+	s.hotspotsReady = true
+	ctx := outlineBoundContext(s, "community-frontiers", "ws", map[string]bool{"a": true})
+	reader := &outlineCountingReader{Store: store}
+	got := outlineJSON(t, s, ctx, reader)
+	legacy := outlineJSON(t, s, ctx, legacyOutlineReader{Reader: store})
+	require.JSONEq(t, string(legacy), string(got))
+	require.LessOrEqual(t, len(reader.lookedUp), groups+6, "fetch one visible member per group, plus main candidates")
+	require.LessOrEqual(t, len(reader.lookupBatches), 3, "pack first candidates across groups rather than issuing one query per group")
+	for _, id := range reader.lookedUp {
+		require.NotContains(t, id, "unused-")
+	}
+	for _, batch := range reader.lookupBatches {
+		require.LessOrEqual(t, len(batch), outlineCandidateBatchSize)
+	}
+	require.Zero(t, reader.allNodes)
+	require.Zero(t, reader.allNodesLight)
+	require.Zero(t, reader.allEdges)
+}
+
+func TestOutlineCommunityFrontiersPreserveLateMatchesAndTies(t *testing.T) {
+	s, store := outlineFixture(t)
+	late := make([]string, 512)
+	for i := range late {
+		late[i] = fmt.Sprintf("late-missing-%03d", i)
+	}
+	late[10], late[20], late[300] = "shared-missing", "shared-missing", "a-lib"
+	communities := []analysis.Community{
+		{ID: "late", Size: 20, Members: late},
+		{ID: "early", Size: 20, Members: []string{"a-main"}},
+		{ID: "missing", Size: 20, Members: []string{"shared-missing", "shared-missing"}},
+		{ID: "foreign", Size: 20, Members: []string{"b-main", "outside-main", "b-main"}},
+		{ID: "global", Size: 20, Members: []string{"global-main"}},
+		{ID: "unowned", Size: 20, Members: []string{"unowned-main"}},
+		{ID: "empty", Size: 20},
+	}
+	installCommunitiesForTest(s, &analysis.CommunityResult{Communities: communities})
+	s.hotspotsReady = true
+	ctx := outlineBoundContext(s, "community-late", "ws", map[string]bool{"a": true})
+	reader := &outlineCountingReader{Store: store}
+	got := outlineJSON(t, s, ctx, reader)
+	legacy := outlineJSON(t, s, ctx, legacyOutlineReader{Reader: store})
+	require.JSONEq(t, string(legacy), string(got))
+	var response struct {
+		Communities struct {
+			Count int `json:"count"`
+			Top   []struct {
+				ID string `json:"id"`
+			} `json:"top"`
+		} `json:"communities"`
+	}
+	require.NoError(t, json.Unmarshal(got, &response))
+	require.Equal(t, 4, response.Communities.Count)
+	var top []string
+	for _, c := range response.Communities.Top {
+		top = append(top, c.ID)
+	}
+	require.Equal(t, []string{"late", "early", "global", "unowned"}, top, "completion order must not reorder equal-size communities")
+	missingReads := 0
+	for _, id := range reader.lookedUp {
+		if id == "shared-missing" {
+			missingReads++
+		}
+	}
+	require.Equal(t, 1, missingReads, "cache missing IDs across rounds and communities")
+	require.Contains(t, reader.lookedUp, "a-lib")
+	require.NotContains(t, reader.lookedUp, "late-missing-400")
+	for _, batch := range reader.lookupBatches {
+		require.LessOrEqual(t, len(batch), outlineCandidateBatchSize)
+	}
+}
+
+func TestOutlineCommunityFrontiersExhaustUnmatchedGroupsInBatches(t *testing.T) {
+	s, store := outlineFixture(t)
+	members := make([]string, 1024)
+	for i := range members {
+		members[i] = fmt.Sprintf("foreign-missing-%04d", i)
+	}
+	installCommunitiesForTest(s, &analysis.CommunityResult{Communities: []analysis.Community{{ID: "foreign", Size: len(members), Members: members}}})
+	s.hotspotsReady = true
+	ctx := outlineBoundContext(s, "community-exhaust", "ws", map[string]bool{"a": true})
+	reader := &outlineCountingReader{Store: store}
+	got := outlineJSON(t, s, ctx, reader)
+	legacy := outlineJSON(t, s, ctx, legacyOutlineReader{Reader: store})
+	require.JSONEq(t, string(legacy), string(got))
+	require.Contains(t, reader.lookedUp, members[len(members)-1], "exhaust members before excluding the community")
+	require.LessOrEqual(t, len(reader.lookupBatches), 20, "adaptive windows must not degrade into one lookup per member")
 }
 
 func TestOutlineOverlayReflectsUnsavedBuffers(t *testing.T) {
