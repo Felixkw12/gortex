@@ -388,7 +388,7 @@ func (s *Store) nodesByIDsInOrder(ctx context.Context, ids []string) ([]*graph.N
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	q := `SELECT ` + lookupNodeCols + ` FROM nodes WHERE view_gen = ? AND id IN (?` +
+	q := `SELECT ` + lookupNodeCols + ` FROM ` + nodesByIDSource + ` WHERE view_gen = ? AND id IN (?` +
 		strings.Repeat(`,?`, len(ids)-1) + `) ORDER BY id`
 	args := make([]any, 0, len(ids)+1)
 	args = append(args, s.viewGen)

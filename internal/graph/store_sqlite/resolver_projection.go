@@ -489,7 +489,7 @@ func (s *Store) NodePlacementsByIDs(ids []string) map[string]graph.NodePlacement
 	for start := 0; start < len(uniq); start += lookupChunkSize {
 		end := minInt(start+lookupChunkSize, len(uniq))
 		chunk := uniq[start:end]
-		query := `SELECT id, kind, file_path, repo_prefix FROM nodes WHERE id IN (` +
+		query := `SELECT id, kind, file_path, repo_prefix FROM ` + nodesByIDSource + ` WHERE id IN (` +
 			inPlaceholders(len(chunk)) + `) AND view_gen = ?`
 		rows, err := s.db.Query(query, append(toAnyArgs(chunk), s.viewGen)...)
 		if err != nil {

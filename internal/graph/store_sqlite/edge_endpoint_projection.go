@@ -58,7 +58,7 @@ func (s *Store) queryByFileGeneration(q string, args []any) (*sql.Rows, bool) {
 const edgeEndpointsFromPrefix = `SELECT from_id, to_id, kind, file_path FROM edges WHERE view_gen = ? AND from_id IN (`
 
 // nodeNamesByIDsPrefix probes the (id, view_gen) primary key.
-const nodeNamesByIDsPrefix = `SELECT id, name FROM nodes WHERE id IN (`
+const nodeNamesByIDsPrefix = `SELECT id, name FROM ` + nodesByIDSource + ` WHERE id IN (`
 
 // structuralTargetInvalidSQL is graph.StructuralEdgeTargetInvalid spelled in
 // SQL, so a projection that never materialises the target (OutEdgePathsFrom)

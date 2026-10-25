@@ -36,7 +36,7 @@ func (s *Store) GetNodeKindsByIDsContext(ctx context.Context, ids []string) (map
 			}
 			continue
 		}
-		q := `SELECT id, kind, file_path, repo_prefix FROM nodes WHERE id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ?`
+		q := `SELECT id, kind, file_path, repo_prefix FROM ` + nodesByIDSource + ` WHERE id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ?`
 		rows, err := s.db.QueryContext(ctx, q, append(toAnyArgs(chunk), s.viewGen)...)
 		if err != nil {
 			return nil, fmt.Errorf("get node kinds by ids: %w", err)

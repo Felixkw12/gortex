@@ -192,7 +192,7 @@ func (s *Store) nodesByIDsOrdered(ctx context.Context, ids []string) ([]*graph.N
 	for i := 0; i < len(ids); i += lookupChunkSize {
 		end := minInt(i+lookupChunkSize, len(ids))
 		chunk := ids[i:end]
-		q := `SELECT ` + lookupNodeCols + ` FROM nodes WHERE id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ? ORDER BY id`
+		q := `SELECT ` + lookupNodeCols + ` FROM ` + nodesByIDSource + ` WHERE id IN (` + inPlaceholders(len(chunk)) + `) AND view_gen = ? ORDER BY id`
 		page, _, _, err := s.scanNodePage(ctx, q, append(toAnyArgs(chunk), s.viewGen)...)
 		out = append(out, page...)
 		if err != nil {

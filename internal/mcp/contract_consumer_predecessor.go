@@ -20,7 +20,7 @@ func (s *Server) openPublishedContractConsumerBinding(ctx context.Context, selec
 	if err != nil {
 		return nil, nil, err
 	}
-	binding := &contractAnalysisContext{views: make(map[string]*graphview.ContractAnalysisView), releaseCohort: release, served: true}
+	binding := &contractAnalysisContext{views: make(map[string]*graphview.ContractAnalysisView), releaseCohort: release, served: true, registries: &s.contractRegistries}
 	fail := func(err error) (*contractAnalysisContext, *indexer.ContractPublishedCohort, error) {
 		binding.close()
 		return nil, nil, err

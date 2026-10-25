@@ -163,9 +163,15 @@ const (
 	nodesByGenerationIndexDDL = `CREATE INDEX IF NOT EXISTS nodes_by_generation ON nodes(view_gen, id)`
 	edgesByGenerationIndexDDL = `CREATE INDEX IF NOT EXISTS edges_by_generation ON edges(view_gen, id)`
 	// Compact supplementary-name scans never visit the wide nodes payload.
-	// Repo equality narrows the scan; trailing columns cover scope predicates.
-	nodesNameCandidatesIndexDDL = `CREATE INDEX IF NOT EXISTS nodes_name_candidates ON nodes(view_gen, repo_prefix, id, name, kind, file_path, workspace_id, project_id) WHERE name <> ''`
+	// Repo equality narrows the scan, the name length then skips names too
+	// short to contain the substring; trailing columns cover scope predicates.
+	nodesNameCandidatesIndexDDL = `CREATE INDEX IF NOT EXISTS nodes_name_candidates ON nodes(view_gen, repo_prefix, length(name), id, name, kind, file_path, workspace_id, project_id) WHERE name <> ''`
 )
+
+// nodesNameCandidatesIndexColumns is nodesNameCandidatesIndexDDL's key, which
+// the v39 step compares against the installed index; "" is the length(name)
+// expression.
+var nodesNameCandidatesIndexColumns = []string{"view_gen", "repo_prefix", "", "id", "name", "kind", "file_path", "workspace_id", "project_id"}
 
 // bulkAlwaysLiveIndexes preserve bounded maintenance and resolver/repository
 // projections as soon as the first repository publishes. The repository and

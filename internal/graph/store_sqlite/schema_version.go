@@ -35,7 +35,7 @@ import (
 // index changes in a way an old on-disk DB would not already have, and append a
 // matching schemaMigrations entry describing how to bring an older store
 // forward (in place, or by rebuild).
-const currentSchemaVersion = 38
+const currentSchemaVersion = 39
 
 // schemaMigration is one forward step. Exactly one strategy applies:
 //   - rebuild=true: the change introduces structure/data that can only come
@@ -136,6 +136,7 @@ var schemaMigrations = []schemaMigration{
 	{version: 36, name: "cover exact selected-generation node histograms", inPlace: createStatsHistogramIndex},
 	{version: 37, name: "cover payload-free contract receipt stamps", inPlace: createContractBoundaryStampIndex},
 	{version: 38, name: "cover exact node declaration reads", inPlace: coverNodeDeclarationIndex},
+	{version: 39, name: "seek supplementary name candidates by name length", inPlace: seekNameCandidatesByLength},
 }
 
 // Rebuild just the secondary index; graph payload, identity and receipts stay
@@ -161,6 +162,21 @@ func createStatsHistogramIndex(tx *sql.Tx) error {
 
 func createNameCandidateIndex(tx *sql.Tx) error {
 	_, err := tx.Exec(nodesNameCandidatesIndexDDL)
+	return err
+}
+
+// Rebuild just the candidate index with the name length in its key. An upgrade
+// from v29 or older already built the current shape at v30, so an index that
+// matches is left alone rather than built twice.
+func seekNameCandidatesByLength(tx *sql.Tx) error {
+	current, err := indexColumnsMatch(tx, "nodes_name_candidates", nodesNameCandidatesIndexColumns)
+	if err != nil || current {
+		return err
+	}
+	if _, err := tx.Exec(`DROP INDEX IF EXISTS nodes_name_candidates`); err != nil {
+		return err
+	}
+	_, err = tx.Exec(nodesNameCandidatesIndexDDL)
 	return err
 }
 
@@ -235,7 +251,8 @@ func edgeCandidateIndexMatchesGenerationFirst(tx *sql.Tx, name string) (bool, er
 }
 
 // indexColumnsMatch reports whether the installed index name keys exactly
-// columns, in order. A missing index has no columns and never matches.
+// columns, in order; an expression key column reads as "". A missing index has
+// no columns and never matches.
 func indexColumnsMatch(tx *sql.Tx, name string, columns []string) (bool, error) {
 	rows, err := tx.Query(`SELECT name FROM pragma_index_info(?) ORDER BY seqno`, name)
 	if err != nil {
@@ -244,11 +261,11 @@ func indexColumnsMatch(tx *sql.Tx, name string, columns []string) (bool, error) 
 	defer rows.Close()
 	var got []string
 	for rows.Next() {
-		var column string
+		var column sql.NullString
 		if err := rows.Scan(&column); err != nil {
 			return false, fmt.Errorf("scan %s shape: %w", name, err)
 		}
-		got = append(got, column)
+		got = append(got, column.String)
 	}
 	if err := rows.Err(); err != nil {
 		return false, fmt.Errorf("read %s shape: %w", name, err)

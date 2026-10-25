@@ -496,7 +496,7 @@ func mutationNodeIdentitiesTx(tx *sql.Tx, viewGen int64, ids []string) (map[stri
 		// mutation the writing handle made, so it reads that handle's row.
 		args = append(args, viewGen)
 		rows, err := tx.Query(
-			`SELECT id, kind, name, qual_name, file_path, repo_prefix FROM nodes WHERE id IN (`+placeholders+`) AND view_gen = ?`,
+			`SELECT id, kind, name, qual_name, file_path, repo_prefix FROM `+nodesByIDSource+` WHERE id IN (`+placeholders+`) AND view_gen = ?`,
 			args...,
 		)
 		if err != nil {

@@ -51,6 +51,7 @@ func symbolCoreEdgeTimingFields(t rerank.CoreEdgeTiming) map[string]any {
 		"raw_reader_type": t.ReaderType, "raw_reads": t.RawReads,
 		"raw_returned_rows": t.RawRows, "kept_rows": t.KeptRows,
 		"endpoint_reads": t.EndpointReads, "endpoint_input_ids": t.EndpointIDs, "endpoint_distinct_ids_per_read_sum": t.EndpointDistinctIDs,
+		"endpoint_cache_hits": t.EndpointCacheHits,
 		"endpoint_checked":    t.CheckedClassifiers > 0 && t.LegacyClassifiers == 0,
 		"checked_classifiers": t.CheckedClassifiers, "legacy_classifiers": t.LegacyClassifiers,
 	}

@@ -48,10 +48,10 @@ func (r *contractCoreEdges) SelectedVectorSearcher() graph.VectorSearcher {
 }
 
 // BindReadContext binds the selected reader to ctx and wraps the result again
-// with the same contract set and edge timing, so an abandoned request stops
-// paging while every read still passes the adjacency filter. A selected
-// reader that cannot bind is wrapped unchanged; the wrapper's own scans
-// still stop with ctx.
+// with the same contract set, edge timing and identity-set cache, so an
+// abandoned request stops paging while every read still passes the adjacency
+// filter. A selected reader that cannot bind is wrapped unchanged; the
+// wrapper's own scans still stop with ctx.
 func (r *contractCoreEdges) BindReadContext(ctx context.Context) graph.Reader {
 	if ctx == nil {
 		ctx = r.ctx
@@ -61,5 +61,6 @@ func (r *contractCoreEdges) BindReadContext(ctx context.Context) graph.Reader {
 		ctx:         ctx,
 		contractIDs: r.contractIDs,
 		edgeTiming:  r.edgeTiming,
+		exclusions:  r.exclusions,
 	})
 }

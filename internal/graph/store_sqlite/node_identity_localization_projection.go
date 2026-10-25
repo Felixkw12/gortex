@@ -91,5 +91,5 @@ func nodeIdentityLocalizationQuery(includeTestFlag bool, count int) string {
 	if includeTestFlag {
 		columns = lookupLocalizationNodeCols
 	}
-	return `SELECT ` + columns + ` FROM nodes WHERE view_gen = ? AND id IN (` + inPlaceholders(count) + `) ORDER BY id`
+	return `SELECT ` + columns + ` FROM ` + nodesByIDSource + ` WHERE view_gen = ? AND id IN (` + inPlaceholders(count) + `) ORDER BY id`
 }

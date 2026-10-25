@@ -137,7 +137,7 @@ func (s *Server) prepareContractConsumer(ctx context.Context, req mcp.CallToolRe
 	status.allowServed = !freshness.requireExact && len(want.required) == 0
 	ctx = context.WithValue(ctx, contractConsumerContextKey{}, status)
 	if mode == contractConsumerOptional {
-		binding := &contractAnalysisContext{}
+		binding := &contractAnalysisContext{registries: &s.contractRegistries}
 		optionalRequest := lowered
 		optionalArgs := make(map[string]any, len(lowered.GetArguments()))
 		for key, value := range lowered.GetArguments() {
@@ -451,7 +451,7 @@ func (s *Server) openContractConsumerTargets(ctx context.Context, selected *grap
 		}
 		captures = append(captures, input)
 	}
-	binding := &contractAnalysisContext{views: make(map[string]*graphview.ContractAnalysisView, len(repos))}
+	binding := &contractAnalysisContext{views: make(map[string]*graphview.ContractAnalysisView, len(repos)), registries: &s.contractRegistries}
 	for index, repo := range repos {
 		if len(targets) > 0 && !slices.Contains(targets, repo) {
 			continue

@@ -597,6 +597,17 @@ func generationReadProbes() []genProbe {
 			}
 			return out
 		}},
+		{name: "NodeIDsByKindsBoundedContext", run: func(t *testing.T, s *Store) []string {
+			ids, complete, err := s.NodeIDsByKindsBoundedContext(context.Background(), []graph.NodeKind{graph.KindFunction, graph.KindMethod, graph.KindType}, 1000)
+			if err != nil || !complete {
+				t.Fatalf("NodeIDsByKindsBoundedContext: complete=%v err=%v", complete, err)
+			}
+			out := make([]string, 0, len(ids))
+			for _, id := range ids {
+				out = append(out, "id "+id)
+			}
+			return out
+		}},
 		{name: "ExistingNodeIDs", run: func(t *testing.T, s *Store) []string {
 			out := make([]string, 0)
 			for id := range s.ExistingNodeIDs(genReadProbeIDs()) {
@@ -753,6 +764,13 @@ func generationReadProbes() []genProbe {
 			m, _, err := s.GetInEdgesByNodeIDsContext(context.Background(), genReadProbeIDs(), 64)
 			if err != nil {
 				t.Fatalf("GetInEdgesByNodeIDsContext: %v", err)
+			}
+			return edgeSliceMapTokens(m)
+		}},
+		{name: "GetInEdgesByNodeIDsWithMetaContext", run: func(t *testing.T, s *Store) []string {
+			m, _, err := s.GetInEdgesByNodeIDsWithMetaContext(context.Background(), genReadProbeIDs(), 64)
+			if err != nil {
+				t.Fatalf("GetInEdgesByNodeIDsWithMetaContext: %v", err)
 			}
 			return edgeSliceMapTokens(m)
 		}},

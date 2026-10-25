@@ -19,7 +19,7 @@ func (s *Server) openContractPredecessorBinding(ctx context.Context, selected *g
 		views, openErr := s.materializer.OpenPreviousContractCohort(ctx, selected, checkout, repos)
 		err = openErr
 		if err == nil {
-			binding = &contractAnalysisContext{views: views, served: true, recovered: true}
+			binding = &contractAnalysisContext{views: views, served: true, recovered: true, registries: &s.contractRegistries}
 			if err = binding.validate(ctx); err != nil {
 				binding.close()
 				binding = nil

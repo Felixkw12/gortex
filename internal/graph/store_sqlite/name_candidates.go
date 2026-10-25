@@ -11,12 +11,33 @@ import (
 
 const nameCandidateCols = `id, name, kind, file_path, repo_prefix, workspace_id, project_id`
 
+// nameCandidateGenerationRepos lists the repository prefixes holding named
+// rows of the generation, one index seek per prefix, so an unscoped read still
+// seeks each repository's range by name length.
+const nameCandidateGenerationRepos = `WITH RECURSIVE candidate_repos(repo) AS (
+  SELECT (SELECT min(repo_prefix) FROM nodes INDEXED BY nodes_name_candidates WHERE name <> '' AND view_gen = ?)
+  UNION ALL
+  SELECT (SELECT min(repo_prefix) FROM nodes INDEXED BY nodes_name_candidates WHERE name <> '' AND view_gen = ? AND repo_prefix > candidate_repos.repo)
+  FROM candidate_repos WHERE candidate_repos.repo IS NOT NULL
+) `
+
+// sqliteLikePatternLimit is SQLite's default SQLITE_MAX_LIKE_PATTERN_LENGTH:
+// LIKE refuses a longer pattern on the first row it tests.
+const sqliteLikePatternLimit = 50000
+
 // nameCandidateSQL deliberately selects only columns covered by the candidate
-// index. A leading wildcard scans narrow index entries, never wide node pages.
-// The repository-less range preserves the synthetic-node scope policy.
+// index. A leading wildcard scans narrow index entries, never wide node pages,
+// and the length bound seeks past names too short to contain substr. The
+// repository-less range preserves the synthetic-node scope policy.
 func nameCandidateSQL(generation int64, substr string, filter graph.NameSearchFilter) (string, []any) {
-	q := `SELECT ` + nameCandidateCols + ` FROM nodes INDEXED BY nodes_name_candidates WHERE name <> '' AND view_gen = ? AND name LIKE ? ESCAPE '\'`
-	args := []any{generation, "%" + escapeLikePattern(substr) + "%"}
+	pattern := "%" + escapeLikePattern(substr) + "%"
+	minLength := likeMatchMinLength(substr)
+	if len(pattern) > sqliteLikePatternLimit {
+		// Test every row, so the refusal surfaces exactly as an unbounded scan's.
+		minLength = 0
+	}
+	with, source := nameCandidateGenerationRepos, `SELECT repo FROM candidate_repos WHERE repo IS NOT NULL`
+	args := []any{generation, generation, generation}
 	if len(filter.RepoAllow) > 0 {
 		repos := []string{""}
 		for repo, allowed := range filter.RepoAllow {
@@ -26,10 +47,31 @@ func nameCandidateSQL(generation int64, substr string, filter graph.NameSearchFi
 		}
 		sort.Strings(repos)
 		encoded, _ := json.Marshal(repos) // strings cannot fail JSON encoding
-		q += ` AND repo_prefix IN (SELECT value FROM json_each(?))`
-		args = append(args, string(encoded))
+		with, source = "", `SELECT value FROM json_each(?)`
+		args = []any{generation, string(encoded)}
 	}
-	return q + ` ORDER BY id`, args
+	q := with + `SELECT ` + nameCandidateCols + ` FROM nodes INDEXED BY nodes_name_candidates WHERE name <> '' AND view_gen = ? AND repo_prefix IN (` +
+		source + `) AND length(name) >= ? AND name LIKE ? ESCAPE '\' ORDER BY id`
+	return q, append(args, minLength, pattern)
+}
+
+// likeMatchMinLength is the fewest characters, as length() counts them, in a
+// name that the pattern built from substr matches. LIKE pairs every character
+// of substr with exactly one character of the name, and both split UTF-8 as
+// length() does: a byte from 0xc0 up takes the continuation bytes after it.
+// The pattern ends at its first NUL.
+func likeMatchMinLength(substr string) int {
+	n := 0
+	for i := 0; i < len(substr) && substr[i] != 0; n++ {
+		lead := substr[i]
+		i++
+		if lead >= 0xc0 {
+			for i < len(substr) && substr[i]&0xc0 == 0x80 {
+				i++
+			}
+		}
+	}
+	return n
 }
 
 // FindNodesByNameContainingFilteredContext filters compact matching keys before
@@ -116,7 +158,7 @@ func (s *Store) findFilteredNameCandidatesIndexed(ctx context.Context, tx *sql.T
 		for _, id := range chunk {
 			args = append(args, id)
 		}
-		q := `SELECT ` + nameCandidateCols + ` FROM nodes WHERE view_gen = ? AND id IN (` + inPlaceholders(len(chunk)) + `) ORDER BY id`
+		q := `SELECT ` + nameCandidateCols + ` FROM ` + nodesByIDSource + ` WHERE view_gen = ? AND id IN (` + inPlaceholders(len(chunk)) + `) ORDER BY id`
 		remaining := 0
 		if limit > 0 {
 			remaining = limit - len(kept)
@@ -147,7 +189,7 @@ func hydrateNameCandidateIDs(ctx context.Context, tx *sql.Tx, generation int64, 
 			return nil, err
 		}
 		chunk := ids[start:min(start+generationNameIndexFetchChunk, len(ids))]
-		q := `SELECT ` + lookupNodeCols + ` FROM nodes WHERE view_gen = ? AND id IN (` + inPlaceholders(len(chunk)) + `) ORDER BY id`
+		q := `SELECT ` + lookupNodeCols + ` FROM ` + nodesByIDSource + ` WHERE view_gen = ? AND id IN (` + inPlaceholders(len(chunk)) + `) ORDER BY id`
 		args := []any{generation}
 		for _, id := range chunk {
 			args = append(args, id)
