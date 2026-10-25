@@ -2,6 +2,7 @@ package store_sqlite
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"sort"
@@ -122,93 +123,110 @@ func outlineEdgePredicate(filter graph.OutlineEdgeFilter, from, to string) (stri
 	return predicate, args
 }
 
-func (s *Store) ScopedOutlineCounts(scope graph.NodeScope) graph.OutlineCounts {
+func (s *Store) ScopedOutlineCounts(scope graph.NodeScope) (graph.OutlineCounts, error) {
 	return s.ScopedOutlineCountsFiltered(scope, graph.OutlineEdgeFilter{})
 }
 
-func (s *Store) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter graph.OutlineEdgeFilter) graph.OutlineCounts {
+func (s *Store) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter graph.OutlineEdgeFilter) (graph.OutlineCounts, error) {
+	ctx := s.readContext()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return graph.OutlineCounts{}, err
+	}
+	defer tx.Rollback()
+	out, err := s.outlineCountsFrom(ctx, tx, scope, filter)
+	if err != nil {
+		return graph.OutlineCounts{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return graph.OutlineCounts{}, err
+	}
+	return out, nil
+}
+
+type outlineQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+// All totals and metadata corrections share one read snapshot. In particular,
+// a concurrent writer cannot add excluded edges between counting and subtracting.
+func (s *Store) outlineCountsFrom(ctx context.Context, tx outlineQueryer, scope graph.NodeScope, filter graph.OutlineEdgeFilter) (graph.OutlineCounts, error) {
 	languages, edges, imports := outlineFilteredQueries(scope, s.viewGen, filter)
 	out := graph.OutlineCounts{ByLanguage: make(map[string]int)}
-	rows, err := s.outlineRows(languages)
-	panicOnFatal(err)
-	if rows == nil {
-		return out
-	}
-	for rows.Next() {
+	if err := scanOutlineQuery(ctx, tx, languages, func(rows *sql.Rows) error {
 		var language string
 		var count int
-		panicOnFatal(rows.Scan(&language, &count))
+		if err := rows.Scan(&language, &count); err != nil {
+			return err
+		}
 		out.TotalNodes += count
 		if language != "" {
 			out.ByLanguage[language] = count
 		}
+		return nil
+	}); err != nil {
+		return graph.OutlineCounts{}, err
 	}
-	panicOnFatal(rows.Err())
-	_ = rows.Close()
-	rows, err = s.outlineRows(edges)
-	panicOnFatal(err)
-	if rows == nil {
-		return out
+	if err := scanOutlineQuery(ctx, tx, edges, func(rows *sql.Rows) error { return rows.Scan(&out.TotalEdges) }); err != nil {
+		return graph.OutlineCounts{}, err
 	}
-	if rows.Next() {
-		panicOnFatal(rows.Scan(&out.TotalEdges))
-	}
-	panicOnFatal(rows.Err())
-	_ = rows.Close()
-	rows, err = s.outlineRows(imports)
-	panicOnFatal(err)
-	if rows == nil {
-		return out
-	}
-	for rows.Next() {
+	if err := scanOutlineQuery(ctx, tx, imports, func(rows *sql.Rows) error {
 		var row graph.FileImportCountRow
-		panicOnFatal(rows.Scan(&row.FilePath, &row.Count))
+		if err := rows.Scan(&row.FilePath, &row.Count); err != nil {
+			return err
+		}
 		out.FileImports = append(out.FileImports, row)
+		return nil
+	}); err != nil {
+		return graph.OutlineCounts{}, err
 	}
-	panicOnFatal(rows.Err())
-	_ = rows.Close()
 	if filter.ExcludeVia != "" {
-		s.subtractOutlineVia(&out, edges, imports, filter.ExcludeVia)
+		if err := subtractOutlineVia(ctx, tx, &out, edges, imports, filter.ExcludeVia); err != nil {
+			return graph.OutlineCounts{}, err
+		}
 	}
-	return out
+	return out, nil
 }
 
 // Metadata is not a promoted edge column and may use flat, JSON or legacy gob
 // encoding. Count ordinary edges in SQL, then decode only grouped candidates:
 // flat strings contain their literal bytes; all older encodings are admitted
 // conservatively (including escaped JSON). No whole-store edge read is needed.
-func (s *Store) subtractOutlineVia(out *graph.OutlineCounts, edges, imports outlineQuery, via string) {
+func subtractOutlineVia(ctx context.Context, tx outlineQueryer, out *graph.OutlineCounts, edges, imports outlineQuery, via string) error {
 	edges, imports = outlineViaQueries(edges, imports, via)
 	counts := make(map[string]int, len(out.FileImports))
 	for _, row := range out.FileImports {
 		counts[row.FilePath] = row.Count
 	}
 	for i, query := range []outlineQuery{edges, imports} {
-		rows, err := s.outlineRows(query)
-		panicOnFatal(err)
-		if rows == nil {
-			return
-		}
-		for rows.Next() {
+		if err := scanOutlineQuery(ctx, tx, query, func(rows *sql.Rows) error {
 			var path string
 			var meta []byte
 			var count int
+			var err error
 			if i == 0 {
 				err = rows.Scan(&meta, &count)
 			} else {
 				err = rows.Scan(&path, &meta, &count)
 			}
-			panicOnFatal(err)
-			if outlineMetaVia(meta, via) {
+			if err != nil {
+				return err
+			}
+			excluded, err := outlineMetaVia(meta, via)
+			if err != nil {
+				return err
+			}
+			if excluded {
 				if i == 0 {
 					out.TotalEdges -= count
 				} else {
 					counts[path] -= count
 				}
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		panicOnFatal(rows.Err())
-		_ = rows.Close()
 	}
 	out.FileImports = nil
 	for path, count := range counts {
@@ -216,6 +234,7 @@ func (s *Store) subtractOutlineVia(out *graph.OutlineCounts, edges, imports outl
 			out.FileImports = append(out.FileImports, graph.FileImportCountRow{FilePath: path, Count: count})
 		}
 	}
+	return nil
 }
 
 func outlineViaQueries(edges, imports outlineQuery, via string) (outlineQuery, outlineQuery) {
@@ -229,42 +248,46 @@ func outlineViaQueries(edges, imports outlineQuery, via string) (outlineQuery, o
 	return edges, imports
 }
 
-func outlineMetaVia(blob []byte, via string) bool {
+func outlineMetaVia(blob []byte, via string) (bool, error) {
 	if isFlatMeta(blob) {
 		// The prefilter can match a different field or a longer string.
 		// Read the actual top-level via value before subtracting anything.
 		d := &metaDecoder{buf: blob[2:]}
 		count, err := d.readCount()
-		panicOnFatal(err)
+		if err != nil {
+			return false, err
+		}
 		for range count {
 			key, err := d.readRawString()
-			panicOnFatal(err)
+			if err != nil {
+				return false, err
+			}
 			if bytes.Equal(key, []byte("via")) {
 				value, err := d.readValue()
-				panicOnFatal(err)
-				return value == via
+				return value == via, err
 			}
-			panicOnFatal(d.skipValue())
+			if err := d.skipValue(); err != nil {
+				return false, err
+			}
 		}
-		return false
+		return false, nil
 	}
 	meta, err := decodeMeta(blob)
-	panicOnFatal(err)
-	return meta["via"] == via
+	return meta["via"] == via, err
 }
 
 // Cold bulk loads may temporarily drop secondary indexes. Retain exact reads
 // during that window; steady-state queries pin the repo/adjacency indexes so
 // stale planner statistics cannot turn a scoped outline into a global scan.
-func (s *Store) outlineRows(query outlineQuery) (*sql.Rows, error) {
-	rows, err := s.db.Query(query.sql, query.args...)
+func outlineRows(ctx context.Context, tx outlineQueryer, query outlineQuery) (*sql.Rows, error) {
+	rows, err := tx.QueryContext(ctx, query.sql, query.args...)
 	if isNoSuchIndexErr(err) {
 		unhinted := strings.NewReplacer(
 			" INDEXED BY nodes_by_repo", "",
 			" INDEXED BY edges_by_from", "",
 			" INDEXED BY edges_by_to", "",
 		).Replace(query.sql)
-		return s.db.Query(unhinted, query.args...)
+		return tx.QueryContext(ctx, unhinted, query.args...)
 	}
 	return rows, err
 }
@@ -272,3 +295,17 @@ func (s *Store) outlineRows(query outlineQuery) (*sql.Rows, error) {
 var _ graph.ScopedOutlineAggregator = (*Store)(nil)
 
 var _ graph.FilteredScopedOutlineAggregator = (*Store)(nil)
+
+func scanOutlineQuery(ctx context.Context, tx outlineQueryer, query outlineQuery, scan func(*sql.Rows) error) error {
+	rows, err := outlineRows(ctx, tx, query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := scan(rows); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}

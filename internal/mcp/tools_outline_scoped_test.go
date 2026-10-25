@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,26 +25,44 @@ type outlineCountingReader struct {
 	*store_sqlite.Store
 	allNodes, allNodesLight, allEdges, aggregates int
 	lookedUp                                      []string
+	source                                        *outlineCountingReader
 }
 
-func (r *outlineCountingReader) AllNodes() []*graph.Node { r.allNodes++; return r.Store.AllNodes() }
+func (r *outlineCountingReader) AllNodes() []*graph.Node {
+	r.counters().allNodes++
+	return r.Store.AllNodes()
+}
 func (r *outlineCountingReader) AllNodesLight() []*graph.Node {
-	r.allNodesLight++
+	r.counters().allNodesLight++
 	return r.Store.AllNodesLight()
 }
-func (r *outlineCountingReader) AllEdges() []*graph.Edge { r.allEdges++; return r.Store.AllEdges() }
+func (r *outlineCountingReader) AllEdges() []*graph.Edge {
+	r.counters().allEdges++
+	return r.Store.AllEdges()
+}
 func (r *outlineCountingReader) GetNodesByIDs(ids []string) map[string]*graph.Node {
-	r.lookedUp = append(r.lookedUp, ids...)
+	r.counters().lookedUp = append(r.counters().lookedUp, ids...)
 	return r.Store.GetNodesByIDs(ids)
 }
-func (r *outlineCountingReader) ScopedOutlineCounts(scope graph.NodeScope) graph.OutlineCounts {
-	r.aggregates++
+func (r *outlineCountingReader) ScopedOutlineCounts(scope graph.NodeScope) (graph.OutlineCounts, error) {
+	r.counters().aggregates++
 	return r.Store.ScopedOutlineCounts(scope)
 }
 
-func (r *outlineCountingReader) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter graph.OutlineEdgeFilter) graph.OutlineCounts {
-	r.aggregates++
+func (r *outlineCountingReader) ScopedOutlineCountsFiltered(scope graph.NodeScope, filter graph.OutlineEdgeFilter) (graph.OutlineCounts, error) {
+	r.counters().aggregates++
 	return r.Store.ScopedOutlineCountsFiltered(scope, filter)
+}
+
+func (r *outlineCountingReader) counters() *outlineCountingReader {
+	if r.source != nil {
+		return r.source
+	}
+	return r
+}
+
+func (r *outlineCountingReader) BindReadContext(ctx context.Context) graph.Reader {
+	return &outlineCountingReader{Store: r.Store.WithReadContext(ctx), source: r.counters()}
 }
 
 func outlineFixture(t *testing.T) (*Server, *store_sqlite.Store) {
@@ -243,8 +262,9 @@ func TestOutlineContractRuntimeNeverScansAndPreservesFilters(t *testing.T) {
 	// Explicit ownership sets replace kind classification, even when empty.
 	for _, ids := range []map[string]bool{nil, {}, {"a-lib": true}} {
 		wrapped := newContractCoreEdges(store, ctx, ids)
-		aggregated, ok := scopedOutlineCountsFor(wrapped, graph.NodeScope{WorkspaceID: "ws", RepoAllow: map[string]bool{"a": true}})
+		aggregated, ok, err := scopedOutlineCountsFor(wrapped, graph.NodeScope{WorkspaceID: "ws", RepoAllow: map[string]bool{"a": true}})
 		require.True(t, ok)
+		require.NoError(t, err)
 		var count int
 		for _, edge := range wrapped.AllEdges() {
 			if (graph.NodeScope{WorkspaceID: "ws", RepoAllow: map[string]bool{"a": true}}).Allows(wrapped.GetNode(edge.From)) && (graph.NodeScope{WorkspaceID: "ws", RepoAllow: map[string]bool{"a": true}}).Allows(wrapped.GetNode(edge.To)) {
@@ -264,4 +284,17 @@ func TestOutlineHotspotsStopAfterVisibleRankedHead(t *testing.T) {
 	outlineJSON(t, s, outlineBoundContext(s, "hotspot-head", "", map[string]bool{"a": true, "b": true, "c": true, "legacy": true}), reader)
 	require.NotContains(t, reader.lookedUp, "hot-stale-128")
 	require.LessOrEqual(t, len(reader.lookedUp), 128+10, "only the first hotspot head and analyzer/main candidates are needed")
+}
+
+func TestOutlineContractRuntimeHonorsCancellation(t *testing.T) {
+	s, store := outlineFixture(t)
+	installContractCoreKindTestRuntime(t, s)
+	ctx := outlineBoundContext(s, "cancel-outline", "ws", map[string]bool{"a": true})
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+	reader := &outlineCountingReader{Store: store}
+	_, err := s.handleGetRepoOutline(withRequestView(ctx, &requestView{reader: reader}), makeReq("get_repo_outline", nil))
+	require.True(t, errors.Is(err, context.Canceled))
+	require.Zero(t, reader.allEdges)
+	require.Zero(t, reader.allNodes)
 }

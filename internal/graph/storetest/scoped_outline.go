@@ -60,7 +60,14 @@ func RunScopedOutline(t *testing.T, factory Factory) {
 		"mixed-allow":       {RepoAllow: map[string]bool{"a": true, "b": false}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, want := ag.ScopedOutlineCounts(scope), ref.ScopedOutlineCounts(scope)
+			got, err := ag.ScopedOutlineCounts(scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := ref.ScopedOutlineCounts(scope)
+			if err != nil {
+				t.Fatal(err)
+			}
 			sort.Slice(got.FileImports, func(i, j int) bool { return got.FileImports[i].FilePath < got.FileImports[j].FilePath })
 			sort.Slice(want.FileImports, func(i, j int) bool { return want.FileImports[i].FilePath < want.FileImports[j].FilePath })
 			if !reflect.DeepEqual(got, want) {
@@ -120,7 +127,14 @@ func RunFilteredScopedOutline(t *testing.T, factory Factory) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			scope := graph.NodeScope{RepoAllow: map[string]bool{"repo": true}}
-			got, want := ag.ScopedOutlineCountsFiltered(scope, filter), ref.ScopedOutlineCountsFiltered(scope, filter)
+			got, err := ag.ScopedOutlineCountsFiltered(scope, filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := ref.ScopedOutlineCountsFiltered(scope, filter)
+			if err != nil {
+				t.Fatal(err)
+			}
 			sort.Slice(got.FileImports, func(i, j int) bool { return got.FileImports[i].FilePath < got.FileImports[j].FilePath })
 			sort.Slice(want.FileImports, func(i, j int) bool { return want.FileImports[i].FilePath < want.FileImports[j].FilePath })
 			if !reflect.DeepEqual(got, want) {

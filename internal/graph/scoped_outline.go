@@ -80,7 +80,7 @@ type OutlineCounts struct {
 // an outline. Overlay views deliberately omit it so unsaved edits use the
 // reader-based fallback.
 type ScopedOutlineAggregator interface {
-	ScopedOutlineCounts(NodeScope) OutlineCounts
+	ScopedOutlineCounts(NodeScope) (OutlineCounts, error)
 }
 
 // OutlineEdgeFilter describes the adjacency exclusions a composed reader
@@ -97,7 +97,7 @@ type OutlineEdgeFilter struct {
 // FilteredScopedOutlineAggregator preserves adjacency filters while pushing
 // outline counts into a selected backend. Overlays omit this capability too.
 type FilteredScopedOutlineAggregator interface {
-	ScopedOutlineCountsFiltered(NodeScope, OutlineEdgeFilter) OutlineCounts
+	ScopedOutlineCountsFiltered(NodeScope, OutlineEdgeFilter) (OutlineCounts, error)
 }
 
 func (f OutlineEdgeFilter) Allows(e *Edge, from, to *Node) bool {
@@ -118,11 +118,11 @@ func (f OutlineEdgeFilter) Allows(e *Edge, from, to *Node) bool {
 }
 
 // ScopedOutlineCounts is the in-memory reference implementation.
-func (g *Graph) ScopedOutlineCounts(scope NodeScope) OutlineCounts {
+func (g *Graph) ScopedOutlineCounts(scope NodeScope) (OutlineCounts, error) {
 	return g.ScopedOutlineCountsFiltered(scope, OutlineEdgeFilter{})
 }
 
-func (g *Graph) ScopedOutlineCountsFiltered(scope NodeScope, filter OutlineEdgeFilter) OutlineCounts {
+func (g *Graph) ScopedOutlineCountsFiltered(scope NodeScope, filter OutlineEdgeFilter) (OutlineCounts, error) {
 	out := OutlineCounts{ByLanguage: make(map[string]int)}
 	allowed := make(map[string]bool)
 	for _, n := range g.AllNodes() {
@@ -155,7 +155,7 @@ func (g *Graph) ScopedOutlineCountsFiltered(scope NodeScope, filter OutlineEdgeF
 	for path, count := range imports {
 		out.FileImports = append(out.FileImports, FileImportCountRow{FilePath: path, Count: count})
 	}
-	return out
+	return out, nil
 }
 
 var _ ScopedOutlineAggregator = (*Graph)(nil)
