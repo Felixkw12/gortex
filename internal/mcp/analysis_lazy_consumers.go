@@ -220,6 +220,6 @@ func (s *Server) rerankAnalysisMetrics(nodeIDs []string) map[string]rerank.Analy
 // busy. Other unavailable analysis signals are not writer-contention skips.
 func (s *Server) recordRerankAnalysisSkipped(err error) {
 	if errors.Is(err, graph.ErrAnalysisStoreBusy) {
-		viewmetrics.Count(viewmetrics.SearchRerankAnalysisSkippedBusy)
+		viewmetrics.Count(viewmetrics.SearchRerankAnalysisSkippedBusyTotal)
 	}
 }

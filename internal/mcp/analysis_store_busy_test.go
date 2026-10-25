@@ -60,13 +60,13 @@ func TestRerankAnalysisMetricsNeverWaitForStoreWriter(t *testing.T) {
 	require.NotEmpty(t, want)
 	writer, _ := server.analysisGenerationBackends()
 	unlock := holdAnalysisStoreWriter(t, writer)
-	before := viewmetrics.Read().Counters[viewmetrics.SearchRerankAnalysisSkippedBusy]
+	before := viewmetrics.Read().Counters[viewmetrics.SearchRerankAnalysisSkippedBusyTotal]
 	var got map[string]rerank.AnalysisMetric
 	answerWithin(t, 50*time.Millisecond, "rerank analysis metrics behind the store writer", func() {
 		got = server.rerankAnalysisMetrics(rerankBusyTestIDs)
 	})
 	require.Nil(t, got)
-	require.Equal(t, before+1, viewmetrics.Read().Flat()[viewmetrics.SearchRerankAnalysisSkippedBusy])
+	require.Equal(t, before+1, viewmetrics.Read().Flat()[viewmetrics.SearchRerankAnalysisSkippedBusyTotal])
 	unlock()
 	require.Equal(t, want, server.rerankAnalysisMetrics(rerankBusyTestIDs))
 }
@@ -182,11 +182,11 @@ func TestRerankAnalysisMetricsDiscardPartialBusyBatch(t *testing.T) {
 	for i := range ids {
 		ids[i] = fmt.Sprintf("candidate-%04d", i)
 	}
-	before := viewmetrics.Read().Counters[viewmetrics.SearchRerankAnalysisSkippedBusy]
+	before := viewmetrics.Read().Counters[viewmetrics.SearchRerankAnalysisSkippedBusyTotal]
 	require.Nil(t, server.rerankAnalysisMetrics(ids), "a partially scored candidate set escaped")
 	require.Equal(t, 2, pages)
 	require.Zero(t, wrapped.pointReads, "try-capable backend used the blocking read")
-	require.Equal(t, before+1, viewmetrics.Read().Counters[viewmetrics.SearchRerankAnalysisSkippedBusy])
+	require.Equal(t, before+1, viewmetrics.Read().Counters[viewmetrics.SearchRerankAnalysisSkippedBusyTotal])
 }
 
 func TestRerankAnalysisMetricsRequireBothMaxima(t *testing.T) {
@@ -203,9 +203,9 @@ func TestRerankAnalysisMetricsRequireBothMaxima(t *testing.T) {
 				}
 				return wrapped.AnalysisQueryStore.TopAnalysisNodeMetrics(generationID, metric, limit, cursor)
 			}}
-			before := viewmetrics.Read().Counters[viewmetrics.SearchRerankAnalysisSkippedBusy]
+			before := viewmetrics.Read().Counters[viewmetrics.SearchRerankAnalysisSkippedBusyTotal]
 			require.Nil(t, server.rerankAnalysisMetrics(rerankBusyTestIDs))
-			require.Equal(t, before+1, viewmetrics.Read().Counters[viewmetrics.SearchRerankAnalysisSkippedBusy])
+			require.Equal(t, before+1, viewmetrics.Read().Counters[viewmetrics.SearchRerankAnalysisSkippedBusyTotal])
 			busy = false
 			require.NotEmpty(t, server.rerankAnalysisMetrics(rerankBusyTestIDs))
 			require.Equal(t, 2, reads[failedMetric], "busy maximum was cached instead of retried")
