@@ -642,6 +642,10 @@ type Server struct {
 	// contractRegistries carries repository registries between bound
 	// requests while their projection inputs stay unchanged.
 	contractRegistries contractRegistryCache
+	// contractCoreExclusions is the identity-set cache readerFor's
+	// contract-core readers share; nil shares the process-wide
+	// defaultContractCoreExclusions.
+	contractCoreExclusions *contractCoreExclusionCache
 
 	// toolPolicy restricts the published tool surface to a named preset
 	// / allow-deny set (see tool_presets.go). Resolved at construction

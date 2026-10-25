@@ -29,7 +29,13 @@ type contractCoreBoundedFiles struct {
 type contractCoreFilteredNamesBoundedFiles struct{ *contractCoreBoundedFiles }
 
 func newContractCoreEdges(reader graph.Reader, ctx context.Context, ids map[string]bool) graph.Reader {
-	return wrapContractCoreEdges(&contractCoreEdges{Reader: reader, ctx: ctx, contractIDs: ids, edgeTiming: coreEdgeTimingFromContext(ctx)})
+	return newContractCoreEdgesSharing(reader, ctx, ids, defaultContractCoreExclusions)
+}
+
+// newContractCoreEdgesSharing is newContractCoreEdges classifying checked
+// batches through the identity sets exclusions keeps.
+func newContractCoreEdgesSharing(reader graph.Reader, ctx context.Context, ids map[string]bool, exclusions *contractCoreExclusionCache) graph.Reader {
+	return wrapContractCoreEdges(&contractCoreEdges{Reader: reader, ctx: ctx, contractIDs: ids, edgeTiming: coreEdgeTimingFromContext(ctx), exclusions: exclusions})
 }
 
 // wrapContractCoreEdges selects the capability variant for core's reader.

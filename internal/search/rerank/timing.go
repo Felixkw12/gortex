@@ -121,11 +121,17 @@ func (t *CentralityTiming) Add(o CentralityTiming) {
 
 // CoreEdgeTiming is nested inside CentralityTiming.EdgeRead. EndpointLookup
 // is part of Filter, not another additive cost alongside the containing total.
-// EndpointDistinctIDs sums each lookup's distinct IDs, not request-wide uniques.
+// EndpointReads counts endpoint lookups that read the selected reader, not
+// statements (a batch whose identity-set read declines and falls back to its
+// per-ID read counts once), and EndpointIDs / EndpointDistinctIDs their inputs;
+// EndpointDistinctIDs sums each lookup's distinct IDs, not request-wide
+// uniques. EndpointCacheHits counts checked batches answered from a cached
+// identity set without a read.
 type CoreEdgeTiming struct {
 	RawRead, Filter, EndpointLookup                 time.Duration
 	RawReads, RawRows, KeptRows                     int
 	EndpointReads, EndpointIDs, EndpointDistinctIDs int
+	EndpointCacheHits                               int
 	CheckedClassifiers, LegacyClassifiers           int
 	ReaderType                                      string
 }
@@ -140,6 +146,7 @@ func (t *CoreEdgeTiming) Add(o CoreEdgeTiming) {
 	t.EndpointReads += o.EndpointReads
 	t.EndpointIDs += o.EndpointIDs
 	t.EndpointDistinctIDs += o.EndpointDistinctIDs
+	t.EndpointCacheHits += o.EndpointCacheHits
 	t.CheckedClassifiers += o.CheckedClassifiers
 	t.LegacyClassifiers += o.LegacyClassifiers
 	if t.ReaderType == "" {

@@ -27,6 +27,9 @@ type contractCoreEdges struct {
 	ctx         context.Context
 	contractIDs map[string]bool
 	edgeTiming  *rerank.CoreEdgeTiming
+	// exclusions shares the selected reader's contract-owned identity set
+	// across batches and requests; nil reads every checked batch's endpoints.
+	exclusions *contractCoreExclusionCache
 }
 
 // SearchMutationRevision forwards the selected reader's invalidation token.
@@ -73,26 +76,21 @@ func (r *contractCoreEdges) filter(rows []*graph.Edge) []*graph.Edge {
 	var excluded map[string]struct{}
 	if r.contractIDs == nil && len(ids) > 0 {
 		var started time.Time
-		if t := r.edgeTiming; t != nil {
-			t.EndpointReads++
-			t.EndpointIDs += len(ids)
-			unique := make(map[string]struct{}, len(ids))
-			for _, id := range ids {
-				if id != "" {
-					unique[id] = struct{}{}
-				}
-			}
-			t.EndpointDistinctIDs += len(unique)
-		}
 		if hasContractCoreReadErrors(r.ctx) {
 			if r.edgeTiming != nil {
 				r.edgeTiming.CheckedClassifiers++
 				started = time.Now()
 			}
+			var read bool
 			var err error
-			excluded, err = graph.GetNodeIDsByKindsContext(r.ctx, r.Reader, ids, []graph.NodeKind{graph.KindContract, graph.KindContractBridge, graph.KindConfigKey})
-			if r.edgeTiming != nil {
-				r.edgeTiming.EndpointLookup += time.Since(started)
+			excluded, read, err = r.checkedOwnedEndpoints(ids)
+			if t := r.edgeTiming; t != nil {
+				t.EndpointLookup += time.Since(started)
+				if read {
+					countContractCoreEndpointRead(t, ids)
+				} else {
+					t.EndpointCacheHits++
+				}
 			}
 			if err != nil {
 				recordContractCoreReadError(r.ctx, err)
@@ -102,6 +100,7 @@ func (r *contractCoreEdges) filter(rows []*graph.Edge) []*graph.Edge {
 			// Potential writers keep the previous errorless classifier. A late
 			// read refusal must never discard their committed mutation receipt.
 			if r.edgeTiming != nil {
+				countContractCoreEndpointRead(r.edgeTiming, ids)
 				r.edgeTiming.LegacyClassifiers++
 				started = time.Now()
 			}
@@ -132,6 +131,41 @@ func (r *contractCoreEdges) filter(rows []*graph.Edge) []*graph.Edge {
 		}
 	}
 	return result
+}
+
+// checkedOwnedEndpoints answers which of ids the contract analysis owns, and
+// whether answering read the selected reader: a current cached identity set
+// answers without a statement, otherwise one membership read of ids does.
+func (r *contractCoreEdges) checkedOwnedEndpoints(ids []string) (map[string]struct{}, bool, error) {
+	owned, read, err := r.exclusions.owned(r.ctx, r.Reader)
+	if err != nil {
+		return nil, read, err
+	}
+	if owned != nil {
+		if !read {
+			// A cached answer still ends with the request, as the read would.
+			if err := r.ctx.Err(); err != nil {
+				return nil, false, err
+			}
+		}
+		return owned, read, nil
+	}
+	owned, err = graph.GetNodeIDsByKindsContext(r.ctx, r.Reader, ids, contractCoreOwnedKinds)
+	return owned, true, err
+}
+
+// countContractCoreEndpointRead counts one endpoint lookup that read the
+// selected reader, with its input and distinct IDs.
+func countContractCoreEndpointRead(t *rerank.CoreEdgeTiming, ids []string) {
+	t.EndpointReads++
+	t.EndpointIDs += len(ids)
+	unique := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			unique[id] = struct{}{}
+		}
+	}
+	t.EndpointDistinctIDs += len(unique)
 }
 
 func (r *contractCoreEdges) GetOutEdges(id string) []*graph.Edge {

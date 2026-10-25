@@ -172,7 +172,11 @@ func (s *Server) readerFor(ctx context.Context) graph.Reader {
 	if s.contractAnalysisRuntime != nil {
 		// Legacy derived rows are not current source/caller facts. The local
 		// adjacency filter needs no registry, input vector or attachment.
-		return newContractCoreEdges(reader, ctx, nil)
+		exclusions := s.contractCoreExclusions
+		if exclusions == nil {
+			exclusions = defaultContractCoreExclusions
+		}
+		return newContractCoreEdgesSharing(reader, ctx, nil, exclusions)
 	}
 	return reader
 }

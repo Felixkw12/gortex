@@ -597,6 +597,17 @@ func generationReadProbes() []genProbe {
 			}
 			return out
 		}},
+		{name: "NodeIDsByKindsBoundedContext", run: func(t *testing.T, s *Store) []string {
+			ids, complete, err := s.NodeIDsByKindsBoundedContext(context.Background(), []graph.NodeKind{graph.KindFunction, graph.KindMethod, graph.KindType}, 1000)
+			if err != nil || !complete {
+				t.Fatalf("NodeIDsByKindsBoundedContext: complete=%v err=%v", complete, err)
+			}
+			out := make([]string, 0, len(ids))
+			for _, id := range ids {
+				out = append(out, "id "+id)
+			}
+			return out
+		}},
 		{name: "ExistingNodeIDs", run: func(t *testing.T, s *Store) []string {
 			out := make([]string, 0)
 			for id := range s.ExistingNodeIDs(genReadProbeIDs()) {
