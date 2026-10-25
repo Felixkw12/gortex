@@ -584,22 +584,24 @@ func compute(ctx context.Context, g graph.Store, seedID string, keep EdgeFilter)
 
 		// Batch the node-kind lookups too — the original called
 		// g.GetNode(e.From) once per discovered node (a second per-node
-		// query storm on disk backends). File / import nodes are still
-		// walked through for fan-out (they stay in `next`) but excluded
-		// from the result tiers, exactly as before.
+		// query storm on disk backends). Only presence and kind decide a
+		// tier, so the kind projection answers without decoding node
+		// bodies. File / import nodes are still walked through for
+		// fan-out (they stay in `next`) but excluded from the result
+		// tiers, exactly as before.
 		ids := make([]string, len(cands))
 		for i := range cands {
 			ids[i] = cands[i].from
 		}
-		nodes, nodeErr := getNodesContext(ctx, g, ids)
+		kinds, nodeErr := graph.GetNodeKindsByIDsContext(ctx, g, ids)
 		if nodeErr != nil {
 			truncated = true
 			break
 		}
 		slot := depth - 1
 		for _, c := range cands {
-			n := nodes[c.from]
-			if n == nil || n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			row, ok := kinds[c.from]
+			if !ok || row.Kind == graph.KindFile || row.Kind == graph.KindImport {
 				continue
 			}
 			result[slot].IDs = append(result[slot].IDs, c.from)
@@ -815,20 +817,6 @@ func getNodeContext(ctx context.Context, g graph.Store, id string) (*graph.Node,
 		return nil, err
 	}
 	return g.GetNode(id), nil
-}
-
-type contextNodesGetter interface {
-	GetNodesByIDsContext(context.Context, []string) (map[string]*graph.Node, error)
-}
-
-func getNodesContext(ctx context.Context, g graph.Store, ids []string) (map[string]*graph.Node, error) {
-	if getter, ok := g.(contextNodesGetter); ok {
-		return getter.GetNodesByIDsContext(ctx, ids)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return g.GetNodesByIDs(ids), nil
 }
 
 func LookupContext(parent context.Context, g graph.Store, seedID string) (d1, d2, d3 []Entry, hit, truncated bool) {
