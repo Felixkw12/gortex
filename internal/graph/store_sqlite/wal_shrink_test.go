@@ -11,13 +11,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// writerJournalLimit reads journal_size_limit on the store's writer connection.
+// writerJournalLimit reads journal_size_limit on the store's active write
+// connection (the writer, or the pinned connection of a bulk window).
 func writerJournalLimit(t *testing.T, s *Store) int64 {
 	t.Helper()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	conn, release, err := s.activeWriteConnLocked(t.Context())
+	require.NoError(t, err)
+	defer release()
 	var limit int64
-	require.NoError(t, s.writerDB.QueryRow(`PRAGMA journal_size_limit`).Scan(&limit))
+	require.NoError(t, conn.QueryRowContext(t.Context(), `PRAGMA journal_size_limit`).Scan(&limit))
 	return limit
 }
 
@@ -311,4 +315,28 @@ func TestWALInPlaceResetInterruptedAfterItsWork(t *testing.T) {
 			require.False(t, s.walShrinkNeeded())
 		})
 	}
+}
+
+// SQLite applies journal_size_limit when it prepares the PRAGMA, before the
+// driver looks at the context. Inside a bulk window the pinned connection is
+// used without a pool checkout that would refuse an ended context first, so a
+// reset tried after its deadline lifted the bulk connection's limit to -1,
+// returned the context's error, and left no shrink to restore the limit.
+func TestWALInPlaceResetOnAnEndedContextLeavesTheLimit(t *testing.T) {
+	// Every log is reset in place; restored after the store closes.
+	prevInPlace := walShrinkInPlaceBytes
+	walShrinkInPlaceBytes = 1
+	t.Cleanup(func() { walShrinkInPlaceBytes = prevInPlace })
+	s, _ := finalBackfillFixture(t)
+	engaged, err := s.BeginGenerationBulkLoad(77)
+	require.NoError(t, err)
+	require.True(t, engaged)
+	defer func() { require.NoError(t, s.EndGenerationBulkLoadFor(77)) }()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	s.writeMu.Lock()
+	_, err = s.resetWALForReclaim(ctx)
+	s.writeMu.Unlock()
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, int64(walShrinkKeepBytes), writerJournalLimit(t, s), "a reset on an ended context changes no limit")
 }

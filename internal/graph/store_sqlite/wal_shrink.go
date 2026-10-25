@@ -265,13 +265,25 @@ func (s *Store) restartWALInPlaceOn(ctx context.Context, conn *sql.Conn, result 
 
 // setWriterJournalLimitLocked sets journal_size_limit on the writer
 // connection. The caller holds writeMu.
+//
+// SQLite applies the limit when it prepares the PRAGMA, before the driver
+// looks at ctx, so a call on an ended context changed the limit and still
+// returned the context's error: inside a bulk window, where no pool checkout
+// refuses the context first, a reset retried after its deadline left the bulk
+// connection at -1 with no shrink pending. An ended context therefore changes
+// nothing, and the PRAGMA runs without ctx, so its error says whether the
+// limit changed. It only sets a field of the pager and takes no lock, so it
+// cannot extend a hold.
 func (s *Store) setWriterJournalLimitLocked(ctx context.Context, limit int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	conn, release, err := s.activeWriteConnLocked(ctx)
 	if err != nil {
 		return err
 	}
 	defer release()
-	_, err = conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA journal_size_limit = %d`, limit))
+	_, err = conn.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf(`PRAGMA journal_size_limit = %d`, limit))
 	return err
 }
 
