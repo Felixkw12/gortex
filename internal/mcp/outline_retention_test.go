@@ -22,6 +22,20 @@ func TestOutlineRepeatedPrimaryCWDUsesGenerationAndRetainedHotspots(t *testing.T
 	stack := newViewStack(t)
 	s := stack.srv
 	t.Cleanup(s.DrainBackground)
+	// The routing fixture alone has too few connected callables to form a
+	// detected community. Seed one real population so the proof exercises
+	// SQL membership, rather than the empty-generation shortcut.
+	var nodes []*graph.Node
+	var edges []*graph.Edge
+	for i := 0; i < 80; i++ {
+		id := fmt.Sprintf("repo/analysis.go::Handler%03d", i)
+		nodes = append(nodes, &graph.Node{ID: id, Name: fmt.Sprintf("Handler%03d", i), Kind: graph.KindFunction,
+			RepoPrefix: "repo", WorkspaceID: "main-ws", ProjectID: "repo", FilePath: "repo/analysis.go", Language: "go"})
+		if i > 0 {
+			edges = append(edges, &graph.Edge{From: nodes[i-1].ID, To: id, Kind: graph.EdgeCalls})
+		}
+	}
+	stack.store.AddBatch(nodes, edges)
 	counted := &outlineCountingReader{Store: stack.store}
 	s.graph = counted
 	installContractCoreKindTestRuntime(t, s)
@@ -29,6 +43,7 @@ func TestOutlineRepeatedPrimaryCWDUsesGenerationAndRetainedHotspots(t *testing.T
 	metrics := s.populateAnalysisLocked()
 	s.analysisMu.Unlock()
 	require.NoError(t, metrics.cacheSaveErr)
+	require.Positive(t, s.analysisGeneration.CommunityCount, "the fixture must exercise published community rows")
 	require.True(t, s.releaseTransientAnalysisIfIdle())
 	var builds atomic.Int32
 	s.hotspotsFn = func(reader graph.Reader, communities *analysis.CommunityResult, threshold float64) []analysis.HotspotEntry {
@@ -45,9 +60,9 @@ func TestOutlineRepeatedPrimaryCWDUsesGenerationAndRetainedHotspots(t *testing.T
 				require.True(t, wrapped, "use the daemon's production contract-core reader")
 				view := requestViewFromContext(ctx)
 				require.False(t, view.routed(), "a primary CWD must keep the indexed corpus")
-				opts, bound := s.sessionScopeOptions(ctx)
+				_, bound := s.sessionScopeOptions(ctx)
 				require.True(t, bound)
-				opts, _ = s.scopeOptionsWithRepoNarrow(ctx, repoAllowFromContext(ctx))
+				opts, _ := s.scopeOptionsWithRepoNarrow(ctx, repoAllowFromContext(ctx))
 				_, supported, err := s.outlineGenerationCommunities(ctx, reader, graph.NodeScope{
 					WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow,
 				})
