@@ -730,9 +730,15 @@ func TestAForgottenCheckoutStopsStatingWhyItHasNoBuildLoop(t *testing.T) {
 	require.Len(t, f.lc.CoordinatorStartFailures(), 1,
 		"the checkout lost its build loop and nothing says why")
 
-	out, err := f.lc.Untrack(ctx, f.main)
+	_, err = f.lc.Untrack(ctx, f.main)
 	require.NoError(t, err)
-	require.False(t, out.Pending, "the untrack did not finish, so this test proves nothing")
+	// The main checkout owns the family's primary, so its untrack forgets the
+	// automatic checkout before it releases the primary graph. That release can
+	// still be the cleanup runtime's to finish when Untrack returns, so the
+	// checkout's identity, not a finished purge, is what says it was forgotten.
+	_, found, err = f.catalog.GetCheckout(ctx, f.automatic.CheckoutID)
+	require.NoError(t, err)
+	require.False(t, found, "the untrack did not forget the checkout, so this test proves nothing")
 
 	require.Empty(t, f.lc.CoordinatorStartFailures(),
 		"a checkout that was untracked still states why it has no build loop")

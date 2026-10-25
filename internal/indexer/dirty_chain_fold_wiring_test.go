@@ -122,10 +122,13 @@ func TestSteppedFoldLandsUnderEditsAndRebasesTheLayerAbove(t *testing.T) {
 }
 
 // 2. A burst of 12 edits, a search after each, with the fold running in the
-// background: no edit meets the chain bound, and writer probes during steps
-// complete within the Store tests' timing policy. The probe measures the whole
-// analysis-header call, including SQL, rather than isolated write-gate wait;
-// race builds use the existing Store race slack.
+// background: no edit meets the chain bound, and no edit waits on a step.
+// Between steps a writer announces its write, as an edit does, and then makes
+// an analysis-header call: the fold commits no step from the announcement
+// until the call is done. This is counted, not timed: a step here is short
+// enough that a fold that never gave way would still pass a wall-clock bound,
+// which a loaded runner can miss for a fold that does. The store's fold tests
+// cover a step a writer interrupts in flight.
 //
 // The burst's interleaving is driven by events, not by a wall-clock pace:
 // every fold an edit schedules is held before its first step until the next
@@ -139,6 +142,9 @@ func TestSteppedFoldBurstNeverExhaustsTheChainAndNoEditWaitsOnAStep(t *testing.T
 	var probes []time.Duration
 	var probeErrors []error
 	var probeWG sync.WaitGroup
+	// steps counts the folds' committed steps; overtaken, the probes a step
+	// committed under.
+	steps, overtaken := 0, 0
 	probeCtx, cancelProbes := context.WithCancel(t.Context())
 	probeAdmissionClosed := false
 	joinProbes := func() {
@@ -177,14 +183,22 @@ func TestSteppedFoldBurstNeverExhaustsTheChainAndNoEditWaitsOnAStep(t *testing.T
 			}
 		}
 		probeMu.Lock()
+		if step > 0 {
+			steps++
+		}
 		if probeAdmissionClosed {
 			probeMu.Unlock()
 			return
 		}
+		// Announced between steps, the write keeps the fold from its next
+		// step until the probe ends it.
+		endWrite := f.store.AnnounceWrite()
+		announced := steps
 		probeWG.Add(1)
 		probeMu.Unlock()
 		go func() {
 			defer probeWG.Done()
+			defer endWrite()
 			select {
 			case <-time.After(time.Millisecond):
 			case <-probeCtx.Done():
@@ -195,6 +209,9 @@ func TestSteppedFoldBurstNeverExhaustsTheChainAndNoEditWaitsOnAStep(t *testing.T
 			_, _, err := f.store.LoadActiveAnalysisHeader(0)
 			probeMu.Lock()
 			probes = append(probes, time.Since(started))
+			if steps != announced {
+				overtaken++
+			}
 			if err != nil {
 				probeErrors = append(probeErrors, err)
 			}
@@ -261,13 +278,9 @@ func TestSteppedFoldBurstNeverExhaustsTheChainAndNoEditWaitsOnAStep(t *testing.T
 	for _, p := range probes {
 		worst = max(worst, p)
 	}
-	t.Logf("burst: %d folds landed, %d edits above a running fold, %d analysis-header probes during steps, worst total probe latency %s", stats.Flipped, above, len(probes), worst)
-	limit := 20 * time.Millisecond
-	if indexerRaceDetectorOn {
-		limit = 100 * time.Millisecond
-	}
-	if worst > limit {
-		t.Fatalf("analysis-header total probe latency %s exceeded %s while the fold stepped", worst, limit)
+	t.Logf("burst: %d folds landed, %d edits above a running fold, %d analysis-header probes during %d steps, worst total probe latency %s", stats.Flipped, above, len(probes), steps, worst)
+	if overtaken > 0 {
+		t.Fatalf("a fold step committed under %d of %d announced writers", overtaken, len(probes))
 	}
 }
 
