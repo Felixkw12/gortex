@@ -107,10 +107,14 @@ class SelectionTests(Repository):
     def test_resource_dependency_workflow_and_unknown_changes_fall_back(self):
         for path in ("leaf/testdata/input.txt", "go.sum", "go.mod", "go.work", "go.work.sum",
                      "internal/thirdparty/helper/go.mod", "internal/thirdparty/helper/go.sum",
-                     ".github/workflows/ci.yml", "README.md", "unknown.data"):
+                     ".github/workflows/ci.yml", "scripts/ci_workflow_test.go",
+                     ".github/check.go", "README.md", "unknown.data"):
             with self.subTest(path=path):
                 self.git("reset", "--hard", self.base)
-                self.write(path, (self.root / path).read_text() + "\n" if (self.root / path).exists() else "new input\n")
+                text = (self.root / path).read_text() + "\n" if (self.root / path).exists() else "new input\n"
+                if path.endswith(".go"):
+                    text = "package cipolicy\n"
+                self.write(path, text)
                 data = self.plan(self.commit())
                 self.assertEqual(data["mode"], "full")
                 self.assertIn(path, data["reason"])

@@ -54,8 +54,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Test selection and runner policy
+      - name: Test selection and runner fixtures
         run: python3 -m unittest discover -s scripts -p 'test_ci*.py'
+      - name: Test workflow policy through the production gate
+        run: go test -count=1 ./scripts
       - name: Select complete packages or fall back to full
         id: select
         env:

@@ -223,7 +223,8 @@ def plan(root, event, base, head, full=False, labels=(), author=""):
             # Classify before discovery; CI/dependency/resource changes must
             # not pay for metadata only to fall back to full anyway.
             for status, paths in changes:
-                if status not in ("A", "M") or not paths[0].endswith(".go"):
+                if (status not in ("A", "M") or not paths[0].endswith(".go") or
+                        paths[0].startswith(("scripts/", ".github/"))):
                     raise FullSuite(f"full fallback for {status}: {' -> '.join(paths)}")
             metadata = graph(root, config)
             selected = select(root, changes, metadata)

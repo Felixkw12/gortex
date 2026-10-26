@@ -37,7 +37,8 @@ suite for:
   infer old dependencies from a head-only graph.
 - All non-Go files, including documentation, fixtures, embeds, C/C++ inputs,
   generators, CI scripts and configuration. This intentionally makes changes to
-  the selector itself run the existing full cross-platform suite.
+  the selector itself run the existing full cross-platform suite. Go files under
+  `scripts/` and `.github/` also always request full mode.
 - Changed cgo/generated/embed/generate inputs, unknown ownership, nested module
   inputs outside the root package census, or unsupported build constraints.
 - Missing comparison revisions, missing Git objects, failed/incomplete Go
@@ -87,13 +88,16 @@ checks or change administrative rulesets.
 
 ## Validation and expected scope
 
-The selector tests create isolated Git/Go modules and exercise reverse imports,
+The Go workflow-policy tests (`go test ./scripts`) invoke the production Python
+gate CLI directly, covering valid and rejected receipts and workflow wiring.
+The selector and runner fixtures remain Python tests. They create isolated
+Git/Go modules and exercise reverse imports,
 test-only/race/platform imports, local replacement bridges, additions,
 deletes/renames, resource and metadata fallbacks, explicit overrides, and stale
 or malformed manifests. A fixture also runs the real partition runner in full
 and affected modes and compares the executed tests.
 
-Representative package/job selections on the implementation base (199 root Go
+Representative package/job selections on the implementation tree (200 root Go
 packages per target) are shown below. These counts describe planned work, not
 measured speedups; setup and compilation costs remain.
 
