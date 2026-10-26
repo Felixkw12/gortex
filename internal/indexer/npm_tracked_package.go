@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/zzet/gortex/internal/modules"
 	"github.com/zzet/gortex/internal/resolver"
@@ -58,6 +59,8 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 			cached = prior.lookup
 			return
 		}
+		// Taken before the first stat, so a racy stamp is never judged against a later time.
+		stampedAt := time.Now()
 		files := make(map[string]npmPackageFileStamp)
 		watch := func(file string) { files[file] = npmPackageStamp(file) }
 		for prefix, root := range roots {
@@ -117,7 +120,7 @@ func (mi *MultiIndexer) npmPackageLookup() resolver.NpmPackageLookup {
 				})
 			}
 		}
-		mi.npmPackageCache = &npmPackageSnapshot{revision: revision, roots: roots, workspaces: workspaces, files: files, lookup: lookup}
+		mi.npmPackageCache = &npmPackageSnapshot{revision: revision, roots: roots, workspaces: workspaces, files: files, stampedAt: stampedAt, lookup: lookup}
 	}
 	lookup = func(specifier string) map[string]resolver.NpmPackageTarget {
 		once.Do(build)
