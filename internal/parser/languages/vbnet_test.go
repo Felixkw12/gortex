@@ -829,6 +829,46 @@ func TestVBNetExtractor_UnterminatedBlockExtent(t *testing.T) {
 	assert.Equal(t, graph.KindFunction, m.Kind)
 }
 
+// A multiline lambda closes with the same `End Sub` / `End Function` as its
+// enclosing callable; the enclosing extent must run through its own
+// terminator so calls after the lambda stay attributed to it.
+func TestVBNetExtractor_MultilineLambdaExtent(t *testing.T) {
+	src := []byte(`Public Class Worker
+    Public Sub Run()
+        Dim action = Sub()
+                         Work()
+                     End Sub
+
+        client.Save()
+    End Sub
+
+    Public Function Compute() As Integer
+        Dim f = Function(x As Integer) As Integer
+                    Return x + 1
+                End Function
+
+        Return calc.Apply(f)
+    End Function
+End Class
+`)
+	res, err := NewVBNetExtractor().Extract("w.vb", src)
+	require.NoError(t, err)
+
+	run := vbFind(res.Nodes, "Run")
+	require.NotNil(t, run)
+	assert.Equal(t, 2, run.StartLine)
+	assert.Equal(t, 8, run.EndLine)
+	assert.True(t, vbHasEdge(res.Edges, graph.EdgeCalls, run.ID, "unresolved::Save"),
+		"call after a Sub lambda must stay attributed to Run")
+
+	compute := vbFind(res.Nodes, "Compute")
+	require.NotNil(t, compute)
+	assert.Equal(t, 10, compute.StartLine)
+	assert.Equal(t, 16, compute.EndLine)
+	assert.True(t, vbHasEdge(res.Edges, graph.EdgeCalls, compute.ID, "unresolved::Apply"),
+		"call after a Function lambda must stay attributed to Compute")
+}
+
 // Interface method sets feed the resolver's IMPLEMENTS inference, which reads
 // Meta["methods"] rather than member edges. csharp.go stamps this and VB
 // mirrors it, so a VB interface supports the same inference as a C# one.

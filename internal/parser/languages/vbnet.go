@@ -60,7 +60,12 @@ var (
 	// to sit directly after the modifier run.
 	vbSubRe      = regexp.MustCompile(`(?im)^[ \t]*(?:(?:Public|Private|Protected|Friend|Shared|Overrides|Overridable|MustOverride|NotOverridable|Shadows|Partial|Async|Iterator)[ \t]+)*Sub[ \t]+([A-Za-z_]\w*)`)
 	vbFunctionRe = regexp.MustCompile(`(?im)^[ \t]*(?:(?:Public|Private|Protected|Friend|Shared|Overrides|Overridable|MustOverride|NotOverridable|Shadows|Partial|Async|Iterator)[ \t]+)*Function[ \t]+([A-Za-z_]\w*)`)
-	vbPropertyRe = regexp.MustCompile(`(?im)^[ \t]*(?:(?:Public|Private|Protected|Friend|Shared|Overrides|Overridable|MustOverride|NotOverridable|Shadows|ReadOnly|WriteOnly|Default|Iterator)[ \t]+)*Property[ \t]+([A-Za-z_]\w*)`)
+	// A multiline lambda opener — `Sub(...)` / `Function(...) [As T]` ending
+	// its line — closes with the same `End Sub` / `End Function` as the
+	// enclosing callable, so it counts as a nested block for extent depth.
+	vbSubLambdaRe      = regexp.MustCompile(`(?i)\bSub[ \t]*\([^()]*\)\s*(?:'.*)?$`)
+	vbFunctionLambdaRe = regexp.MustCompile(`(?i)\bFunction[ \t]*\([^()]*\)(?:[ \t]+As[ \t]+[^']*)?\s*(?:'.*)?$`)
+	vbPropertyRe       = regexp.MustCompile(`(?im)^[ \t]*(?:(?:Public|Private|Protected|Friend|Shared|Overrides|Overridable|MustOverride|NotOverridable|Shadows|ReadOnly|WriteOnly|Default|Iterator)[ \t]+)*Property[ \t]+([A-Za-z_]\w*)`)
 
 	vbImportsRe    = regexp.MustCompile(`(?im)^[ \t]*Imports[ \t]+(?:[A-Za-z_]\w*[ \t]*=[ \t]*)?([A-Za-z_][\w.]*)`)
 	vbInheritsRe   = regexp.MustCompile(`(?im)^[ \t]*Inherits[ \t]+([A-Za-z_][\w.]*)`)
@@ -276,11 +281,12 @@ func (e *VBNetExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 		freeKind   graph.NodeKind
 		memberKind graph.NodeKind
 		skip       *regexp.Regexp
+		nestRe     *regexp.Regexp
 	}{
-		{vbSubRe, "end sub", graph.KindFunction, graph.KindMethod, vbDeclareRe},
-		{vbFunctionRe, "end function", graph.KindFunction, graph.KindMethod, vbDeclareRe},
-		{vbPropertyRe, "end property", graph.KindField, graph.KindField, nil},
-		{vbEventRe, "end event", graph.KindEvent, graph.KindEvent, nil},
+		{vbSubRe, "end sub", graph.KindFunction, graph.KindMethod, vbDeclareRe, vbSubLambdaRe},
+		{vbFunctionRe, "end function", graph.KindFunction, graph.KindMethod, vbDeclareRe, vbFunctionLambdaRe},
+		{vbPropertyRe, "end property", graph.KindField, graph.KindField, nil, nil},
+		{vbEventRe, "end event", graph.KindEvent, graph.KindEvent, nil, nil},
 	} {
 		for _, m := range spec.re.FindAllSubmatchIndex(src, -1) {
 			line := lineAt(src, m[0])
@@ -291,9 +297,15 @@ func (e *VBNetExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 			}
 			name := string(src[m[2]:m[3]])
 			// Interface members, MustOverride members and auto-properties have
-			// no terminator; findKeywordBlockEnd returns the start line, which
+			// no terminator; both block-end helpers return the start line, which
 			// is the correct single-line extent.
-			end := findKeywordBlockEnd(lines, line, spec.endKw)
+			var end int
+			if spec.nestRe != nil {
+				// Sub/Function count same-kind multiline lambdas as nesting.
+				end = vbContainerEnd(lines, line, spec.nestRe, spec.endKw)
+			} else {
+				end = findKeywordBlockEnd(lines, line, spec.endKw)
+			}
 			emitCallable(name, line, end, spec.freeKind, spec.memberKind, nil)
 		}
 	}
