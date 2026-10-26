@@ -120,6 +120,8 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 	originals := make(map[graph.EdgeIdentity]*graph.Edge)
 	names := make(map[string][]*graph.Node)
 	imports := make(map[string]bool)
+	admitted := make(map[[3]string]bool)
+	repos := make(map[string]goModuleRepoFacts)
 	flush := func() {
 		if len(batch) > 0 {
 			if !cr.applyGoModuleReindexes(batch) {
@@ -134,6 +136,7 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		}
 		clear(names)
 		clear(imports)
+		clear(admitted)
 	}
 	collect := externalCallCandidateEdges(cr.graph)
 	collect(func(row externalCallCandidate) bool {
@@ -161,13 +164,6 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		if !tracked {
 			return true
 		}
-		cr.noteGoModuleSourceFile(e)
-		name := spec[sep+2:]
-		candidates, ok := names[name]
-		if !ok {
-			candidates = cr.graph.FindNodesByName(name)
-			names[name] = candidates
-		}
 		source := row.source
 		if source == nil {
 			source = cr.graph.GetNode(e.From)
@@ -175,6 +171,21 @@ func (cr *CrossRepoResolver) retryGoModuleDeps(ctx context.Context, stats *Cross
 		caller := ""
 		if source != nil {
 			caller = source.RepoPrefix
+		}
+		key := [3]string{importPath, caller, candidateWorkspaceID(source)}
+		admits, known := admitted[key]
+		if !known {
+			admits = cr.goModuleTrackedPackageAdmits(importPath, source, repos)
+			admitted[key] = admits
+		}
+		if admits {
+			cr.noteGoModuleSourceFile(e)
+		}
+		name := spec[sep+2:]
+		candidates, ok := names[name]
+		if !ok {
+			candidates = cr.graph.FindNodesByName(name)
+			names[name] = candidates
 		}
 		match := cr.goModuleCandidate(spec[:sep], candidates, caller, candidateWorkspaceID(source))
 		if match != nil {
@@ -220,7 +231,7 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 	}
 	keys := make(map[string]struct{})
 	providers := make(map[string][]*graph.Node)
-	synthetic := make(map[string]struct{})
+	synthetic := make(map[string][]*graph.Node)
 	for _, file := range definitionFiles {
 		for _, n := range nodesByFile[file] {
 			if n == nil || n.Language != "go" || n.Name == "" || (n.Kind != graph.KindFunction && n.Kind != graph.KindType && n.Kind != graph.KindInterface) {
@@ -235,7 +246,8 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 			providers[spec] = append(providers[spec], n)
 			keys[graph.UnresolvedMarker+"extern::"+spec] = struct{}{}
 			keys["dep::"+spec] = struct{}{}
-			synthetic[externalCallPrefix+"dep::"+module+strings.TrimPrefix(dir, n.RepoPrefix)] = struct{}{}
+			terminal := externalCallPrefix + "dep::" + module + strings.TrimPrefix(dir, n.RepoPrefix)
+			synthetic[terminal] = append(synthetic[terminal], n)
 		}
 	}
 	var ids []string
@@ -258,10 +270,21 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 			return nil, fact, err
 		}
 	}
+	sourceOf := func(id string) *graph.Node {
+		source, known := sources[id]
+		if !known {
+			source = cr.cachedGetNode(id)
+			sources[id] = source
+		}
+		return source
+	}
 	for _, incoming := range incomingByID {
 		for _, e := range incoming {
 			if strings.HasPrefix(e.To, externalCallPrefix) {
-				cr.noteGoModuleSourceFile(e)
+				importPath := strings.TrimPrefix(e.To, externalCallPrefix+"dep::")
+				if cr.goModuleProvidersAdmit(importPath, sourceOf(e.From), synthetic[e.To]) {
+					cr.noteGoModuleSourceFile(e)
+				}
 				target, _ := e.Meta["go_extern_target"].(string)
 				if _, wanted := keys[target]; !wanted {
 					continue
@@ -272,11 +295,7 @@ func (cr *CrossRepoResolver) goModuleIncomingEdgesBounded(nodesByFile map[string
 			if sep < 0 {
 				continue
 			}
-			source, known := sources[e.From]
-			if !known {
-				source = cr.cachedGetNode(e.From)
-				sources[e.From] = source
-			}
+			source := sourceOf(e.From)
 			for _, provider := range providers[spec] {
 				if crossWorkspaceEligible(cr.crossWorkspaceLookup, candidateWorkspaceID(source), candidateWorkspaceID(provider), spec[:sep]) {
 					edges = append(edges, e)
@@ -653,6 +672,75 @@ func (cr *CrossRepoResolver) TakeDemotedGoModuleCallFiles() []string {
 	cr.goModuleDemotedFiles = nil
 	slices.Sort(files)
 	return files
+}
+
+// goModuleProvidersAdmit reports whether a caller could bind anything these
+// providers declare under importPath. A caller whose workspace every provider
+// refuses cannot regain a converged call, so its source is not re-read. A
+// replace can still bind in the caller's own checkout, so it always admits.
+func (cr *CrossRepoResolver) goModuleProvidersAdmit(importPath string, source *graph.Node, providers []*graph.Node) bool {
+	if source == nil {
+		return true
+	}
+	if _, replaced := goModuleReplacementFor(cr.goModuleReplacements, source.RepoPrefix, importPath); replaced {
+		return true
+	}
+	for _, provider := range providers {
+		if crossWorkspaceEligible(cr.crossWorkspaceLookup, candidateWorkspaceID(source), candidateWorkspaceID(provider), importPath) {
+			return true
+		}
+	}
+	return false
+}
+
+// goModuleRepoFacts is what the terminal sweep knows about one repository: a
+// Go file node that carries its workspace, and the directories it indexes Go
+// files in.
+type goModuleRepoFacts struct {
+	node *graph.Node
+	dirs map[string]struct{}
+}
+
+func (cr *CrossRepoResolver) goModuleRepoFacts(repo string, repos map[string]goModuleRepoFacts) goModuleRepoFacts {
+	if facts, known := repos[repo]; known {
+		return facts
+	}
+	facts := goModuleRepoFacts{dirs: make(map[string]struct{})}
+	for _, file := range graph.ReadRepoFilePaths(cr.graph, repo, "", []string{"go"}, nil) {
+		facts.dirs[filePathDir(file)] = struct{}{}
+		if facts.node == nil {
+			facts.node = cr.graph.GetNode(file)
+		}
+	}
+	repos[repo] = facts
+	return facts
+}
+
+// goModuleTrackedPackageAdmits is goModuleProvidersAdmit for the sweep, which
+// has no provider definitions at hand. A call binds only into a package
+// directory that a repository declaring the module indexes and whose workspace
+// admits the caller, or into a precise copy in the caller's own repository
+// (a vendored package).
+func (cr *CrossRepoResolver) goModuleTrackedPackageAdmits(importPath string, source *graph.Node, repos map[string]goModuleRepoFacts) bool {
+	if source == nil {
+		return true
+	}
+	for dir := range cr.goModuleRepoFacts(source.RepoPrefix, repos).dirs {
+		if dir == importPath || strings.HasSuffix(dir, "/"+importPath) {
+			return true
+		}
+	}
+	for repo, module := range cr.goModules {
+		if module == "" || (importPath != module && !strings.HasPrefix(importPath, module+"/")) {
+			continue
+		}
+		facts := cr.goModuleRepoFacts(repo, repos)
+		if _, indexed := facts.dirs[repo+strings.TrimPrefix(importPath, module)]; indexed && facts.node != nil &&
+			cr.goModuleProvidersAdmit(importPath, source, []*graph.Node{facts.node}) {
+			return true
+		}
+	}
+	return false
 }
 
 // Package terminals collapse calls at one site. Re-extract those caller files
