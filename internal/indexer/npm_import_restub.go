@@ -103,6 +103,9 @@ func restubTrackedNpmImportsFromView(g graph.Store, evicted map[string]struct{},
 			}
 			edge.To = "external::" + spec
 			edge.CrossRepo = false
+			// A parked import keeps its identity in its target; the marker
+			// returns when the package links again, as in a cold index.
+			delete(edge.Meta, resolver.NpmImportSpecifierMeta)
 			batch = append(batch, graph.EdgeReindex{Edge: edge, OldTo: oldTo})
 		}
 	}
