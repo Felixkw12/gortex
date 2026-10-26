@@ -1,9 +1,10 @@
 package store_sqlite
 
 import (
+	"testing"
+
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
-	"testing"
 )
 
 func TestWriteMarkCountsLogicalBatchRowsAndTransactions(t *testing.T) {
@@ -27,21 +28,24 @@ func TestWriteMarkCountsLogicalBatchRowsAndTransactions(t *testing.T) {
 func TestWriteMarkReturningAndFTSRows(t *testing.T) {
 	s, _ := openWALReclaimStore(t)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
-	s.writeMu.Lock()
-	tx, err := s.beginWrite()
-	require.NoError(t, err)
 	before := WriteMark()
-	nodes := []*graph.Node{{ID: "repo::a", Name: "a", Kind: graph.KindFunction, RepoPrefix: "repo"}, {ID: "repo::b", Name: "b", Kind: graph.KindFunction, RepoPrefix: "repo"}}
-	changed, _, ids, err := insertNodeChunksTx(tx, 0, nodes, true)
-	require.NoError(t, err)
-	require.Equal(t, 2, changed)
-	require.Len(t, ids, 2)
-	inserted, _, keys, err := insertEdgeChunksTx(tx, 0, []*graph.Edge{{From: "repo::a", To: "repo::b", Kind: graph.EdgeCalls}}, true)
-	require.NoError(t, err)
-	require.Equal(t, 1, inserted)
-	require.Len(t, keys, 1)
-	require.NoError(t, tx.Commit())
-	s.writeMu.Unlock()
+	func() {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		tx, err := s.beginWrite()
+		require.NoError(t, err)
+		defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
+		nodes := []*graph.Node{{ID: "repo::a", Name: "a", Kind: graph.KindFunction, RepoPrefix: "repo"}, {ID: "repo::b", Name: "b", Kind: graph.KindFunction, RepoPrefix: "repo"}}
+		changed, _, ids, err := insertNodeChunksTx(tx, 0, nodes, true)
+		require.NoError(t, err)
+		require.Equal(t, 2, changed)
+		require.Len(t, ids, 2)
+		inserted, _, keys, err := insertEdgeChunksTx(tx, 0, []*graph.Edge{{From: "repo::a", To: "repo::b", Kind: graph.EdgeCalls}}, true)
+		require.NoError(t, err)
+		require.Equal(t, 1, inserted)
+		require.Len(t, keys, 1)
+		require.NoError(t, tx.Commit())
+	}()
 	d := WriteMark().Since(before)
 	require.Equal(t, int64(2), d.Rows.Nodes)
 	require.Equal(t, int64(1), d.Rows.Edges)
