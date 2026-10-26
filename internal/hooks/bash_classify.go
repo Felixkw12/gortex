@@ -107,7 +107,24 @@ func classifyBashReadCommandSkipping(cmd string, skip func(BashClassification) b
 			continue
 		}
 
-		switch tokens[0] {
+		// Command names are matched case-insensitively: PowerShell, which the
+		// Copilot and Pi adapters route through this classifier, accepts
+		// `Cat` and `GREP` as readily as `cat` and `grep`.
+		name := strings.ToLower(tokens[0])
+		if c, ok := classifyPowerShellRead(name, tokens, "", false); ok {
+			if c.Action == BashActionGrepLike {
+				if dir, known := segmentWorkingDir(segments, idx, cdDir, cdSegments); known {
+					c, _ = classifyPowerShellRead(name, tokens, dir, true)
+				}
+				if skip != nil && skip(c) {
+					continue
+				}
+			}
+			return c
+		}
+		tokens = append([]string{name}, tokens[1:]...)
+
+		switch name {
 		case "grep", "rg", "ag", "egrep", "fgrep":
 			if p, ok := extractGrepPattern(tokens); ok {
 				c := BashClassification{Action: BashActionGrepLike, Pattern: p, Primary: tokens[0]}
