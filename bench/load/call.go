@@ -59,6 +59,14 @@ type toolCaller interface {
 func callTool(ctx context.Context, client toolCaller, r request, args map[string]any, role string, agent, step, slot int, timeout time.Duration, sleep func(context.Context, time.Duration) error) (json.RawMessage, []Attempt, error) {
 	logicalStart := time.Now()
 	productEnd := logicalStart.Add(timeout)
+	phaseEnd, phaseBounded := ctx.Deadline()
+	phaseClipsProduct := phaseBounded && phaseEnd.Before(productEnd)
+	terminalOutcome := func() string {
+		if phaseClipsProduct || ctx.Err() == context.Canceled {
+			return "phase_censored"
+		}
+		return "product_deadline"
+	}
 	callCtx, cancel := context.WithDeadline(ctx, productEnd)
 	defer cancel()
 	hash, err := hashJSON(r)
@@ -83,11 +91,7 @@ func callTool(ctx context.Context, client toolCaller, r request, args map[string
 				a.Outcome = "busy"
 			}
 			if callCtx.Err() != nil {
-				if ctx.Err() != nil && time.Now().Before(productEnd) {
-					a.Outcome = "phase_censored"
-				} else {
-					a.Outcome = "product_deadline"
-				}
+				a.Outcome = terminalOutcome()
 			}
 		}
 		attempts = append(attempts, a)
@@ -102,10 +106,7 @@ func callTool(ctx context.Context, client toolCaller, r request, args map[string
 			terminal.LogicalMS = float64(time.Since(logicalStart)) / float64(time.Millisecond)
 			terminal.Error = fmt.Sprintf("busy backoff ended: %v", err)
 			terminal.Code = 0
-			terminal.Outcome = "product_deadline"
-			if ctx.Err() != nil && time.Now().Before(productEnd) {
-				terminal.Outcome = "phase_censored"
-			}
+			terminal.Outcome = terminalOutcome()
 			attempts = append(attempts, terminal)
 			return nil, attempts, err
 		}

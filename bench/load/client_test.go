@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -245,6 +246,14 @@ func (blockingCaller) call(ctx context.Context, _ string, _ any) (json.RawMessag
 	return nil, ctx.Err()
 }
 
+type delayedCancellationCaller struct{}
+
+func (delayedCancellationCaller) call(ctx context.Context, _ string, _ any) (json.RawMessage, error) {
+	<-ctx.Done()
+	time.Sleep(20 * time.Millisecond) // simulate a delayed socket/scheduler return
+	return nil, ctx.Err()
+}
+
 func TestPhaseCensoringIsNotProductExpiry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
@@ -255,6 +264,60 @@ func TestPhaseCensoringIsNotProductExpiry(t *testing.T) {
 	_, attempts, _ = callTool(context.Background(), blockingCaller{}, request{Tool: "search"}, nil, "workload", 0, 0, 0, time.Millisecond, waitContext)
 	if len(attempts) != 1 || attempts[0].Outcome != "product_deadline" {
 		t.Fatalf("product deadline mislabeled: %+v", attempts)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	_, attempts, _ = callTool(ctx, delayedCancellationCaller{}, request{Tool: "search"}, nil, "workload", 0, 0, 0, 5*time.Millisecond, waitContext)
+	if len(attempts) != 1 || attempts[0].Outcome != "phase_censored" {
+		t.Fatalf("return after both deadlines lost declared clipping: %+v", attempts)
+	}
+}
+
+func TestBlockedSocketWriterHonorsBudgetAndInvalidatesStream(t *testing.T) {
+	local, peer := net.Pipe()
+	defer peer.Close() // peer deliberately never reads
+	c := &socketClient{conn: local, reader: bufio.NewReader(local), pending: make(map[int64]chan wireReply), done: make(chan struct{}), writeGate: make(chan struct{}, 1)}
+	go c.readLoop()
+	defer c.Close()
+	writerCtx, cancelWriter := context.WithCancel(context.Background())
+	defer cancelWriter()
+	finished := make(chan error, 1)
+	go func() {
+		_, err := c.call(writerCtx, "blocked", map[string]string{"large": strings.Repeat("x", 1<<20)})
+		finished <- err
+	}()
+	until := time.Now().Add(time.Second)
+	for len(c.writeGate) == 0 && time.Now().Before(until) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(c.writeGate) == 0 {
+		t.Fatal("writer did not start")
+	}
+	start := time.Now()
+	queued, cancelQueued := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancelQueued()
+	if _, err := c.call(queued, "queued", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queued call ignored budget: %v", err)
+	}
+	advisory, cancelAdvisory := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancelAdvisory()
+	if err := c.send(advisory, map[string]any{"method": "notifications/cancelled"}, true); err != nil {
+		t.Fatalf("busy advisory writer should be skipped: %v", err)
+	}
+	if time.Since(start) > 500*time.Millisecond {
+		t.Fatal("cancellation waited behind a wedged writer")
+	}
+	cancelWriter()
+	select {
+	case err := <-finished:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("blocked writer: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active writer did not stop on cancellation")
+	}
+	if _, err := c.call(context.Background(), "after-partial-write", nil); err == nil {
+		t.Fatal("failed/partial stream was reused")
 	}
 }
 

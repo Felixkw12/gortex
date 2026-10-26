@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,16 +33,16 @@ type wireReply struct {
 }
 
 type socketClient struct {
-	conn     net.Conn
-	reader   *bufio.Reader
-	writeMu  sync.Mutex
-	mu       sync.Mutex
-	next     int64
-	pending  map[int64]chan wireReply
-	closed   error
-	done     chan struct{}
-	notifies []json.RawMessage
-	version  string
+	conn      net.Conn
+	reader    *bufio.Reader
+	writeGate chan struct{}
+	mu        sync.Mutex
+	next      int64
+	pending   map[int64]chan wireReply
+	closed    error
+	done      chan struct{}
+	notifies  []json.RawMessage
+	version   string
 }
 
 func readWireLine(reader *bufio.Reader) ([]byte, error) {
@@ -106,13 +107,13 @@ func openMCP(ctx context.Context, socket, cwd string) (*socketClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &socketClient{conn: conn, reader: reader, pending: make(map[int64]chan wireReply), done: make(chan struct{}), version: version}
+	c := &socketClient{conn: conn, reader: reader, pending: make(map[int64]chan wireReply), done: make(chan struct{}), version: version, writeGate: make(chan struct{}, 1)}
 	go c.readLoop()
 	if _, err := c.call(ctx, "initialize", map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "gortex-load", "version": "1"}}); err != nil {
 		_ = c.Close()
 		return nil, err
 	}
-	if err := c.send(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"}); err != nil {
+	if err := c.send(ctx, map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"}, false); err != nil {
 		_ = c.Close()
 		return nil, err
 	}
@@ -176,14 +177,56 @@ func (c *socketClient) Close() error {
 	return err
 }
 
-func (c *socketClient) send(value any) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	// Limit a wedged socket writer independently of other in-flight calls.
-	if err := c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+func (c *socketClient) send(ctx context.Context, value any, advisory bool) error {
+	data, err := json.Marshal(value)
+	if err != nil {
 		return err
 	}
-	return json.NewEncoder(c.conn).Encode(value)
+	if advisory {
+		select {
+		case c.writeGate <- struct{}{}:
+		default:
+			return nil // cancellation is advisory; never queue behind a writer
+		}
+	} else {
+		select {
+		case c.writeGate <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	defer func() { <-c.writeGate }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	if parent, ok := ctx.Deadline(); ok && parent.Before(deadline) {
+		deadline = parent
+	}
+	if err := c.conn.SetWriteDeadline(deadline); err != nil {
+		c.fail(err)
+		_ = c.conn.Close()
+		return err
+	}
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		// A canceled partial frame cannot be reused by another request.
+		c.fail(ctx.Err())
+		_ = c.conn.Close()
+		close(interrupted)
+	})
+	_, err = io.Copy(c.conn, bytes.NewReader(append(data, '\n')))
+	if !stop() {
+		<-interrupted
+	}
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		c.fail(err)
+		_ = c.conn.Close()
+	}
+	return err
 }
 
 func (c *socketClient) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
@@ -206,14 +249,16 @@ func (c *socketClient) call(ctx context.Context, method string, params any) (jso
 		delete(c.pending, id)
 		c.mu.Unlock()
 	}()
-	if err := c.send(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
+	if err := c.send(ctx, map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}, false); err != nil {
 		return nil, err
 	}
 	select {
 	case <-ctx.Done():
 		// This is advisory; closing a shared connection here would censor
 		// unrelated burst calls and distort their latency/error samples.
-		_ = c.send(map[string]any{"jsonrpc": "2.0", "method": "notifications/cancelled", "params": map[string]any{"requestId": id, "reason": ctx.Err().Error()}})
+		cancelCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		_ = c.send(cancelCtx, map[string]any{"jsonrpc": "2.0", "method": "notifications/cancelled", "params": map[string]any{"requestId": id, "reason": ctx.Err().Error()}}, true)
+		cancel()
 		return nil, ctx.Err()
 	case reply := <-ch:
 		if reply.err != nil {
