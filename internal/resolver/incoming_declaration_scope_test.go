@@ -312,6 +312,39 @@ func TestPendingRepoPrefixesListsRepositoriesOnlyForUnhydratedSources(t *testing
 	assert.Equal(t, 1, store.listings, "a guess a hydrated source confirms must not pay the listing")
 }
 
+// External nodes (dep::…, ext::go:…) hydrate with an empty RepoPrefix by
+// design. Their ID-derived guess names no tracked repo and is dropped, but
+// that is the expected outcome, so it must not raise the warning reserved for
+// sources the pass could not hydrate.
+func TestPendingRepoPrefixesDoesNotWarnForHydratedExternalSources(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "a/pkg/x.go::X", Kind: graph.KindFunction, Name: "X", FilePath: "a/pkg/x.go", RepoPrefix: "a"})
+	g.AddNode(&graph.Node{ID: "dep::github.com/acme/lib::Do", Kind: graph.KindFunction, Name: "Do"})
+	g.AddNode(&graph.Node{ID: "ext::go:github.com/acme/lib::Run", Kind: graph.KindFunction, Name: "Run"})
+	store := &repoPrefixCountingStore{Graph: g, prefixes: []string{"a"}}
+	r := New(store)
+	core, logs := observer.New(zap.WarnLevel)
+	r.SetLogger(zap.New(core))
+
+	external := []*graph.Edge{
+		{From: "a/pkg/x.go::X", To: "unresolved::Y", Kind: graph.EdgeCalls},
+		{From: "dep::github.com/acme/lib::Do", To: "unresolved::Y", Kind: graph.EdgeCalls},
+		{From: "ext::go:github.com/acme/lib::Run", To: "unresolved::Y", Kind: graph.EdgeCalls},
+	}
+	prefixes, _ := pendingRepoPrefixes(r, external)
+	assert.Equal(t, []string{"a"}, prefixes, "the external guesses are still dropped")
+	assert.Zero(t, logs.Len(), "hydrated external sources must not warn")
+
+	// An unhydratable source on the same page still warns, and names only
+	// its own guess.
+	mixed := append(external, &graph.Edge{From: "internal/gone.go::Z", To: "unresolved::Y", Kind: graph.EdgeCalls})
+	prefixes, _ = pendingRepoPrefixes(r, mixed)
+	assert.Equal(t, []string{"a"}, prefixes)
+	entries := logs.All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, []any{"internal"}, entries[0].ContextMap()["rejected_prefixes"])
+}
+
 // fullRowCountingStore separates the finite builtin-recording probe from
 // declaration admission reads by stub key.
 type fullRowCountingStore struct {
