@@ -465,7 +465,7 @@ func (s *Server) buildPRReviewSimulation(ctx context.Context, req mcp.CallToolRe
 
 	sessionID := strings.TrimSpace(req.GetString("session_id", ""))
 	if sessionID == "" {
-		sessionID = SessionIDFromContext(ctx)
+		sessionID = OverlayCohortIDFromContext(ctx)
 	}
 	if sessionID == "" {
 		return &prReviewSimulation{
@@ -489,9 +489,9 @@ func (s *Server) buildPRReviewSimulation(ctx context.Context, req mcp.CallToolRe
 	}
 
 	// Run the chain on top of the named session's overlay. buildSimulation
-	// reads the session via the request context, so thread the explicit
-	// session id onto the context it consumes.
-	simCtx := WithSessionID(ctx, sessionID)
+	// reads the overlay cohort via the request context, so thread the
+	// explicit session id onto the context it consumes.
+	simCtx := WithOverlayCohortID(ctx, sessionID)
 	sim, simErr := s.buildSimulation(simCtx, edits, true)
 	if simErr != nil {
 		if ctxErr := requestContextError(simCtx, simErr); ctxErr != nil {
