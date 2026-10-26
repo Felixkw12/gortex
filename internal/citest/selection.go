@@ -511,7 +511,7 @@ func (p *Planner) Validate(ctx context.Context, m Manifest, target string, packa
 	for _, t := range policy.Targets {
 		names, ok := m.Census[t.Runner]
 		sel, selOK := m.Packages[t.Runner]
-		if !ok || !selOK || len(names) == 0 || !slices.Equal(names, newSet(names).sorted()) || !slices.Equal(sel, newSet(sel).sorted()) {
+		if !ok || !selOK || sel == nil || len(names) == 0 || !slices.Equal(names, newSet(names).sorted()) || !slices.Equal(sel, newSet(sel).sorted()) {
 			return nil, fmt.Errorf("invalid selected package census")
 		}
 		all := newSet(names)
@@ -529,7 +529,7 @@ func (p *Planner) Validate(ctx context.Context, m Manifest, target string, packa
 	if !reflect.DeepEqual(m.Matrix, policy.SelectedMatrix(m.Module, m.Packages)) {
 		return nil, fmt.Errorf("selected matrix does not cover selected packages")
 	}
-	return m.Packages[target], nil
+	return append([]string{}, m.Packages[target]...), nil
 }
 func (m Manifest) Summary() string {
 	var b strings.Builder

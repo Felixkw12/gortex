@@ -59,6 +59,8 @@ func metadataCommand(ctx context.Context, dir string, env []string, args ...stri
 	ctx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	configureProcess(cmd)
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.Output()

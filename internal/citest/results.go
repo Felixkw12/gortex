@@ -162,6 +162,7 @@ func testOutput(output, name string) string {
 
 type testKey struct{ pkg, name string }
 type testEvents struct {
+	unattributed  string
 	tests         map[testKey]testResult
 	packages      map[string]testResult
 	output        map[testKey]string
@@ -184,6 +185,7 @@ func parseEvents(output string) testEvents {
 			Elapsed                                   float64
 		}
 		if json.Unmarshal([]byte(line), &event) != nil {
+			e.unattributed += line + "\n"
 			continue
 		}
 		key := testKey{event.Package, event.Test}

@@ -392,3 +392,22 @@ func TestPlannerCancellationAndInvalidMetadataDoNotBecomeEmptySuccess(t *testing
 		t.Fatal("cancellation became a successful plan")
 	}
 }
+
+func TestManifestAffectedEmptyNeverMeansFull(t *testing.T) {
+	f := newFixture(t)
+	m, err := f.planner.Plan(t.Context(), Event{Name: "pull_request", Base: f.base, Head: f.base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAffected(t, m)
+	target := nativeTarget(t)
+	names, err := f.planner.Validate(t.Context(), m, target, m.Census[target])
+	if err != nil || names == nil || len(names) != 0 {
+		t.Fatalf("empty affected selection lost its distinction: %v %v", names, err)
+	}
+	m.Packages[target] = nil
+	m.SHA256 = m.Seal()
+	if _, err := f.planner.Validate(t.Context(), m, target, m.Census[target]); err == nil {
+		t.Fatal("null affected package list accepted")
+	}
+}
