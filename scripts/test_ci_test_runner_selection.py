@@ -28,6 +28,8 @@ class RunnerSelectionTests(Repository):
                     continue
                 race = data["mode"] == "affected" and os.name != "nt"
                 env = dict(os.environ, TEST_RACE=str(race).lower(), TEST_WORKERS="2", TEST_TARGET=target)
+                for key in ("GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY"):
+                    env.pop(key, None)
                 run = subprocess.run([sys.executable, str(RUNNER), "--partition", row["partition"],
                                       "--selection", str(manifest)], cwd=self.root, env=env,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=180)

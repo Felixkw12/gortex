@@ -141,6 +141,10 @@ def package_graph(root, config, flags):
                     directory = Path(row["Dir"]).resolve().relative_to(root.resolve()).as_posix()
                 except ValueError as error:
                     raise FullSuite("package outside checkout") from error
+                for field in ("EmbedFiles", "TestEmbedFiles", "XTestEmbedFiles"):
+                    for filename in row.get(field, []):
+                        path = (PurePosixPath(directory) / filename).as_posix()
+                        active_files.setdefault(path, set()).add("<embed>")
                 for field in ("GoFiles", "CgoFiles", "TestGoFiles", "XTestGoFiles"):
                     for filename in row.get(field, []):
                         path = (PurePosixPath(directory) / filename).as_posix()
@@ -171,8 +175,8 @@ def select(root, changes, metadata):
         if not path.endswith(".go"):
             raise FullSuite(f"non-Go input: {path}")
         owners = active_files.get(path)
-        if not owners or "<cgo>" in owners:
-            raise FullSuite(f"unmapped, unsupported build-tag, or cgo input: {path}")
+        if not owners or owners & {"<cgo>", "<embed>"}:
+            raise FullSuite(f"unmapped, unsupported build-tag, embedded, or cgo input: {path}")
         text = (root / path).read_text(encoding="utf-8")
         if re.search(r"(?m)^//(?:go:generate|go:embed| Code generated.*DO NOT EDIT)", text):
             raise FullSuite(f"generated or embedded input: {path}")

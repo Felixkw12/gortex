@@ -144,6 +144,30 @@ class SelectionTests(Repository):
                 self.assertEqual(data["mode"], "full", data["reason"])
                 self.assertTrue(data["matrix"]["include"])
 
+    def test_go_source_embedded_by_another_package_requires_full(self):
+        self.package("embedding/child", "func Value() int { return 42 }", "TestEmbeddedChild")
+        self.package("embedding", 'import _ "embed"\n//go:embed child/*.go\nvar source string\nfunc Value() int {return 42}', "TestEmbedding")
+        self.base = self.commit()
+        data = self.plan(self.changed("embedding/child/value.go"))
+        self.assertEqual(data["mode"], "full")
+        self.assertIn("embedded", data["reason"])
+
+    def test_event_uses_dependabot_pr_author_instead_of_rerun_actor(self):
+        head = self.changed()
+        event = self.root / "event.json"
+        event.write_text(json.dumps({"pull_request": {"user": {"login": "dependabot[bot]"}, "labels": []}}))
+        output = self.root / "plan.json"
+        env = dict(os.environ, GITHUB_EVENT_NAME="pull_request", GITHUB_EVENT_PATH=str(event),
+                   GITHUB_SHA=head, CI_BASE_SHA=self.base, GITHUB_ACTOR="human-rerunner", CI_FULL_TESTS="false")
+        for key in ("GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY"):
+            env.pop(key, None)
+        subprocess.run([sys.executable, str(Path(selection.__file__).resolve()), "--output", str(output)],
+                       cwd=self.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       check=True, timeout=30)
+        data = json.loads(output.read_text())
+        self.assertEqual(data["mode"], "full")
+        self.assertIn("Dependabot", data["reason"])
+
     def test_failed_missing_or_unsupported_metadata_never_selects_empty(self):
         head = self.changed()
         for base in ("", "0" * 40):
