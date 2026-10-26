@@ -273,7 +273,7 @@ require (
 	github.com/tree-sitter/tree-sitter-python v0.25.0
 	github.com/tree-sitter/tree-sitter-ruby v0.23.1
 	github.com/tree-sitter/tree-sitter-rust v0.24.2
-	github.com/tree-sitter/tree-sitter-scala v0.26.2
+	github.com/tree-sitter/tree-sitter-scala v0.26.3
 	github.com/tree-sitter/tree-sitter-typescript v0.23.2
 	github.com/yalue/onnxruntime_go v1.36.0
 	github.com/zeebo/blake3 v0.2.4
@@ -287,8 +287,8 @@ require (
 	golang.org/x/tools v0.52.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/libc v1.77.1
-	modernc.org/sqlite v1.60.1
+	modernc.org/libc v1.79.1
+	modernc.org/sqlite v1.61.0
 	pgregory.net/rapid v1.3.0
 )
 
@@ -302,7 +302,7 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/dlclark/regexp2 v1.12.0 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/eliben/go-sentencepiece v0.7.0 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
@@ -328,7 +328,7 @@ require (
 	github.com/microsoft/onnxruntime/go v0.0.0-20261014085412-9c87bdf2e667 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
-	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/ncruces/go-strftime v1.1.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
