@@ -1283,6 +1283,9 @@ func (r *Resolver) ResolveAllContext(ctx context.Context) (*ResolveStats, error)
 				for _, ri := range reindexBatch {
 					r.noteRetargetedCall(ri.Edge)
 				}
+				// Without a cold shadow this pass can bind straight into another
+				// tracked repository; give those calls their parallel here.
+				DetectCrossRepoEdgesForReindexes(r.graph, crossRepoReindexes(reindexBatch))
 				reindexTotal += len(reindexBatch)
 				if pageRevisionKnown {
 					// Ignore this pass's own committed mutations. A later delta
