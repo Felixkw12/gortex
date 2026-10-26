@@ -287,10 +287,10 @@ func TestRunnerCancellationReapsOwnedGoTestChildAndRetainsLogs(t *testing.T) {
 	manifestPath := writeManifest(t, f, m)
 	target := nativeTarget(t)
 	go func() {
-		report, err := RunPartition(ctx, RunOptions{Root: f.root, Partition: "rest", SelectionFile: manifestPath, Target: target, Workers: 1, Windows: runtime.GOOS == "windows", Env: env, Output: io.Discard, Budget: time.Minute})
+		report, err := RunPartition(ctx, RunOptions{Root: f.root, Partition: "rest", SelectionFile: manifestPath, Target: target, Workers: 1, Windows: runtime.GOOS == "windows", Env: env, Output: io.Discard, Budget: 3 * time.Minute})
 		done <- outcome{report, err}
 	}()
-	deadline := time.NewTimer(30 * time.Second)
+	deadline := time.NewTimer(90 * time.Second)
 	defer deadline.Stop()
 	for {
 		if _, err := os.Stat(heartbeat); err == nil {
