@@ -2734,8 +2734,25 @@ func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest
 	// Strict no-op for an unbound session with no RepoAllow.
 	if s.scopeFiltersActive(ctx) {
 		reader := s.readerFor(ctx)
+		var excludedRepos map[string]bool
+		if s.multiIndexer != nil && s.multiIndexer.IsMultiRepo() {
+			workspaceRepos, bound := s.sessionWorkspaceRepoSet(ctx)
+			allow := repoAllowFromContext(ctx)
+			excludedRepos = make(map[string]bool)
+			for _, prefix := range s.multiIndexer.RepoPrefixes() {
+				if (bound && !workspaceRepos[prefix]) || (len(allow) > 0 && !allow[prefix]) {
+					excludedRepos[prefix] = true
+				}
+			}
+		}
 		kept := make([]analysis.HotspotEntry, 0, len(entries))
 		for _, e := range entries {
+			// Only multi-repo source IDs encode ownership as prefix/path::symbol.
+			// Unprefixed, stub and unknown IDs still need the node visibility check.
+			path, symbol, sourceID := strings.Cut(e.ID, "::")
+			if sourceID && symbol != "" && excludedRepos[graph.RepoPrefixOfID(path)] {
+				continue
+			}
 			if s.analyzeNodeVisible(ctx, reader.GetNode(e.ID)) {
 				kept = append(kept, e)
 			}
