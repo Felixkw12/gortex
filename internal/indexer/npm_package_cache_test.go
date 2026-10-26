@@ -2,9 +2,11 @@ package indexer
 
 import (
 	"github.com/zzet/gortex/internal/graph"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,6 +27,7 @@ func TestNpmPackageLookupCachesManifestWork(t *testing.T) {
 			writePackageJSON(t, root, manifest)
 			writePackageJSON(t, filepath.Join(root, "packages", "a"), `{"name":"p","main":"index.ts"}`)
 			require.NoError(t, os.MkdirAll(filepath.Join(root, "packages", "empty"), 0o755))
+			backdateTree(t, root)
 			cm := newTestConfigManager(t)
 			mi := &MultiIndexer{configMgr: cm, repos: map[string]*RepoMetadata{"lib": {RootPath: root}}}
 			original := readDiskFile
@@ -62,6 +65,21 @@ func TestNpmPackageLookupCachesManifestWork(t *testing.T) {
 			assert.Nil(t, mi.npmPackageLookup(), "removed roots cannot retain claims")
 		})
 	}
+}
+
+// backdateTree moves every modification time under root an hour into the
+// past, as in a workspace nobody edited just now. Stamps taken within
+// manifestRacyWindow of a change cannot prove a file unchanged, so a fixture
+// written a moment ago would be read again on every pass.
+func backdateTree(t *testing.T, root string) {
+	t.Helper()
+	old := time.Now().Add(-time.Hour)
+	require.NoError(t, filepath.WalkDir(root, func(path string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, old, old)
+	}))
 }
 
 // Given cached package evidence, when an independent input changes without
