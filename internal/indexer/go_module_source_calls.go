@@ -51,8 +51,8 @@ func (idx *Indexer) invalidateGoModuleSourceStamp(rel string) {
 	}
 }
 
-// storeGoModuleSource keeps the facts but drops stat trust when a save was
-// invalidated after epoch was read, since the bytes may predate that save.
+// storeGoModuleSource keeps the facts but drops stat trust when a save or an
+// eviction landed after epoch was read, since the bytes may predate it.
 func (idx *Indexer) storeGoModuleSource(rel string, entry goModuleSourceCacheEntry, epoch uint64) {
 	idx.goModuleSourceMu.Lock()
 	defer idx.goModuleSourceMu.Unlock()

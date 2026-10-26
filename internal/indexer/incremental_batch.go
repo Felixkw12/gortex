@@ -2443,6 +2443,9 @@ func (idx *Indexer) evictDeletedFilesBatched(deleted []string, plan *DerivedInva
 	}
 	defer idx.flushFileIndexFailures()
 	idx.goModuleSourceMu.Lock()
+	// A recovery that read one of these files before the eviction must not
+	// store it with stat trust: the file can return with the same stat.
+	idx.goModuleSourceEpoch++
 	for _, path := range deleted {
 		delete(idx.goModuleSourceCache, path)
 	}
