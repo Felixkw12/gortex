@@ -271,6 +271,40 @@ func TestPRReviewContext_SimulateRunsWithSession(t *testing.T) {
 		"base graph node set is unchanged after a kept-false simulation")
 }
 
+// TestPRReviewContext_SimulateUsesOverlayCohort: with no `session_id`
+// param, the simulation falls back to the overlay cohort on the context
+// (X-Gortex-Overlay-Session), not the caller's real transport session; an
+// explicit `session_id` still wins over the cohort.
+func TestPRReviewContext_SimulateUsesOverlayCohort(t *testing.T) {
+	srv, dir, targetFile, _ := setupOverlayServer(t)
+
+	cohort := "pr-review-cohort"
+	explicit := "pr-review-explicit"
+	require.NoError(t, srv.OverlayManager().RegisterWithID(cohort, ""))
+	require.NoError(t, srv.OverlayManager().RegisterWithID(explicit, ""))
+	ctx := WithOverlayCohortID(WithSessionID(context.Background(), "real-transport-session"), cohort)
+
+	edits := "[" + buildSingleFileEdit(targetFile, "package main\n\nfunc Target() {}\nfunc Added() {}\n") + "]"
+	args := map[string]any{
+		"repo":         dir,
+		"scope":        "staged",
+		"edits":        edits,
+		"sections":     "simulate",
+		"audit_config": false,
+	}
+
+	out := decodePRReview(t, callPRReviewContext(t, srv, ctx, args))
+	require.NotNil(t, out.Simulation)
+	require.True(t, out.Simulation.Ran)
+	require.Equal(t, cohort, out.Simulation.SessionID)
+
+	args["session_id"] = explicit
+	out = decodePRReview(t, callPRReviewContext(t, srv, ctx, args))
+	require.NotNil(t, out.Simulation)
+	require.True(t, out.Simulation.Ran)
+	require.Equal(t, explicit, out.Simulation.SessionID)
+}
+
 // TestPRReviewContext_GCXAndBudget: the gcx, toon, and max_bytes paths all
 // round-trip.
 func TestPRReviewContext_GCXAndBudget(t *testing.T) {
