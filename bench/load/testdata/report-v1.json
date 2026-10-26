@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "run_id": "sample-run",
+  "git_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "binary": "/private/gortex",
+  "daemon_version": "sample",
+  "started": "2026-01-01T00:00:00Z",
+  "profile": "agent",
+  "seed": 42,
+  "workload": {
+    "scenario": "read",
+    "agents": 8,
+    "edit_agents": 0,
+    "linked_worktrees": 0,
+    "duration_seconds": 60,
+    "product_deadline_seconds": 120,
+    "seed": 42,
+    "profile": "agent",
+    "operations": [
+      {
+        "tool": "search",
+        "operation": "symbols",
+        "arguments": {
+          "operation": "symbols",
+          "query": "Example"
+        }
+      },
+      {
+        "tool": "read",
+        "operation": "source",
+        "arguments": {
+          "operation": "source",
+          "target": {
+            "symbol": "sample.go::Example"
+          }
+        }
+      },
+      {
+        "tool": "read",
+        "operation": "file",
+        "arguments": {
+          "operation": "file",
+          "target": {
+            "file": "sample.go"
+          }
+        }
+      },
+      {
+        "tool": "relations",
+        "operation": "dependents",
+        "arguments": {
+          "operation": "dependents",
+          "target": {
+            "file": "sample.go"
+          }
+        }
+      },
+      {
+        "tool": "change",
+        "operation": "verify",
+        "arguments": {
+          "operation": "verify",
+          "target": {
+            "symbol": "sample.go::Example"
+          }
+        }
+      }
+    ]
+  },
+  "host": {
+    "machine": "sample-host",
+    "os": "linux",
+    "arch": "amd64",
+    "kernel": "sample",
+    "profile": "native",
+    "validated": false,
+    "limits": {
+      "cpu": {
+        "value": 8,
+        "unit": "cores",
+        "reason": ""
+      }
+    },
+    "availability": null
+  },
+  "corpus": [
+    {
+      "label": "sample",
+      "source": "/input/sample",
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "file": "sample.go",
+      "symbol": "sample.go::Example",
+      "query": "Example"
+    }
+  ],
+  "request_plan_sha256": "931d652e88be440ce40710d0fad105a6f2985ed2488bbcb0d9e571828cb61543",
+  "phases": [
+    {
+      "name": "read",
+      "started": "2026-01-01T00:00:01Z",
+      "duration_seconds": 60,
+      "gate": null,
+      "tools": null,
+      "probes": null,
+      "attempts": null,
+      "edits": null,
+      "edit_latency_ms": {
+        "count": 0,
+        "p50": {
+          "value": null,
+          "unit": "ms",
+          "reason": "no completed observations"
+        },
+        "p95": {
+          "value": null,
+          "unit": "ms",
+          "reason": "no completed observations"
+        },
+        "p99": {
+          "value": null,
+          "unit": "ms",
+          "reason": "no completed observations"
+        },
+        "max": {
+          "value": null,
+          "unit": "ms",
+          "reason": "no completed observations"
+        }
+      },
+      "visible_latency_ms": {
+        "count": 0,
+        "p50": {
+          "value": null,
+          "unit": "ms",
+          "reason": "no completed observations"
+        },
+        "p95": {
+          "value": null,
+          "unit": "ms",
+          "reason": "no completed observations"
+        },
+        "p99": {
+          "value": null,
+          "unit": "ms",
+          "reason": "no completed observations"
+        },
+        "max": {
+          "value": null,
+          "unit": "ms",
+          "reason": "no completed observations"
+        }
+      },
+      "never_visible": 0,
+      "visibility_censored": 0,
+      "metrics": null,
+      "daemon_status": null,
+      "graph_stats": null,
+      "errors": null
+    }
+  ],
+  "tool_sweep": null,
+  "metrics": {
+    "daemon_cpu_cores": {
+      "value": 2,
+      "unit": "cores",
+      "reason": ""
+    },
+    "pss": {
+      "value": null,
+      "unit": "bytes",
+      "reason": "not available on this OS"
+    },
+    "stop_seconds": {
+      "value": 1,
+      "unit": "s",
+      "reason": ""
+    }
+  },
+  "artifacts": null,
+  "crashes": null,
+  "errors": null,
+  "complete": true
+}
