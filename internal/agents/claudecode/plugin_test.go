@@ -421,6 +421,10 @@ func TestEmitPluginBundle_SubAgentBodiesMatchSource(t *testing.T) {
 }
 
 func TestEmitPluginBundle_SubAgentToolNamespaces(t *testing.T) {
+	// Pin Claude Code's external names independently of the emitter constants:
+	// a misspelled plugin namespace must fail even if every tool uses it.
+	const wantUserPrefix = "mcp__gortex__"
+	const wantPluginPrefix = "mcp__plugin_gortex_gortex__"
 	dir := t.TempDir()
 	if _, err := EmitPluginBundle(PluginBundleSpec{TargetDir: dir, Version: "0.18.2"}); err != nil {
 		t.Fatal(err)
@@ -432,8 +436,8 @@ func TestEmitPluginBundle_SubAgentToolNamespaces(t *testing.T) {
 			t.Fatalf("user sub-agent %s has no tools", name)
 		}
 		for _, tool := range userTools {
-			if !strings.HasPrefix(tool, userMCPToolPrefix) {
-				t.Errorf("user sub-agent %s tool %q does not use %q", name, tool, userMCPToolPrefix)
+			if !strings.HasPrefix(tool, wantUserPrefix) {
+				t.Errorf("user sub-agent %s tool %q does not use %q", name, tool, wantUserPrefix)
 			}
 		}
 
@@ -443,14 +447,12 @@ func TestEmitPluginBundle_SubAgentToolNamespaces(t *testing.T) {
 		}
 		pluginTools := SubAgentTools(string(body))
 		if len(pluginTools) != len(userTools) {
-			t.Errorf("plugin sub-agent %s tool count = %d, want %d", name, len(pluginTools), len(userTools))
+			t.Fatalf("plugin sub-agent %s tool count = %d, want %d", name, len(pluginTools), len(userTools))
 		}
-		for _, tool := range pluginTools {
-			if !strings.HasPrefix(tool, pluginMCPToolPrefix) {
-				t.Errorf("plugin sub-agent %s tool %q does not use %q", name, tool, pluginMCPToolPrefix)
-			}
-			if strings.HasPrefix(tool, userMCPToolPrefix) {
-				t.Errorf("plugin sub-agent %s still contains user-level tool %q", name, tool)
+		for i, tool := range pluginTools {
+			want := wantPluginPrefix + strings.TrimPrefix(userTools[i], wantUserPrefix)
+			if tool != want {
+				t.Errorf("plugin sub-agent %s tool[%d] = %q, want %q", name, i, tool, want)
 			}
 		}
 	}
