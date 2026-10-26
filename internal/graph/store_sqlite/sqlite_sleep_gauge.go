@@ -13,11 +13,10 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
-// Time spent asleep inside SQLite.
+// Time spent asleep through SQLite's VFS.
 //
-// SQLite waits without using the CPU in exactly two ways, and both go through
-// the VFS's xSleep:
-//   - the busy handler (busy_timeout): after SQLITE_BUSY on a lock, it sleeps
+// The VFS's xSleep covers two kinds of wait:
+//   - SQLite's native busy handler (busy_timeout): after SQLITE_BUSY on a lock, it sleeps
 //     1, 2, 5, 10, 15, 20, 25, 25, 25, 50, 50, 100… ms, i.e. whole
 //     milliseconds, until the timeout (5 s on every pooled connection);
 //   - the WAL read-lock retry loop (walTryBeginRead): a reader that cannot
@@ -26,7 +25,13 @@ import (
 //     up to 100 times, sleeping 1 µs and then (n−9)²×39 µs — never a whole
 //     millisecond — for up to about 10 s before failing with SQLITE_PROTOCOL.
 //
-// Neither is visible to the store's other gauges: the read gate and the pool
+// modernc.org/sqlite v1.61 replaces the native busy handler on connections
+// used with a cancellable context. That handler waits on Go timers and does
+// not call xSleep, even for subsequent background-context calls. BusyNanos
+// and BusyCalls are therefore lower bounds, not total lock-wait measurements.
+// Do not use them to synchronize tests or infer the absence of contention.
+//
+// Neither VFS wait is visible to the store's other gauges: the read gate and the pool
 // wait end before SQLite runs, block reads count only I/O, and the thread is
 // off the CPU. So every registered VFS's xSleep is wrapped once per process
 // and the time is counted, split by the delay's shape. The counters are
@@ -107,7 +112,7 @@ func installSQLiteSleepGauge() {
 		}
 		sqliteSleeps.installed.Store(true)
 		// Logged so a run's zero sleeps can be told from an absent gauge.
-		log.Printf("store_sqlite: sqlite sleep gauge installed vfs_wrapped=%d", wrapped)
+		log.Printf("store_sqlite: sqlite sleep gauge installed vfs_wrapped=%d coverage=vfs_only", wrapped)
 	})
 }
 
@@ -117,9 +122,12 @@ func vfsAt(p uintptr) *sqlite3.Tsqlite3_vfs {
 	return *(**sqlite3.Tsqlite3_vfs)(unsafe.Pointer(&p))
 }
 
-// SQLiteSleepMark is a sample of the process-wide SQLite sleep counters.
+// SQLiteSleepMark samples process-wide VFS sleeps. Busy counters exclude the
+// driver's cancellable Go busy handler; an installed gauge can report zero
+// even while that handler waits for a lock.
 type SQLiteSleepMark struct {
 	Installed     bool  `json:"installed"`
+	VFSOnly       bool  `json:"vfs_only"`
 	BusyNanos     int64 `json:"busy_nanos"`
 	BusyCalls     int64 `json:"busy_calls"`
 	WALRetryNanos int64 `json:"wal_retry_nanos"`
@@ -130,6 +138,7 @@ type SQLiteSleepMark struct {
 func sqliteSleepMark() SQLiteSleepMark {
 	return SQLiteSleepMark{
 		Installed:     sqliteSleeps.installed.Load(),
+		VFSOnly:       true,
 		BusyNanos:     sqliteSleeps.busyNanos.Load(),
 		BusyCalls:     sqliteSleeps.busyCalls.Load(),
 		WALRetryNanos: sqliteSleeps.walRetryNanos.Load(),

@@ -331,8 +331,10 @@ type EditDeltaReport struct {
 	PhaseSchedWait  map[string]time.Duration
 	PhaseSchedWaits map[string]int64
 	// SleepGaugeInstalled is the store's SQLite sleep gauge state at the
-	// delta: a zero busy or WAL-retry sleep is a measured zero only when set.
+	// delta. Busy sleeps exclude the driver's Go busy handler; installation
+	// does not make a zero busy sleep evidence of no lock contention.
 	SleepGaugeInstalled bool
+	SleepGaugeVFSOnly   bool
 	// ChainLayersOverlaid is how many dirty-chain layers the delta composed
 	// per read over the per-stack caches kept for the stack below them.
 	ChainLayersOverlaid int
@@ -752,6 +754,7 @@ func (b *SparseGenerationBuilder) runEditDelta(
 		out.PhaseSchedWaits[name] += waits
 		schedLast = schedNow
 		out.SleepGaugeInstalled = storeNow.Sleep.Installed
+		out.SleepGaugeVFSOnly = storeNow.Sleep.VFSOnly
 		walNow, txNow := handle.WALWriteMark(), store_sqlite.WriteTransactionsBegun()
 		if wal := store_sqlite.WALWrittenBetween(walLast, walNow); wal.Bytes > 0 {
 			out.PhaseWALBytes[name] += wal.Bytes
@@ -1302,6 +1305,7 @@ func (b *SparseGenerationBuilder) runEditDelta(
 			zap.Any("phase_sched_wait_ms", editDeltaPhaseMillis(out.PhaseSchedWait)),
 			zap.Any("phase_sched_waits", out.PhaseSchedWaits),
 			zap.Bool("sqlite_sleep_gauge_installed", out.SleepGaugeInstalled),
+			zap.Bool("sqlite_sleep_gauge_vfs_only", out.SleepGaugeVFSOnly),
 			zap.Any("phase_wal_bytes", out.PhaseWALBytes),
 			zap.Any("phase_write_tx", out.PhaseWriteTx),
 			zap.Strings("stack", dw.StackShape()),

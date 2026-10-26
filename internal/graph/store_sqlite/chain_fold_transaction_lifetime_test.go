@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
+	sqlite "modernc.org/sqlite"
 )
 
 type foldBlockedScanner struct {
@@ -109,51 +110,90 @@ func TestCanceledFoldKeepsPinnedWriterUntilRollbackCompletes(t *testing.T) {
 	require.NoError(t, handle.AddBatchChecked([]*graph.Node{{ID: "repo::Fresh", Kind: graph.KindFunction, Name: "Fresh", RepoPrefix: "repo"}}, nil))
 }
 
-// The SQLite busy handler already holds a blocked IMMEDIATE begin until its
-// busy_timeout expires. Detaching the fold's transaction lifetime must preserve
-// that bound and return cancellation without invoking the payload callback.
+// Observe BEGIN preparation on this connection, not a process-wide sleep
+// counter: modernc's cancellable busy handler no longer goes through VFS xSleep.
+func observeSQLiteBegin(t *testing.T, conn *sql.Conn) <-chan struct{} {
+	t.Helper()
+	entered := make(chan struct{})
+	var once sync.Once
+	require.NoError(t, conn.Raw(func(dc any) error {
+		authorizer, ok := dc.(sqlite.AuthorizerRegisterer)
+		if !ok {
+			return errors.New("SQLite connection lacks authorizer support")
+		}
+		return authorizer.RegisterAuthorizer(func(action sqlite.AuthorizerActionCode, arg1, _, _, _ string) sqlite.AuthorizerReturnCode {
+			if action == sqlite.AuthTransaction && arg1 == "BEGIN" {
+				once.Do(func() { close(entered) })
+			}
+			return sqlite.AuthorizerOK
+		})
+	}))
+	return entered
+}
+
+// An owned fold must still return within one busy_timeout after cancellation
+// without invoking its payload. modernc v1.61 makes a normal BeginTx cancel
+// sooner, but the detached lifetime deliberately retains the old timeout
+// bound to keep rollback synchronous under the writer gate.
 func TestFoldOwnedLifetimePreservesBusyBeginCancellationBound(t *testing.T) {
 	const busyMillis = 250
-	var elapsed [2]time.Duration
-	for mode := range 2 {
-		store, handle, id := reparseWindowFixture(t)
-		to := reservedGeneration(t, store, "busy-fold")
-		setWriterBusyTimeout(t, store, busyMillis)
-		opened, err := handle.BeginManagedDedicatedReparseBulkLoad(t.Context(), id)
-		require.NoError(t, err)
-		require.True(t, opened)
-		blocker, held := holdExternalWriter(t, store.dbPath)
-		ctx, cancel := context.WithCancel(t.Context())
-		result := make(chan error, 1)
-		before := sqliteSleeps.busyCalls.Load()
-		started := time.Now()
-		go func() {
-			if mode == 0 {
-				store.writeMu.Lock()
-				defer store.writeMu.Unlock()
-				tx, err := store.AtGeneration(to).beginWriteContext(ctx)
-				if tx != nil {
-					_ = tx.Rollback()
+	for _, mode := range []string{"caller_lifetime", "owned_lifetime"} {
+		t.Run(mode, func(t *testing.T) {
+			store, handle, id := reparseWindowFixture(t)
+			to := reservedGeneration(t, store, "busy-fold")
+			setWriterBusyTimeout(t, store, busyMillis)
+			opened, err := handle.BeginManagedDedicatedReparseBulkLoad(t.Context(), id)
+			require.NoError(t, err)
+			require.True(t, opened)
+			t.Cleanup(func() { require.NoError(t, handle.EndGenerationBulkLoadFor(id)) })
+			blocker, held := holdExternalWriter(t, store.dbPath)
+			t.Cleanup(func() { _ = held.Rollback(); _ = blocker.Close() })
+			entered := observeSQLiteBegin(t, store.bulkConn)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			result := make(chan error, 1)
+			finished := make(chan struct{})
+			go func() {
+				defer close(finished)
+				if mode == "caller_lifetime" {
+					store.writeMu.Lock()
+					defer store.writeMu.Unlock()
+					tx, err := store.AtGeneration(to).beginWriteContext(ctx)
+					if tx != nil {
+						_ = tx.Rollback()
+					}
+					result <- err
+					return
 				}
-				result <- err
-				return
-			}
-			result <- store.withFoldTx(ctx, to, func(context.Context, *sql.Tx) error {
-				return errors.New("canceled busy begin reached payload work")
+				result <- store.withFoldTx(ctx, to, func(context.Context, *sql.Tx) error {
+					return errors.New("canceled busy begin reached payload work")
+				})
+			}()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-finished:
+				case <-time.After(2 * time.Second):
+					t.Error("blocked BEGIN did not finish")
+				}
 			})
-		}()
-		require.Eventually(t, func() bool { return sqliteSleeps.busyCalls.Load() > before }, time.Second, time.Millisecond)
-		cancel()
-		err = <-result
-		elapsed[mode] = time.Since(started)
-		t.Logf("owned=%t canceled blocked BEGIN returned after %s: %v", mode == 1, elapsed[mode], err)
-		require.Error(t, err)
-		require.NoError(t, held.Rollback())
-		require.NoError(t, blocker.Close())
-		require.NoError(t, handle.EndGenerationBulkLoadFor(id))
-		if mode == 1 {
+			waitCheckpointSignal(t, entered)
+			select {
+			case err := <-result:
+				t.Fatalf("BEGIN returned before cancellation while the external writer holds the lock: %v", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			started := time.Now()
+			cancel()
+			err = <-result
+			elapsed := time.Since(started)
+			t.Logf("%s canceled blocked BEGIN returned after %s: %v", mode, elapsed, err)
 			require.ErrorIs(t, err, context.Canceled)
-		}
+			require.Less(t, elapsed, busyMillis*time.Millisecond+100*time.Millisecond,
+				"fold ownership must not add another SQLite busy timeout")
+			require.NoError(t, held.Rollback())
+			require.NoError(t, blocker.Close())
+			require.NoError(t, handle.AddBatchChecked([]*graph.Node{{ID: "repo::AfterCancel", Name: "AfterCancel", Kind: graph.KindFunction, RepoPrefix: "repo"}}, nil))
+		})
 	}
-	require.Less(t, elapsed[1], elapsed[0]+100*time.Millisecond, "fold ownership must not add another SQLite busy timeout")
 }

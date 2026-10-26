@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A writer blocked on another connection's write lock sleeps in SQLite's busy
-// handler; the gauge counts that sleep as busy time, and a read lap shows its
-// read transactions.
+// A connection used only with background contexts retains SQLite's native
+// busy handler, whose VFS sleeps remain observable. The Go handler installed
+// for cancellable calls is outside this gauge's coverage.
 func TestSQLiteSleepGaugeCountsBusyHandlerSleeps(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "busy.sqlite")
@@ -20,6 +20,7 @@ func TestSQLiteSleepGaugeCountsBusyHandlerSleeps(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = s.Close() }()
 	require.True(t, sqliteSleepMark().Installed, "the gauge is installed at Open")
+	require.True(t, sqliteSleepMark().VFSOnly, "installation must not claim complete busy-wait coverage")
 
 	holder, err := sql.Open("sqlite", sqliteWriterDSN(path))
 	require.NoError(t, err)
