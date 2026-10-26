@@ -1,6 +1,10 @@
 package resolver
 
-import "github.com/zzet/gortex/internal/graph"
+import (
+	"strings"
+
+	"github.com/zzet/gortex/internal/graph"
+)
 
 const crossRepoAddBatchSize = 4096
 
@@ -115,6 +119,24 @@ func DetectCrossRepoEdgesForReindexes(g graph.Store, batch []graph.EdgeReindex) 
 		})
 	}
 	return materializeCrossRepoCandidates(g, rows)
+}
+
+// crossRepoReindexes keeps the rows whose endpoints carry two different
+// repository prefixes, so a whole-repository pass fetches endpoint ownership
+// only for rebinds that can cross repositories.
+func crossRepoReindexes(batch []graph.EdgeReindex) []graph.EdgeReindex {
+	var out []graph.EdgeReindex
+	for _, reindex := range batch {
+		if reindex.Edge == nil {
+			continue
+		}
+		from, to := graph.RepoPrefixOfID(reindex.Edge.From), graph.RepoPrefixOfID(reindex.Edge.To)
+		if from == "" || to == "" || from == to || strings.Contains(from, "::") || strings.Contains(to, "::") {
+			continue
+		}
+		out = append(out, reindex)
+	}
+	return out
 }
 
 func materializeCrossRepoCandidates(g graph.Store, rows []graph.CrossRepoCandidateRow) int {
