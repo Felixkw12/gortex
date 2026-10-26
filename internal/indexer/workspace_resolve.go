@@ -757,7 +757,7 @@ func (mi *MultiIndexer) synthesizeDemotedGoModuleCalls(files []string) {
 			enabled = append(enabled, file)
 		}
 	}
-	resolver.SynthesizeExternalCallsForFiles(mi.graph, true, enabled)
+	resolver.SynthesizeDemotedGoCallsForFiles(mi.graph, true, enabled)
 }
 
 // SeedGoModuleDeps warms the persisted-binding retry state. The daemon's
