@@ -32,6 +32,11 @@ func TestClassifyPowerShellReadCommands(t *testing.T) {
 		{"Get-Content of a non-source file", `Get-Content notes.txt`, BashActionPassthrough, ""},
 		{"Get-Content of a comma list", `Get-Content a.go,b.go`, BashActionPassthrough, ""},
 		{"Get-Content with no path", `Get-Content -Raw`, BashActionPassthrough, ""},
+		{"-ErrorAction value before -Path", `Get-Content -ErrorAction Stop -Path internal/hooks/pi.go`, BashActionReadSource, "internal/hooks/pi.go"},
+		{"-ea value before the positional", `gc -ea SilentlyContinue internal/hooks/pi.go`, BashActionReadSource, "internal/hooks/pi.go"},
+		{"-ErrorAction: attached", `Get-Content -ErrorAction:Stop internal/hooks/pi.go`, BashActionReadSource, "internal/hooks/pi.go"},
+		{"-OutVariable value is not the file", `Get-Content -OutVariable out.go -Raw`, BashActionPassthrough, ""},
+		{"-Path after a positional wins", `Get-Content notes.txt -Path internal/hooks/pi.go`, BashActionReadSource, "internal/hooks/pi.go"},
 
 		// --- POSIX names matched case-insensitively ---
 		{"Cat", `Cat internal/hooks/pi.go`, BashActionReadSource, "internal/hooks/pi.go"},
@@ -44,6 +49,10 @@ func TestClassifyPowerShellReadCommands(t *testing.T) {
 		{"sls switches and -Context", `sls -SimpleMatch -Context 2 bridgeToolCall internal/hooks/pi.go`, BashActionGrepLike, "bridgeToolCall"},
 		{"-Pattern: attached", `Select-String -Pattern:bridgeToolCall internal/hooks/pi.go`, BashActionGrepLike, "bridgeToolCall"},
 		{"Select-String without a pattern", `Select-String -CaseSensitive`, BashActionPassthrough, ""},
+		{"positional path before -Pattern", `Select-String internal/hooks/pi.go -Pattern bridgeToolCall`, BashActionGrepLike, "bridgeToolCall"},
+		{"-ErrorAction value is not the pattern", `sls -ErrorAction SilentlyContinue bridgeToolCall internal/hooks/pi.go`, BashActionGrepLike, "bridgeToolCall"},
+		{"-InputObject searches text", `Select-String -InputObject 'hello' -Pattern bridgeToolCall`, BashActionPassthrough, ""},
+		{"-InputObject: attached", `sls -InputObject:hello bridgeToolCall`, BashActionPassthrough, ""},
 		{"Select-String after a pipe is a filter", `go test ./... | Select-String FAIL`, BashActionPassthrough, ""},
 
 		// --- Get-ChildItem -Recurse -Filter ---
@@ -88,6 +97,9 @@ func TestSelectStringSearchPaths(t *testing.T) {
 		{`sls x a.go b.go`, []string{filepath.Join("/repo", "a.go"), filepath.Join("/repo", "b.go")}},
 		{`sls x -Path a.go,b.go`, []string{filepath.Join("/repo", "a.go"), filepath.Join("/repo", "b.go")}},
 		{`sls x`, nil},
+		{`Select-String a.go -Pattern x`, []string{filepath.Join("/repo", "a.go")}},
+		{`Select-String a.go b.go -Pattern x`, []string{filepath.Join("/repo", "a.go"), filepath.Join("/repo", "b.go")}},
+		{`sls -ea Stop x a.go`, []string{filepath.Join("/repo", "a.go")}},
 		{`sls x $env:USERPROFILE/notes`, nil},
 	}
 	for _, tc := range cases {
@@ -122,6 +134,9 @@ func TestPowerShellReadsReachBashPolicy(t *testing.T) {
 		{"Select-String -Path internal/hooks/pi.go -Pattern bridgeToolCall", true},
 		{"sls bridgeToolCall internal/hooks/pi.go", true},
 		{"sls bridgeToolCall " + notes, false},
+		{"Select-String " + notes + " -Pattern bridgeToolCall", false},
+		{"Select-String -InputObject 'hello' -Pattern bridgeToolCall", false},
+		{"Get-Content -ErrorAction Stop -Path internal/hooks/pi.go", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.command, func(t *testing.T) {

@@ -25,6 +25,22 @@ var powerShellListCmdlets = map[string]bool{"get-childitem": true, "gci": true, 
 var (
 	powerShellPathParams = map[string]bool{"-path": true, "-literalpath": true, "-pspath": true, "-lp": true}
 
+	// powerShellCommonValueParams are the value-taking common parameters
+	// every cmdlet accepts, with their aliases. -Verbose, -Debug, -WhatIf
+	// and -Confirm are switches and need no entry.
+	powerShellCommonValueParams = map[string]bool{
+		"-erroraction": true, "-ea": true,
+		"-warningaction": true, "-wa": true,
+		"-informationaction": true, "-infa": true,
+		"-progressaction": true, "-proga": true,
+		"-errorvariable": true, "-ev": true,
+		"-warningvariable": true, "-wv": true,
+		"-informationvariable": true, "-iv": true,
+		"-outvariable": true, "-ov": true,
+		"-outbuffer": true, "-ob": true,
+		"-pipelinevariable": true, "-pv": true,
+	}
+
 	powerShellGetContentValueParams = map[string]bool{
 		"-totalcount": true, "-head": true, "-first": true, "-tail": true, "-last": true,
 		"-readcount": true, "-encoding": true, "-delimiter": true, "-stream": true,
@@ -70,28 +86,37 @@ func classifyPowerShellRead(cmd string, tokens []string, dir string, dirKnown bo
 }
 
 // extractPowerShellReadFile returns the file a Get-Content call reads: the
-// -Path/-LiteralPath value, or else the first positional. -TotalCount, -Head
-// and -Tail bound the read the way head and tail do; their value is skipped.
-// A comma list or a non-source path is not a source read.
+// -Path/-LiteralPath value, or else the first positional. Value-taking
+// parameters (-TotalCount, -Head, -Tail, common ones like -ErrorAction, ...)
+// have their value skipped so it is never taken for the file. A comma list
+// or a non-source path is not a source read.
 func extractPowerShellReadFile(tokens []string) (string, bool) {
-	path := ""
-	for i := 1; i < len(tokens) && path == ""; i++ {
+	path, havePath := "", false
+	var positionals []string
+	for i := 1; i < len(tokens); i++ {
 		t := tokens[i]
 		if !strings.HasPrefix(t, "-") {
-			path = t
-			break
+			positionals = append(positionals, t)
+			continue
 		}
 		name, value, attached := powerShellParam(t)
-		switch {
-		case powerShellPathParams[name]:
-			if attached {
-				path = value
-			} else if i+1 < len(tokens) {
-				path = tokens[i+1]
-			}
-		case powerShellGetContentValueParams[name] && !attached:
-			i++
+		takesValue := powerShellPathParams[name] || powerShellGetContentValueParams[name] || powerShellCommonValueParams[name]
+		if !takesValue {
+			continue
 		}
+		if !attached {
+			if i+1 >= len(tokens) {
+				return "", false
+			}
+			i++
+			value = tokens[i]
+		}
+		if powerShellPathParams[name] && !havePath {
+			path, havePath = value, true
+		}
+	}
+	if !havePath && len(positionals) > 0 {
+		path = positionals[0]
 	}
 	if path == "" || strings.Contains(path, ",") || !looksLikeSourceFile(path) {
 		return "", false
@@ -99,24 +124,25 @@ func extractPowerShellReadFile(tokens []string) (string, bool) {
 	return path, true
 }
 
-// extractSelectString returns the -Pattern value (or the first positional)
-// and the searched paths (-Path/-LiteralPath values plus the remaining
-// positionals). ok is false when no pattern is given.
+// extractSelectString returns the pattern and the searched paths of a
+// Select-String call. Named parameters are bound first, the way PowerShell
+// binds them: the pattern is the -Pattern value or else the first
+// positional, and the paths are the -Path/-LiteralPath values plus the
+// remaining positionals. ok is false when no pattern is given, and when
+// -InputObject is used: that parameter set searches the supplied text, not
+// files, so it is no source search.
 func extractSelectString(tokens []string) (string, []string, bool) {
 	pattern, havePattern := "", false
-	var paths []string
+	var paths, positionals []string
 	for i := 1; i < len(tokens); i++ {
 		t := tokens[i]
 		if !strings.HasPrefix(t, "-") {
-			if !havePattern {
-				pattern, havePattern = t, true
-			} else {
-				paths = append(paths, t)
-			}
+			positionals = append(positionals, t)
 			continue
 		}
 		name, value, attached := powerShellParam(t)
-		takesValue := name == "-pattern" || powerShellPathParams[name] || powerShellSelectStringValueParams[name]
+		takesValue := name == "-pattern" || name == "-inputobject" || powerShellPathParams[name] ||
+			powerShellSelectStringValueParams[name] || powerShellCommonValueParams[name]
 		if !takesValue {
 			continue
 		}
@@ -128,12 +154,19 @@ func extractSelectString(tokens []string) (string, []string, bool) {
 			value = tokens[i]
 		}
 		switch {
+		case name == "-inputobject":
+			return "", nil, false
 		case name == "-pattern":
 			pattern, havePattern = value, true
 		case powerShellPathParams[name]:
 			paths = append(paths, value)
 		}
 	}
+	if !havePattern && len(positionals) > 0 {
+		pattern, havePattern = positionals[0], true
+		positionals = positionals[1:]
+	}
+	paths = append(paths, positionals...)
 	return pattern, paths, havePattern
 }
 
@@ -184,6 +217,10 @@ func extractChildItemFilter(tokens []string) (string, bool) {
 			}
 		case "-path", "-literalpath", "-pspath", "-lp", "-exclude", "-depth", "-attributes":
 			if !attached {
+				i++
+			}
+		default:
+			if powerShellCommonValueParams[name] && !attached {
 				i++
 			}
 		}
