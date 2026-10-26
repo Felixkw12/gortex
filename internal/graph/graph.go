@@ -760,16 +760,37 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 		return ""
 	}
 	// oldFrom is the outgoing bucket that held the edge and pos its slot
-	// there; oldFrom is empty for an edge with no outgoing slot.
+	// there; oldFrom is empty for an edge with no outgoing slot. oldKey and
+	// newKey hash the row's identity before and after the move.
 	type pendingEdge struct {
-		stored  *Edge
-		updated Edge
-		oldFrom string
-		pos     int
+		stored         *Edge
+		updated        Edge
+		oldFrom        string
+		pos            int
+		oldKey, newKey edgeHash
 	}
 	pending := make([]pendingEdge, 0, len(batch))
-	created := make(map[edgeHash]int, len(batch))
-	moving := make(map[edgeHash]bool, len(batch))
+	// created maps a new identity to the first pending row that claims it, and
+	// moving holds the stored identities moved away. Only a row whose old
+	// identity has no outgoing slot reads them, so they are built from pending
+	// at the first such row and kept current after it.
+	var created map[edgeHash]int
+	var moving map[edgeHash]bool
+	buildFoldIndexes := func() {
+		if created != nil {
+			return
+		}
+		created = make(map[edgeHash]int, len(batch))
+		moving = make(map[edgeHash]bool, len(batch))
+		for i := range pending {
+			if pending[i].oldFrom != "" {
+				moving[pending[i].oldKey] = true
+			}
+			if _, ok := created[pending[i].newKey]; !ok {
+				created[pending[i].newKey] = i
+			}
+		}
+	}
 	var receiptRows map[edgeHash]*Edge
 	if g.mutationReceipts.activeCount.Load() != 0 {
 		receiptRows = make(map[edgeHash]*Edge)
@@ -794,7 +815,9 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 		oldKey := hashEdgeKey(keyOf(&old))
 		sFrom := g.shardFor(old.From)
 		pos, exists := sFrom.outEdgeIdx[old.From][oldKey]
+		newKey := hashEdgeKey(keyOf(e))
 		if !exists || pos >= len(sFrom.outEdges[old.From]) {
+			buildFoldIndexes()
 			if moving[oldKey] {
 				continue // A preceding move already consumed this stored identity.
 			}
@@ -804,7 +827,7 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 				p := pending[i]
 				pending[i].stored = nil
 				p.updated = *e
-				newKey := hashEdgeKey(keyOf(e))
+				p.newKey = newKey
 				if _, exists := created[newKey]; !exists {
 					created[newKey] = len(pending)
 				}
@@ -816,12 +839,12 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 				// Preserve the To-only path's incoming update for detached edges.
 				sTo := g.shardFor(old.To)
 				removeEdgeFromBucket(sTo.inEdges, sTo.inEdgeKeys, sTo.inEdgeIdx, old.To, oldKey)
-				pending = append(pending, pendingEdge{stored: e, updated: *e})
+				pending = append(pending, pendingEdge{stored: e, updated: *e, newKey: newKey})
 			}
 			continue
 		}
 		stored := sFrom.outEdges[old.From][pos]
-		if oldKey == hashEdgeKey(keyOf(e)) {
+		if oldKey == newKey {
 			// A payload-only refresh keeps its identity and both slots.
 			if receiptRows != nil && r.RefreshIdentity && !deltaEdgeContentEqual(stored, e) {
 				receiptRows[oldKey] = stored
@@ -833,12 +856,13 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 		}
 		// Free only the old key; the slot stays until the second phase.
 		delete(sFrom.outEdgeIdx[old.From], oldKey)
-		moving[oldKey] = true
-		newKey := hashEdgeKey(keyOf(e))
-		if _, exists := created[newKey]; !exists {
-			created[newKey] = len(pending)
+		if created != nil {
+			moving[oldKey] = true
+			if _, exists := created[newKey]; !exists {
+				created[newKey] = len(pending)
+			}
 		}
-		pending = append(pending, pendingEdge{stored: stored, updated: *e, oldFrom: old.From, pos: pos})
+		pending = append(pending, pendingEdge{stored: stored, updated: *e, oldFrom: old.From, pos: pos, oldKey: oldKey, newKey: newKey})
 		sFrom.repoEdgeRemove(repoOf(sFrom, old.From), &old)
 		sTo := g.shardFor(old.To)
 		removeEdgeFromBucket(sTo.inEdges, sTo.inEdgeKeys, sTo.inEdgeIdx, old.To, oldKey)
@@ -847,13 +871,14 @@ func (g *Graph) reindexEdges(batch []EdgeReindex) []*Edge {
 		}
 	}
 	var dropped map[string]map[int]bool
-	for _, p := range pending {
+	for i := range pending {
+		p := &pending[i]
 		if p.stored == nil {
 			continue // Superseded by a later intermediate-identity move.
 		}
 		e := &p.updated
 		sFrom := g.shardFor(e.From)
-		newKey := hashEdgeKey(keyOf(e))
+		newKey := p.newKey
 		_, taken := sFrom.outEdgeIdx[e.From][newKey]
 		if p.oldFrom != "" && (p.oldFrom != e.From || taken) {
 			if dropped == nil {
