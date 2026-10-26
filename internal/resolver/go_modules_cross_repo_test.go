@@ -1021,3 +1021,52 @@ func TestGoModuleSourceDemotionPreservesNilMeta(t *testing.T) {
 		})
 	}
 }
+
+// Given a caller on a tracked package's terminal that can never bind there (its
+// workspace has no rule for the provider's, or no tracked repository indexes the
+// package), when the sweep or a provider change revisits the package, then the
+// caller's source is not queued for re-extraction.
+func TestGoModuleSourceRecoverySkipsRefusedCallers(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		for _, tc := range []struct {
+			name, mode, callerWS, pkg string
+			recovers                  bool
+		}{
+			{"sweep/admitted", "sweep", "pw", "", true},
+			{"sweep/denied_workspace", "sweep", "cw", "", false},
+			{"sweep/package_not_indexed", "sweep", "pw", "/missing", false},
+			{"incoming/admitted", "incoming", "pw", "", true},
+			{"incoming/denied_workspace", "incoming", "cw", "", false},
+		} {
+			t.Run(backend+"/"+tc.name, func(t *testing.T) {
+				var g graph.Store = graph.New()
+				if backend == "sqlite" {
+					db, err := store_sqlite.Open(filepath.Join(t.TempDir(), "g.sqlite"))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, db.Close()) })
+					g = db
+				}
+				g.AddNode(&graph.Node{ID: "a/main.go", Kind: graph.KindFile, RepoPrefix: "a", FilePath: "a/main.go", WorkspaceID: tc.callerWS, Language: "go"})
+				g.AddNode(&graph.Node{ID: "a/main.go::Caller", Name: "Caller", Kind: graph.KindFunction, RepoPrefix: "a", FilePath: "a/main.go", WorkspaceID: tc.callerWS, Language: "go"})
+				g.AddNode(&graph.Node{ID: "b/lib.go", Kind: graph.KindFile, RepoPrefix: "b", FilePath: "b/lib.go", WorkspaceID: "pw", Language: "go"})
+				provider := &graph.Node{ID: "b/lib.go::Hello", Name: "Hello", Kind: graph.KindFunction, RepoPrefix: "b", FilePath: "b/lib.go", WorkspaceID: "pw", Language: "go"}
+				g.AddNode(provider)
+				g.AddEdge(&graph.Edge{From: "a/main.go::Caller", To: "dep::example.org/library" + tc.pkg + "::Hello", Kind: graph.EdgeCalls, FilePath: "a/main.go", Line: 3})
+				require.Equal(t, 1, SynthesizeExternalCalls(g, true))
+				cr := NewCrossRepo(g)
+				cr.SetGoModules(map[string]string{"b": "example.org/library"})
+				cr.SetCrossWorkspaceDepLookup(func(string) []CrossWorkspaceDepRule { return nil })
+				if tc.mode == "sweep" {
+					require.NoError(t, cr.RetryGoModuleDeps(t.Context()))
+				} else {
+					cr.goModuleIncomingEdges(map[string][]*graph.Node{"b/lib.go": {provider}}, []string{"b/lib.go"})
+				}
+				if tc.recovers {
+					assert.Equal(t, []string{"a/main.go"}, cr.TakeGoModuleSourceFiles())
+				} else {
+					assert.Empty(t, cr.TakeGoModuleSourceFiles(), "no call of this caller can bind into the package")
+				}
+			})
+		}
+	}
+}
