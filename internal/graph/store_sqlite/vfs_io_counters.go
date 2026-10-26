@@ -142,16 +142,21 @@ func installVFSIOCounters(tls *libc.TLS, methods, walMethods uintptr) {
 
 // VFSIOMark is a sample of the page I/O counters, process-wide.
 type VFSIOMark struct {
+	// Available identifies physical VFS counters. fallbackWAL is sampled only
+	// by a store-backed mark when those hooks are unavailable.
+	Available   bool
+	fallbackWAL WALWriteMark
 	// [file][writer]: file 0 other, 1 main database, 2 log; writer 1 is the
 	// writer connection.
 	ReadCalls, ReadNanos, ReadBytes    [3][2]int64
 	WriteCalls, WriteNanos, WriteBytes [3][2]int64
 	Rows                               RowWriteCounts
+	Reindex                            ReindexWriteCounts
 	Transactions                       int64
 }
 
 func vfsIOMark() VFSIOMark {
-	m := VFSIOMark{Rows: rowWriteMark(), Transactions: WriteTransactionsBegun()}
+	m := VFSIOMark{Available: vfsIOInstalled.Load(), Rows: rowWriteMark(), Reindex: reindexWriteMark(), Transactions: WriteTransactionsBegun()}
 	for f := 0; f < 3; f++ {
 		for w := 0; w < 2; w++ {
 			c := &vfsIO[f][w]
@@ -165,6 +170,8 @@ func vfsIOMark() VFSIOMark {
 // VFSIOSplit is one lap's page I/O: reads and writes of the main database file
 // and of the log, by the writer connection and by every other connection.
 type VFSIOSplit struct {
+	OtherWALWriteBytes                                             int64
+	WALReset                                                       bool
 	WriterMainReads, WriterWALReads, OtherMainReads, OtherWALReads int64
 	WriterMainReadTime, WriterWALReadTime                          time.Duration
 	OtherMainReadTime, OtherWALReadTime                            time.Duration
@@ -172,6 +179,7 @@ type VFSIOSplit struct {
 	WriterMainWriteTime, WriterWALWriteTime, OtherMainWriteTime    time.Duration
 	WriterMainWriteBytes, WriterWALWriteBytes, OtherMainWriteBytes int64
 	Rows                                                           RowWriteCounts
+	Reindex                                                        ReindexWriteCounts
 	Transactions                                                   int64
 }
 
@@ -181,11 +189,29 @@ type VFSIOSplit struct {
 // transaction later rolls back; transactions count begins, not commits.
 func WriteMark() VFSIOMark { return vfsIOMark() }
 
+// WriteMark additionally falls back to the existing wal-index position meter
+// when VFS hooks are unavailable. That fallback is a lower bound across resets;
+// WALReset reports the lost earlier incarnation. No extra file read is needed
+// on platforms with VFS counters.
+func (s *Store) WriteMark() VFSIOMark {
+	m := vfsIOMark()
+	if !m.Available {
+		m.fallbackWAL = s.WALWriteMark()
+	}
+	return m
+}
+
+// WALBytes includes all connections: writer TLS classification is best-effort
+// when more than one store has a writer in the same process.
+func (d VFSIOSplit) WALBytes() int64 { return d.WriterWALWriteBytes + d.OtherWALWriteBytes }
+
 // Since is the lap between prev and m.
 func (m VFSIOMark) Since(prev VFSIOMark) VFSIOSplit {
 	d := func(a, b [3][2]int64, f, w int) int64 { return a[f][w] - b[f][w] }
-	return VFSIOSplit{
+	split := VFSIOSplit{
+		OtherWALWriteBytes:   d(m.WriteBytes, prev.WriteBytes, vfsFileWAL, 0),
 		Rows:                 m.Rows.Since(prev.Rows),
+		Reindex:              m.Reindex.Since(prev.Reindex),
 		Transactions:         m.Transactions - prev.Transactions,
 		WriterMainWrites:     d(m.WriteCalls, prev.WriteCalls, vfsFileMain, 1),
 		WriterMainWriteTime:  time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileMain, 1)),
@@ -205,6 +231,14 @@ func (m VFSIOMark) Since(prev VFSIOMark) VFSIOSplit {
 		WriterWALWriteBytes:  d(m.WriteBytes, prev.WriteBytes, vfsFileWAL, 1),
 		OtherMainWriteBytes:  d(m.WriteBytes, prev.WriteBytes, vfsFileMain, 0),
 	}
+	if !m.Available {
+		wal := WALWrittenBetween(prev.fallbackWAL, m.fallbackWAL)
+		if wal.Valid {
+			split.WriterWALWriteBytes = wal.Bytes
+			split.WALReset = wal.Reset
+		}
+	}
+	return split
 }
 
 // The log file's wrappers: count, then call the log table's originals.

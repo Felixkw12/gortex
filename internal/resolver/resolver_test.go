@@ -44,6 +44,9 @@ func TestResolveFilesAndIncomingLogsPhasesAndAdmissions(t *testing.T) {
 		case "resolver: incremental phase complete":
 			completions = append(completions, entry.ContextMap()["phase"].(string))
 			assert.Contains(t, entry.ContextMap(), "elapsed")
+			for _, key := range []string{"phase_wal_bytes", "phase_main_bytes", "phase_rows", "phase_txns", "phase_wal_bytes_reset"} {
+				assert.Contains(t, entry.ContextMap(), key)
+			}
 		}
 	}
 	want := []string{"wait_lock", "visibility", "pending_collect", "build_indexes", "warm_lookup", "resolve_outgoing", "resolve_incoming", "attribution"}

@@ -20,6 +20,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 const unresolvedPrefix = "unresolved::"
@@ -314,6 +315,7 @@ type Resolver struct {
 	goPackageOwnershipInventory bool
 	goPackageOwnershipPrepared  map[string]GoPackageOwnershipLookup
 	graph                       graph.Store
+	writeCounters               func() store_sqlite.VFSIOMark
 	logger                      *zap.Logger
 	dirIndex                    map[string][]graph.FileNodeIdentity
 	lastDirIndex                map[string][]graph.FileNodeIdentity
@@ -3116,18 +3118,18 @@ func (r *Resolver) ResolveFilesAndIncoming(filePaths []string) *ResolveStats {
 			zap.Duration("attribution", attributionDuration),
 			zap.Duration("total", time.Since(started)))
 	}()
-	finish := startIncrementalPhase(logger, "wait_lock")
+	finish := r.startIncrementalPhase(logger, "wait_lock")
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.refreshGoModules()
 	lockDuration = finish()
 	// The edited files may have (re)stamped global usings — reconcile the
 	// persistent index instead of paying the workspace rescan per save.
-	finish = startIncrementalPhase(logger, "visibility")
+	finish = r.startIncrementalPhase(logger, "visibility")
 	r.scopedCSharpVisibilityInvalidate(filePaths)
 	visibilityDuration = finish()
 
-	finish = startIncrementalPhase(logger, "pending_collect")
+	finish = r.startIncrementalPhase(logger, "pending_collect")
 	frontier = r.collectIncrementalFileFrontier(filePaths)
 	r.incomingCarried = frontier.carry
 	defer func() { r.incomingCarried = nil }()
@@ -3150,7 +3152,7 @@ func (r *Resolver) ResolveFilesAndIncoming(filePaths []string) *ResolveStats {
 	recordFrontierIncomingAdmission(logger, stats, frontier, "preparation")
 	var carried []*graph.Edge
 	if len(r.priorBindings) > 0 {
-		finish = startIncrementalPhase(logger, "carry_prior_bindings")
+		finish = r.startIncrementalPhase(logger, "carry_prior_bindings")
 		carried = r.carryPriorBindingsLocked(&frontier, stats)
 		finish(zap.Int("carried", len(carried)), zap.Int("pending", len(frontier.pending)))
 		// Normally applied by the outgoing leg; an exit before it applies
@@ -3173,11 +3175,11 @@ func (r *Resolver) ResolveFilesAndIncoming(filePaths []string) *ResolveStats {
 	// below read them for the changed files, as they do after any resolve);
 	// only the lookup warm-up, which serves resolution, is left to the edges
 	// still pending.
-	finish = startIncrementalPhase(logger, "build_indexes")
+	finish = r.startIncrementalPhase(logger, "build_indexes")
 	clear := r.buildPassIndexesForPending(append(append([]*graph.Edge(nil), frontier.pending...), carried...))
 	indexDuration = finish(zap.Int("pending", len(frontier.pending)), zap.Int("carried", len(carried)))
 	defer clear()
-	finish = startIncrementalPhase(logger, "warm_lookup")
+	finish = r.startIncrementalPhase(logger, "warm_lookup")
 	if err := r.warmLookupCache(frontier.pending); err != nil {
 		r.clearLookupCache()
 		outcome = "metadata_error"
@@ -3199,18 +3201,18 @@ func (r *Resolver) ResolveFilesAndIncoming(filePaths []string) *ResolveStats {
 	// read the incoming restub buckets afresh. The fresh read preserves the
 	// old forward-before-reverse semantics without one query/transaction per
 	// file. Phase durations include each leg's batched graph mutation.
-	finish = startIncrementalPhase(logger, "resolve_outgoing")
+	finish = r.startIncrementalPhase(logger, "resolve_outgoing")
 	r.resolvePreparedFileEdgesLocked(frontier.paths, frontier.nodesByFile, frontier.outByNode, stats, frontier.detached...)
 	outgoingDuration = finish(
 		zap.Int("resolved", stats.Resolved), zap.Int("unresolved", stats.Unresolved), zap.Int("external", stats.External))
 	beforeIncoming := *stats
-	finish = startIncrementalPhase(logger, "resolve_incoming")
+	finish = r.startIncrementalPhase(logger, "resolve_incoming")
 	r.resolveIncomingStubKeysLocked(frontier.incomingKeys(), stats)
 	incomingDuration = finish(
 		zap.Int("resolved", stats.Resolved-beforeIncoming.Resolved),
 		zap.Int("unresolved", stats.Unresolved-beforeIncoming.Unresolved),
 		zap.Int("external", stats.External-beforeIncoming.External))
-	finish = startIncrementalPhase(logger, "attribution")
+	finish = r.startIncrementalPhase(logger, "attribution")
 	r.prepareIncrementalAttributionCache(frontier)
 	r.runFileAttributionPassesForFilesLocked(frontier)
 	r.clearIncrementalAttributionCache()
@@ -3277,16 +3279,32 @@ func incrementalAdmissionSummary(frontier incrementalFileFrontier, sources map[s
 	return repos, omittedRepos, omittedAdmissions
 }
 
+// SetWriteCounterSource preserves the underlying store's WAL-position fallback
+// when the resolver reads through a delta graph. Install before using the resolver.
+func (r *Resolver) SetWriteCounterSource(sample func() store_sqlite.VFSIOMark) {
+	r.writeCounters = sample
+}
+
 // A start event leaves the active operation visible even if it blocks or never
 // returns. Durations use the monotonic component of time.Now, not wall-clock
 // subtraction or sleeps.
-func startIncrementalPhase(logger *zap.Logger, phase string) func(...zap.Field) time.Duration {
+func (r *Resolver) startIncrementalPhase(logger *zap.Logger, phase string) func(...zap.Field) time.Duration {
 	started, faults := time.Now(), processMajorFaults()
-	logger.Info("resolver: incremental phase starting", zap.String("phase", phase))
+	sample := r.writeCounters
+	if sample == nil {
+		sample = store_sqlite.WriteMark
+		if source, ok := r.graph.(interface{ WriteMark() store_sqlite.VFSIOMark }); ok {
+			sample = source.WriteMark
+		}
+	}
+	writes := sample()
+	logger.Info("resolver: incremental phase starting", zap.String("phase", phase), zap.Int64("phase_wal_bytes", 0), zap.Int64("phase_main_bytes", 0), zap.Int64("phase_rows", 0), zap.Int64("phase_txns", 0), zap.Bool("phase_wal_bytes_reset", false))
 	return func(fields ...zap.Field) time.Duration {
 		elapsed := time.Since(started)
 		fields = append(fields, zap.String("phase", phase), zap.Duration("elapsed", elapsed),
 			zap.Int64("major_faults", processMajorFaults()-faults))
+		d := sample().Since(writes)
+		fields = append(fields, zap.Int64("phase_wal_bytes", d.WALBytes()), zap.Int64("phase_main_bytes", d.WriterMainWriteBytes+d.OtherMainWriteBytes), zap.Int64("phase_rows", d.Rows.Total()), zap.Int64("phase_txns", d.Transactions), zap.Bool("phase_wal_bytes_reset", d.WALReset))
 		logger.Info("resolver: incremental phase complete", fields...)
 		return elapsed
 	}

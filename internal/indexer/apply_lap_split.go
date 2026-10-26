@@ -39,6 +39,8 @@ func (idx *Indexer) applyLapSplitMark() applyLapSplit {
 	mark := applyLapSplit{cpu: processCPUTime(), blockReads: editDeltaProcessIO().blockReads, sched: readSchedMark()}
 	if idx.storeWaits != nil {
 		mark.store = idx.storeWaits()
+	} else {
+		mark.store.VFS = idx.writeCounterMark()
 	}
 	if w, ok := idx.graph.(writeLockWaiter); ok {
 		mark.wait = w.WriteLockWait()
@@ -50,11 +52,11 @@ func (idx *Indexer) applyLapSplitMark() applyLapSplit {
 // to now.
 func applyLapSplitFields(name string, start, now applyLapSplit) []zap.Field {
 	waits, waited := now.sched.since(start.sched)
-	return append([]zap.Field{
+	return append(append([]zap.Field{
 		zap.Float64(name+"_cpu_ms", float64((now.cpu-start.cpu).Microseconds())/1000),
 		zap.Float64(name+"_lock_wait_ms", float64((now.wait-start.wait).Microseconds())/1000),
 		zap.Int64(name+"_block_reads", now.blockReads-start.blockReads),
-	}, append(storeWaitFields(name+"_", now.store.Split(start.store)), schedWaitFields(name+"_", waits, waited)...)...)
+	}, append(storeWaitFields(name+"_", now.store.Split(start.store)), schedWaitFields(name+"_", waits, waited)...)...), writeCounterFields(name+"_", now.store.VFS.Since(start.store.VFS))...)
 }
 
 // schedWaitFields renders the process's runnable waits that ended over a
@@ -95,6 +97,8 @@ func storeWaitFields(prefix string, w store_sqlite.ReaderWaitSplit) []zap.Field 
 		zap.Int64(prefix+"writer_cache_hits", w.WriterCacheHits),
 		zap.Int64(prefix+"writer_cache_misses", w.WriterCacheMisses),
 		zap.Int64(prefix+"writer_cache_spills", w.WriterCacheSpills),
+		zap.Int64(prefix+"writer_main_writes", w.VFS.WriterMainWrites), zap.Float64(prefix+"writer_main_write_ms", ms(w.VFS.WriterMainWriteTime)),
+		zap.Int64(prefix+"writer_main_write_bytes", w.VFS.WriterMainWriteBytes), zap.Int64(prefix+"writer_wal_write_bytes", w.VFS.WriterWALWriteBytes), zap.Int64(prefix+"other_wal_write_bytes", w.VFS.OtherWALWriteBytes),
 	}
 }
 
@@ -120,8 +124,11 @@ func storeWaitMillis(w store_sqlite.ReaderWaitSplit) map[string]float64 {
 		"writer_wal_reads": float64(w.VFS.WriterWALReads), "writer_wal_read_ms": ms(w.VFS.WriterWALReadTime),
 		"other_main_reads": float64(w.VFS.OtherMainReads), "other_main_read_ms": ms(w.VFS.OtherMainReadTime),
 		"other_wal_reads": float64(w.VFS.OtherWALReads), "other_wal_read_ms": ms(w.VFS.OtherWALReadTime),
-		"writer_wal_writes": float64(w.VFS.WriterWALWrites), "writer_wal_write_ms": ms(w.VFS.WriterWALWriteTime),
+		"writer_main_writes": float64(w.VFS.WriterMainWrites), "writer_main_write_ms": ms(w.VFS.WriterMainWriteTime),
+		"writer_main_write_bytes": float64(w.VFS.WriterMainWriteBytes),
+		"writer_wal_writes":       float64(w.VFS.WriterWALWrites), "writer_wal_write_ms": ms(w.VFS.WriterWALWriteTime),
 		"writer_wal_write_bytes": float64(w.VFS.WriterWALWriteBytes),
+		"other_main_write_bytes": float64(w.VFS.OtherMainWriteBytes),
 		"other_main_writes":      float64(w.VFS.OtherMainWrites), "other_main_write_ms": ms(w.VFS.OtherMainWriteTime),
 	}
 }
@@ -129,7 +136,15 @@ func storeWaitMillis(w store_sqlite.ReaderWaitSplit) map[string]float64 {
 // addVFSIOSplit sums two laps of the store's VFS counters.
 func addVFSIOSplit(a, b store_sqlite.VFSIOSplit) store_sqlite.VFSIOSplit {
 	return store_sqlite.VFSIOSplit{
-		WriterMainReads: a.WriterMainReads + b.WriterMainReads, WriterWALReads: a.WriterWALReads + b.WriterWALReads,
+		OtherWALWriteBytes:   a.OtherWALWriteBytes + b.OtherWALWriteBytes,
+		WALReset:             a.WALReset || b.WALReset,
+		Reindex:              store_sqlite.ReindexWriteCounts{Updated: a.Reindex.Updated + b.Reindex.Updated, Deleted: a.Reindex.Deleted + b.Reindex.Deleted, Inserted: a.Reindex.Inserted + b.Reindex.Inserted, FastPath: a.Reindex.FastPath + b.Reindex.FastPath, Generic: a.Reindex.Generic + b.Reindex.Generic, ReceiptFallback: a.Reindex.ReceiptFallback + b.Reindex.ReceiptFallback},
+		Rows:                 store_sqlite.RowWriteCounts{Nodes: a.Rows.Nodes + b.Rows.Nodes, Edges: a.Rows.Edges + b.Rows.Edges, SymbolFTS: a.Rows.SymbolFTS + b.Rows.SymbolFTS, ContentFTS: a.Rows.ContentFTS + b.Rows.ContentFTS},
+		Transactions:         a.Transactions + b.Transactions,
+		WriterMainWrites:     a.WriterMainWrites + b.WriterMainWrites,
+		WriterMainWriteTime:  a.WriterMainWriteTime + b.WriterMainWriteTime,
+		WriterMainWriteBytes: a.WriterMainWriteBytes + b.WriterMainWriteBytes,
+		WriterMainReads:      a.WriterMainReads + b.WriterMainReads, WriterWALReads: a.WriterWALReads + b.WriterWALReads,
 		OtherMainReads: a.OtherMainReads + b.OtherMainReads, OtherWALReads: a.OtherWALReads + b.OtherWALReads,
 		WriterMainReadTime: a.WriterMainReadTime + b.WriterMainReadTime, WriterWALReadTime: a.WriterWALReadTime + b.WriterWALReadTime,
 		OtherMainReadTime: a.OtherMainReadTime + b.OtherMainReadTime, OtherWALReadTime: a.OtherWALReadTime + b.OtherWALReadTime,

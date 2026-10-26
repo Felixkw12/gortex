@@ -29,7 +29,7 @@ func rowWriteMark() RowWriteCounts {
 }
 func countStatementRows(counter *atomic.Int64, result sql.Result, err error) {
 	if err == nil && result != nil {
-		if rows, rowsErr := result.RowsAffected(); rowsErr == nil {
+		if rows, rowsErr := result.RowsAffected(); rowsErr == nil && rows > 0 {
 			counter.Add(rows)
 		}
 	}
@@ -49,4 +49,29 @@ func countSymbolFTSWrite(result sql.Result, err error) (sql.Result, error) {
 func countContentFTSWrite(result sql.Result, err error) (sql.Result, error) {
 	countStatementRows(&contentFTSRowsWritten, result, err)
 	return result, err
+}
+
+// ReindexWriteCounts is committed set-reindex work over an interval. Generic
+// simulation is reported separately from the receipt-safety fallback so a log
+// never calls all delete/insert work an in-place conversion.
+type ReindexWriteCounts struct {
+	Updated, Deleted, Inserted         int64
+	FastPath, Generic, ReceiptFallback int64
+}
+
+var reindexUpdated, reindexDeleted, reindexInserted, reindexFast, reindexGeneric, reindexReceipt atomic.Int64
+
+func reindexWriteMark() ReindexWriteCounts {
+	return ReindexWriteCounts{reindexUpdated.Load(), reindexDeleted.Load(), reindexInserted.Load(), reindexFast.Load(), reindexGeneric.Load(), reindexReceipt.Load()}
+}
+func (r ReindexWriteCounts) Since(p ReindexWriteCounts) ReindexWriteCounts {
+	return ReindexWriteCounts{r.Updated - p.Updated, r.Deleted - p.Deleted, r.Inserted - p.Inserted, r.FastPath - p.FastPath, r.Generic - p.Generic, r.ReceiptFallback - p.ReceiptFallback}
+}
+func noteReindexWrites(s sqliteReindexSetStats) {
+	reindexUpdated.Add(int64(s.updatedRows))
+	reindexDeleted.Add(int64(s.deletedRows))
+	reindexInserted.Add(int64(s.insertedRows))
+	reindexFast.Add(int64(s.fastPath))
+	reindexGeneric.Add(int64(s.genericFallback))
+	reindexReceipt.Add(int64(s.receiptFallback))
 }
