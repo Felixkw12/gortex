@@ -1,0 +1,278 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"sync"
+	"testing"
+	"time"
+)
+
+type stubFrame struct {
+	ID     int64          `json:"id"`
+	Method string         `json:"method"`
+	Params map[string]any `json:"params"`
+	Kind   string         `json:"kind"`
+}
+
+// A real newline-framed daemon stub exercises the public CLI's transport;
+// it does not import or initialize the application's server/grammar stack.
+func startStub(t *testing.T, handle func(stubFrame) (any, *rpcError)) string {
+	t.Helper()
+	base := os.TempDir()
+	if runtime.GOOS != "windows" {
+		base = "/tmp" // Darwin's long per-user temp path can exceed sun_path.
+	}
+	dir, err := os.MkdirTemp(base, "gl-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(dir, "d.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var connections []net.Conn
+	var workers sync.WaitGroup
+	accepted := make(chan struct{})
+	go func() {
+		defer close(accepted)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			connections = append(connections, conn)
+			mu.Unlock()
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				defer conn.Close()
+				decoder := json.NewDecoder(conn)
+				var handshake map[string]any
+				if decoder.Decode(&handshake) != nil {
+					return
+				}
+				var writeMu sync.Mutex
+				encode := func(value any) {
+					writeMu.Lock()
+					defer writeMu.Unlock()
+					_ = json.NewEncoder(conn).Encode(value) // disconnect is expected on cancellation
+				}
+				encode(map[string]any{"ok": true, "daemon_version": "stub-v1"})
+				for {
+					var frame stubFrame
+					if decoder.Decode(&frame) != nil {
+						return
+					}
+					if frame.Kind != "" {
+						result, _ := handle(frame)
+						encode(map[string]any{"ok": true, "result": result})
+						continue
+					}
+					if frame.ID == 0 {
+						continue
+					}
+					workers.Add(1)
+					go func() {
+						defer workers.Done()
+						result, fault := any(map[string]any{}), (*rpcError)(nil)
+						if frame.Method != "initialize" {
+							result, fault = handle(frame)
+						}
+						if fault != nil {
+							encode(map[string]any{"jsonrpc": "2.0", "id": frame.ID, "error": fault})
+						} else {
+							encode(map[string]any{"jsonrpc": "2.0", "id": frame.ID, "result": result})
+						}
+					}()
+				}
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		<-accepted
+		mu.Lock()
+		for _, conn := range connections {
+			_ = conn.Close()
+		}
+		mu.Unlock()
+		workers.Wait()
+		_ = os.RemoveAll(dir)
+	})
+	return socket
+}
+
+func stubContent(value any) any {
+	data, _ := json.Marshal(value)
+	return map[string]any{"content": []any{map[string]any{"type": "text", "text": string(data)}}}
+}
+
+func TestStubDaemonSweepTargetsBusyAndMetrics(t *testing.T) {
+	var mu sync.Mutex
+	busy, invalid, external := 0, 0, 0
+	socket := startStub(t, func(frame stubFrame) (any, *rpcError) {
+		mu.Lock()
+		defer mu.Unlock()
+		if frame.Kind == "status" {
+			return map[string]any{"ready": true, "enriched": true}, nil
+		}
+		name, _ := frame.Params["name"].(string)
+		args, _ := frame.Params["arguments"].(map[string]any)
+		operation, _ := args["operation"].(string)
+		target, _ := args["target"].(map[string]any)
+		if name == "search" && busy < 3 {
+			busy++
+			return nil, &rpcError{Code: -32002, Message: "busy"}
+		}
+		if (name == "change" && operation == "verify" && target["symbol"] == nil) || (name == "relations" && operation == "dependents" && target["file"] == nil) {
+			invalid++
+			return map[string]any{"isError": true, "content": []any{map[string]any{"text": `{"error_code":"invalid_argument","message":"missing target"}`}}}, nil
+		}
+		if name == "read" && operation == "source" {
+			if symbol, _ := target["symbol"].(string); len(symbol) >= 5 && symbol[:5] == "ext::" {
+				external++
+			}
+		}
+		return stubContent(map[string]any{"ok": true}), nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := openMCP(ctx, socket, "/private/clone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	plan, err := readingPlan(sampleCorpus())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sleeps []time.Duration
+	var all []Attempt
+	for _, r := range plan {
+		_, attempts, err := callTool(ctx, client, r, r.Arguments, "workload", 0, 0, 0, time.Second, func(_ context.Context, delay time.Duration) error {
+			sleeps = append(sleeps, delay)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, attempts...)
+	}
+	if !reflect.DeepEqual(sleeps, []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}) {
+		t.Fatalf("busy sleep sequence: %v", sleeps)
+	}
+	metrics := summarize(all, 1, "workload")
+	for _, name := range []string{"change.verify", "relations.dependents"} {
+		if metrics[name].Latency.P50.Value == nil || len(metrics[name].Errors) != 0 {
+			t.Fatalf("%s was not measured successfully: %+v", name, metrics[name])
+		}
+	}
+	mu.Lock()
+	if invalid != 0 || external != 0 || busy != 3 {
+		t.Errorf("invalid=%d external=%d busy=%d", invalid, external, busy)
+	}
+	mu.Unlock()
+	status, err := control(ctx, socket, "status", nil)
+	if err != nil || string(status) != `{"enriched":true,"ready":true}` {
+		t.Fatalf("control receipt: %s %v", status, err)
+	}
+}
+
+func TestSocketConcurrentRoutingAndIndependentCancellation(t *testing.T) {
+	release := make(chan struct{})
+	socket := startStub(t, func(frame stubFrame) (any, *rpcError) {
+		if frame.Method == "blocked" {
+			<-release
+		}
+		if frame.Method == "slow" {
+			time.Sleep(40 * time.Millisecond)
+		}
+		return map[string]any{"method": frame.Method}, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := openMCP(ctx, socket, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	short, end := context.WithCancel(ctx)
+	end()
+	if _, err := c.call(short, "cancelled", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled call: %v", err)
+	}
+	var workers sync.WaitGroup
+	for i := range 20 {
+		method := "fast"
+		if i%2 == 0 {
+			method = "slow"
+		}
+		workers.Go(func() {
+			data, err := c.call(ctx, method, nil)
+			if err != nil || string(data) != `{"method":"`+method+`"}` {
+				t.Errorf("reply routed incorrectly: %s %v", data, err)
+			}
+		})
+	}
+	workers.Wait()
+	short, end = context.WithTimeout(ctx, time.Millisecond)
+	defer end()
+	_, err = c.call(short, "blocked", nil)
+	close(release)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("in-flight call was not cancelled: %v", err)
+	}
+	if _, err := c.call(ctx, "fast", nil); err != nil {
+		t.Fatalf("one cancellation closed the shared connection: %v", err)
+	}
+}
+
+type blockingCaller struct{}
+
+func (blockingCaller) call(ctx context.Context, _ string, _ any) (json.RawMessage, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestPhaseCensoringIsNotProductExpiry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	_, attempts, _ := callTool(ctx, blockingCaller{}, request{Tool: "search"}, nil, "workload", 0, 0, 0, time.Second, waitContext)
+	if len(attempts) != 1 || attempts[0].Outcome != "phase_censored" {
+		t.Fatalf("phase censoring mislabeled: %+v", attempts)
+	}
+	_, attempts, _ = callTool(context.Background(), blockingCaller{}, request{Tool: "search"}, nil, "workload", 0, 0, 0, time.Millisecond, waitContext)
+	if len(attempts) != 1 || attempts[0].Outcome != "product_deadline" {
+		t.Fatalf("product deadline mislabeled: %+v", attempts)
+	}
+}
+
+func TestWireLimitAndStructuredErrors(t *testing.T) {
+	if _, err := readWireLine(bufio.NewReaderSize(&repeatingReader{}, 4096)); err == nil {
+		t.Fatal("unbounded daemon response accepted")
+	}
+	var remote *rpcError
+	if err := checkToolResult(json.RawMessage(`{"isError":true,"content":[{"text":"{\"error_code\":\"invalid_argument\",\"message\":\"target\"}"}]}`)); !errors.As(err, &remote) || remote.Code != -32602 {
+		t.Fatalf("structured tool error not classified: %v", err)
+	}
+}
+
+type repeatingReader struct{}
+
+func (*repeatingReader) Read(data []byte) (int, error) {
+	for i := range data {
+		data[i] = 'a'
+	}
+	return len(data), nil
+}
