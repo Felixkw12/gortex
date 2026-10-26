@@ -35,7 +35,7 @@ import (
 // index changes in a way an old on-disk DB would not already have, and append a
 // matching schemaMigrations entry describing how to bring an older store
 // forward (in place, or by rebuild).
-const currentSchemaVersion = 39
+const currentSchemaVersion = 40
 
 // schemaMigration is one forward step. Exactly one strategy applies:
 //   - rebuild=true: the change introduces structure/data that can only come
@@ -137,6 +137,7 @@ var schemaMigrations = []schemaMigration{
 	{version: 37, name: "cover payload-free contract receipt stamps", inPlace: createContractBoundaryStampIndex},
 	{version: 38, name: "cover exact node declaration reads", inPlace: coverNodeDeclarationIndex},
 	{version: 39, name: "seek supplementary name candidates by name length", inPlace: seekNameCandidatesByLength},
+	{version: 40, name: "reconcile SQLite 3.54 name length keys", inPlace: reconcileNameCandidateLengths},
 }
 
 // Rebuild just the secondary index; graph payload, identity and receipts stay
@@ -177,6 +178,27 @@ func seekNameCandidatesByLength(tx *sql.Tx) error {
 		return err
 	}
 	_, err = tx.Exec(nodesNameCandidatesIndexDDL)
+	return err
+}
+
+// SQLite 3.54 counts runs of orphaned UTF-8 continuation bytes differently.
+// An expression index built by the previous engine retains the old length
+// keys even though its DDL is unchanged. Compare the stored key with a forced
+// recomputation using only the covering index; valid UTF-8 stores pay one
+// narrow scan on upgrade, not an unnecessary index rebuild.
+func reconcileNameCandidateLengths(tx *sql.Tx) error {
+	if err := createNameCandidateIndex(tx); err != nil {
+		return err
+	}
+	var stale bool
+	err := tx.QueryRow(`SELECT EXISTS (
+SELECT 1 FROM nodes INDEXED BY nodes_name_candidates
+WHERE name <> '' AND length(name) <> length(name || '') LIMIT 1
+)`).Scan(&stale)
+	if err != nil || !stale {
+		return err
+	}
+	_, err = tx.Exec(`REINDEX nodes_name_candidates`)
 	return err
 }
 

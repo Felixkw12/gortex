@@ -13,9 +13,9 @@ import "time"
 // The mark also carries what Since does not add up, so a lap whose wall time
 // is far above its CPU can be attributed:
 //   - WriterPoolNanos/Waits: waits for the writer pool's one connection;
-//   - Sleep: time asleep inside SQLite (process-wide, every connection), split
-//     into the busy handler (lock contention, whole-millisecond sleeps) and the
-//     WAL read-lock retry loop (sqlite_sleep_gauge.go);
+//   - Sleep: time asleep through SQLite's VFS (process-wide), split into the
+//     native busy handler and the WAL read-lock retry loop. The driver's Go
+//     busy handler is not observable here (sqlite_sleep_gauge.go);
 //   - ReadTxnNanos/ReadTxns: the wall time of the pool's read transactions
 //     (a connection's first statement to its return to the pool), which is
 //     the store's share of a read-heavy lap.

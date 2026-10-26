@@ -56,16 +56,16 @@ func nameCandidateSQL(generation int64, substr string, filter graph.NameSearchFi
 }
 
 // likeMatchMinLength is the fewest characters, as length() counts them, in a
-// name that the pattern built from substr matches. LIKE pairs every character
-// of substr with exactly one character of the name, and both split UTF-8 as
-// length() does: a byte from 0xc0 up takes the continuation bytes after it.
-// The pattern ends at its first NUL.
+// name that the pattern built from substr matches. SQLite 3.54's length()
+// groups continuation bytes after ANY non-ASCII byte, including an orphaned
+// continuation byte. Counting those separately can exclude a matching legacy
+// TEXT name containing invalid UTF-8. The pattern ends at its first NUL.
 func likeMatchMinLength(substr string) int {
 	n := 0
 	for i := 0; i < len(substr) && substr[i] != 0; n++ {
 		lead := substr[i]
 		i++
-		if lead >= 0xc0 {
+		if lead >= 0x80 {
 			for i < len(substr) && substr[i]&0xc0 == 0x80 {
 				i++
 			}

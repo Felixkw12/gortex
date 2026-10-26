@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -200,7 +201,7 @@ var nameCandidateTrickyNames = []string{
 	"a", "B", "ab", "Ab", "abc", "close", "Close", "CLOSE", "closer", "enclosed", "mcpRequestRegistry",
 	"MCPREQUESTREGISTRY", "with_underscore", "with%percent", `back\slash`, "École", "école", "ÉCOLE",
 	"Straße", "Ω", "ω", "Ωmega", "日本語Name", "r\xff", "\xc3", "\xa9caf", "caf\xe9", "\xc3\xa9\xa9",
-	"\xe2\x82", "r\uFFFD", "ab\x00cd", "x\x00", strings.Repeat("long", 40),
+	"\xe2\x82", "\x80\x80", "a\x80\x80", "r\uFFFD", "ab\x00cd", "x\x00", strings.Repeat("long", 40),
 }
 
 // nameCandidateUnboundedSQL is the candidate read without the length bound or
@@ -301,9 +302,19 @@ func TestNameCandidateLengthSeekReturnsTheUnboundedScan(t *testing.T) {
 		if err := s.AtGeneration(gen).AddBatchChecked(nodes, nil); err != nil {
 			t.Fatal(err)
 		}
+		// The normal writer's JSON encoding repairs invalid UTF-8. Preserve
+		// actual legacy TEXT bytes here or the length/LIKE equivalence check
+		// never exercises the malformed names it claims to cover.
+		for _, node := range nodes {
+			if !utf8.ValidString(node.Name) {
+				if _, err := s.writerDB.Exec(`UPDATE nodes SET name=CAST(? AS TEXT) WHERE view_gen=? AND id=?`, []byte(node.Name), gen, node.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
 	}
 	queries := []string{"a", "A", "close", "CLOSE", "registry", "_", "%", `\`, "é", "É", "école", "Ω", "ω", "日本語",
-		"\xc3", "\xa9", "\xc3\xa9", "\xe9", "\uFFFD", "\x80", "ab\x00zz", "\x00", "long", strings.Repeat("long", 40),
+		"\xc3", "\xa9", "\xc3\xa9", "\xe9", "\uFFFD", "\x80", "\x80\x80", "ab\x00zz", "\x00", "long", strings.Repeat("long", 40),
 		strings.Repeat("long", 41), "no-such-name", strings.Repeat("x", sqliteLikePatternLimit)}
 	for _, name := range names {
 		if len(name) > 2 {
