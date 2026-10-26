@@ -38,14 +38,14 @@ suite for:
 - All non-Go files, including documentation, fixtures, embeds, C/C++ inputs,
   generators, CI scripts and configuration. This intentionally makes changes to
   the selector itself run the existing full cross-platform suite. Go files under
-  `scripts/` and `.github/` also always request full mode.
+  `scripts/`, `.github/`, and `internal/citest/` also always request full mode.
 - Changed cgo/generated/embed/generate inputs, unknown ownership, nested module
   inputs outside the root package census, or unsupported build constraints.
 - Missing comparison revisions, missing Git objects, failed/incomplete Go
   metadata, unsupported Go flags/workspaces/experiments, or differing normal and
   race-tagged package censuses.
 
-`scripts/ci_test_selection.py` compares the merge base of the event's base SHA
+`scripts/ci-select` (using the shared `internal/citest` package) compares the merge base of the event's base SHA
 and exact checkout SHA. NUL-delimited Git status records preserve unusual path
 names and rename pairs. It obtains `go list -json` metadata without `-test` for
 Linux amd64, macOS arm64 and Windows amd64, all with cgo enabled. Normal and race
@@ -91,15 +91,20 @@ checks or change administrative rulesets.
 The gate and its workflow-policy tests live in the standalone Go tool
 `scripts/ci-result` (`go test ./scripts/ci-result`). Tests exercise the actual CLI
 input/output path, valid and rejected receipts, malformed input, and workflow
-wiring with LF/CRLF checkouts. Ordinary Go tests need no Python bridge.
-The selector and runner fixtures remain Python tests. They create isolated
-Git/Go modules and exercise reverse imports,
+wiring with LF/CRLF checkouts. The CI test-selection/partitioning path requires
+Go and Git; unrelated repository Python tools are unchanged.
+
+The policy, selector and runner are Go code in `internal/citest`, with small
+commands under `scripts/ci-select` and `scripts/ci-test`. Their Go tests create
+isolated Git/Go modules and exercise reverse imports,
 test-only/race/platform imports, local replacement bridges, additions,
 deletes/renames, resource and metadata fallbacks, explicit overrides, and stale
 or malformed manifests. A fixture also runs the real partition runner in full
-and affected modes and compares the executed tests.
+and affected modes and compares the executed tests. Additional fixtures verify
+first-failure evidence, retry scope, cancellation and owned-child cleanup.
+Run these tests with `go test ./internal/citest ./scripts/ci-result`.
 
-Representative package/job selections on the implementation tree (200 root Go
+Representative package/job selections on the implementation tree (203 root Go
 packages per target) are shown below. These counts describe planned work, not
 measured speedups; setup and compilation costs remain.
 

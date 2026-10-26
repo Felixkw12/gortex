@@ -144,6 +144,9 @@ func assertCIWorkflowWiring(t *testing.T, input string) {
 	// Git may check the workflow out with core.autocrlf on Windows. Match
 	// Python read_text's universal-newline behavior on both checkout forms.
 	text := strings.ReplaceAll(input, "\r\n", "\n")
+	if strings.Contains(text, "python") {
+		t.Error("CI selection, execution and validation must use Go commands")
+	}
 	for _, required := range []string{
 		"matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}",
 		"CI_FULL_TESTS: ${{ vars.CI_FULL_TESTS }}",
@@ -152,6 +155,8 @@ func assertCIWorkflowWiring(t *testing.T, input string) {
 		"needs.plan.outputs.mode == 'full'", "name: affected-coverage-",
 		"  build-native:\n", "  lint:\n", "  build-linux-static:\n", "  build-onnx:\n", "  ci-result:\n",
 		"if: always()", "go test -count=1 ./scripts/ci-result", "run: go run ./scripts/ci-result",
+		"go test -count=1 ./internal/citest", "go run ./scripts/ci-select --output test-selection.json",
+		"go run ./scripts/ci-test --selection test-selection.json",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("workflow is missing required wiring %q", required)

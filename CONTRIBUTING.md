@@ -87,7 +87,7 @@ locally, add
 To run a package the way CI does, one worker process per CPU:
 
 ```bash
-TEST_RACE=true python3 scripts/ci-test-partition.py --partition mcp+store
+TEST_RACE=true go run ./scripts/ci-test --partition mcp+store
 ```
 
 ### Linting
