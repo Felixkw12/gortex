@@ -407,14 +407,53 @@ func TestEmitPluginBundle_SubAgentBodiesMatchSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for name, want := range SubAgents {
+	for name, source := range SubAgents {
 		got, err := os.ReadFile(filepath.Join(dir, "agents", name))
 		if err != nil {
 			t.Errorf("read sub-agent %s: %v", name, err)
 			continue
 		}
+		want := pluginSubAgentBody(source)
 		if string(got) != want {
-			t.Errorf("sub-agent %s body drift: bytes do not match SubAgents[%q]", name, name)
+			t.Errorf("sub-agent %s body drift: bytes do not match the plugin-transformed SubAgents[%q]", name, name)
+		}
+	}
+}
+
+func TestEmitPluginBundle_SubAgentToolNamespaces(t *testing.T) {
+	// Pin Claude Code's external names independently of the emitter constants:
+	// a misspelled plugin namespace must fail even if every tool uses it.
+	const wantUserPrefix = "mcp__gortex__"
+	const wantPluginPrefix = "mcp__plugin_gortex_gortex__"
+	dir := t.TempDir()
+	if _, err := EmitPluginBundle(PluginBundleSpec{TargetDir: dir, Version: "0.18.2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, source := range SubAgents {
+		userTools := SubAgentTools(source)
+		if len(userTools) == 0 {
+			t.Fatalf("user sub-agent %s has no tools", name)
+		}
+		for _, tool := range userTools {
+			if !strings.HasPrefix(tool, wantUserPrefix) {
+				t.Errorf("user sub-agent %s tool %q does not use %q", name, tool, wantUserPrefix)
+			}
+		}
+
+		body, err := os.ReadFile(filepath.Join(dir, "agents", name))
+		if err != nil {
+			t.Fatalf("read plugin sub-agent %s: %v", name, err)
+		}
+		pluginTools := SubAgentTools(string(body))
+		if len(pluginTools) != len(userTools) {
+			t.Fatalf("plugin sub-agent %s tool count = %d, want %d", name, len(pluginTools), len(userTools))
+		}
+		for i, tool := range pluginTools {
+			want := wantPluginPrefix + strings.TrimPrefix(userTools[i], wantUserPrefix)
+			if tool != want {
+				t.Errorf("plugin sub-agent %s tool[%d] = %q, want %q", name, i, tool, want)
+			}
 		}
 	}
 }

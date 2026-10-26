@@ -308,6 +308,30 @@ func TestTrackedGoModuleCacheRevision(t *testing.T) {
 	assert.Equal(t, "example.org/old", modules["b"], "published maps are immutable")
 }
 
+// A rename of the same length inside one filesystem timestamp tick keeps
+// go.mod's size and modification time. The snapshot stamped the file while it
+// could still change unseen, so the next check reads it again.
+func TestTrackedGoModuleSnapshotSeesSameStampRewrite(t *testing.T) {
+	root := t.TempDir()
+	goMod := filepath.Join(root, "go.mod")
+	writeFile(t, goMod, "module example.org/library\n")
+	info, err := os.Stat(goMod)
+	require.NoError(t, err)
+	mi := &MultiIndexer{repos: map[string]*RepoMetadata{"b": {RootPath: root}}}
+	modules, generation := mi.goModuleSnapshot()
+	require.Equal(t, "example.org/library", modules["b"])
+	writeFile(t, goMod, "module example.org/renamed\n")
+	require.NoError(t, os.Chtimes(goMod, info.ModTime(), info.ModTime()))
+	mi.goModuleChecked = time.Time{} // as a go.mod save does
+	renamed, renamedGeneration := mi.goModuleSnapshot()
+	assert.Equal(t, "example.org/renamed", renamed["b"], "a same-stamp rewrite is read again")
+	assert.Greater(t, renamedGeneration, generation)
+	mi.goModuleChecked = time.Time{}
+	again, againGeneration := mi.goModuleSnapshot()
+	assert.Equal(t, renamed, again)
+	assert.Equal(t, renamedGeneration, againGeneration, "re-reading unchanged contents keeps the generation")
+}
+
 func TestMultiIndexer_GoModuleRuntimeTestProjection(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	caller, library := t.TempDir(), t.TempDir()

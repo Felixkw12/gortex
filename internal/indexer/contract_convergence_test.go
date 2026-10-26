@@ -4298,7 +4298,7 @@ func TestContractConvergenceWaitWakesOnTheCloseOfAWindowItWaitsOn(t *testing.T) 
 			since := c.wake()
 			woke := make(chan time.Time, 1)
 			go func() {
-				if c.waitWake(since, time.Now().Add(5*time.Second)) {
+				if c.waitWake(since, time.Now().Add(2*testTimingSlack(time.Second))) {
 					woke <- time.Now()
 				}
 				close(woke)
@@ -4362,7 +4362,7 @@ func TestContractConvergenceWaitWakesOnACloseFollowedAtOnceByTheNextBegin(t *tes
 	since := c.wake()
 	done := make(chan bool, 1)
 	start := time.Now()
-	go func() { done <- c.waitWake(since, start.Add(5*time.Second)) }()
+	go func() { done <- c.waitWake(since, start.Add(2*testTimingSlack(time.Second))) }()
 	time.Sleep(50 * time.Millisecond)
 	// The window of seq 1 closes (an event) and the next apply opens seq 2
 	// before any scan runs.
@@ -4434,7 +4434,7 @@ func TestContractConvergenceWaitSeesWhatLandedBeforeItListened(t *testing.T) {
 			}
 			mu.Unlock()
 			start := time.Now()
-			woke := c.waitWake(since, start.Add(2*time.Second))
+			woke := c.waitWake(since, start.Add(2*testTimingSlack(time.Second)))
 			require.True(t, woke, "what landed before the wait listened woke it")
 			require.Less(t, time.Since(start), testTimingSlack(time.Second), "the wait woke at once, not at its deadline")
 		})
@@ -4481,7 +4481,7 @@ func TestContractConvergenceWaitWakesOnTheCloseOfAnyWindowItWaitsOn(t *testing.T
 	since := c.wake()
 	done := make(chan bool, 1)
 	start := time.Now()
-	go func() { done <- c.waitWake(since, start.Add(5*time.Second)) }()
+	go func() { done <- c.waitWake(since, start.Add(2*testTimingSlack(time.Second))) }()
 	time.Sleep(50 * time.Millisecond)
 	// Only the second window closes.
 	mu.Lock()
@@ -5110,7 +5110,7 @@ func TestContractConvergenceWaitWakesWhenAWaitedOnRowDeparts(t *testing.T) {
 			since := c.wake()
 			done := make(chan bool, 1)
 			start := time.Now()
-			go func() { done <- c.waitWake(since, start.Add(5*time.Second)) }()
+			go func() { done <- c.waitWake(since, start.Add(2*testTimingSlack(time.Second))) }()
 			time.Sleep(50 * time.Millisecond)
 			mu.Lock()
 			events++

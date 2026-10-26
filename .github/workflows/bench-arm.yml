@@ -115,7 +115,7 @@ jobs:
             | tee "$RUNNER_TEMP/gortex-performance-artifacts/contract-route-edit.txt"
       - name: Upload route-edit benchmark evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: contract-route-edit-${{ github.sha }}
           path: ${{ runner.temp }}/gortex-performance-artifacts
@@ -166,7 +166,7 @@ jobs:
 
       - name: Upload native acceptance evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: acceptance-native-${{ github.sha }}
           path: ${{ runner.temp }}/gortex-acceptance-artifacts

@@ -136,8 +136,16 @@ func pendingRepoPrefixes(r *Resolver, pending []*graph.Edge) ([]string, map[stri
 			if _, ok := known[prefix]; !ok {
 				// A guess that names no tracked repo. Drop it rather
 				// than scope the pass to a key nothing can match.
-				if _, dup := seenIn(rejected, prefix); !dup {
-					rejected = append(rejected, prefix)
+				//
+				// Only report it when the source could not be hydrated.
+				// A source that hydrates with an empty RepoPrefix is an
+				// external node (dep::…, ext::go:…) that carries no repo
+				// by design; dropping its guess is the expected outcome
+				// and must not warn on every warmup.
+				if sources[edge.From] == nil {
+					if _, dup := seenIn(rejected, prefix); !dup {
+						rejected = append(rejected, prefix)
+					}
 				}
 				continue
 			}

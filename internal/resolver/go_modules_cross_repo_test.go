@@ -141,7 +141,12 @@ func TestGoModuleExternBindingBoundaries(t *testing.T) {
 				cr.SetGoModules(tc.modules)
 				cr.SetCrossWorkspaceDepLookup(func(string) []CrossWorkspaceDepRule { return nil })
 				cr.ResolveAll()
-				edges := g.GetOutEdges("a/main.go::Caller")
+				var edges []*graph.Edge
+				for _, e := range g.GetOutEdges("a/main.go::Caller") {
+					if e.Kind == kind {
+						edges = append(edges, e)
+					}
+				}
 				require.Len(t, edges, 1)
 				assert.Equal(t, tc.want, edges[0].To)
 			})

@@ -114,6 +114,7 @@ type MultiIndexer struct {
 	goModuleCache        map[string]string
 	goModuleReplacements map[string][]resolver.GoModuleReplacement
 	goModuleFiles        map[string]goModuleFileStamp
+	goModuleStampedAt    time.Time
 	goModuleRules        map[string][]resolver.CrossWorkspaceDepRule
 	goModuleRetry        resolver.GoModuleDepRetry
 	npmPackageMu         sync.Mutex
@@ -1992,14 +1993,18 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 	passStart("cross_repo_edges")
 	crStart := time.Now()
 	crossRepoEdges := 0
+	skipped := false
 	if fullCoverage {
-		crossRepoEdges = resolver.DetectCrossRepoEdges(mi.graph)
+		crossRepoEdges, skipped = resolver.DetectCrossRepoEdgesWithSkip(mi.graph)
 	} else {
 		crossRepoEdges = resolver.DetectCrossRepoEdgesForRepos(mi.graph, scanRepoPrefixes)
 	}
-	mi.logger.Info("global pass: cross-repo edges",
-		zap.Int("edges", crossRepoEdges),
-		zap.Duration("elapsed", time.Since(crStart)))
+	fields := []zap.Field{zap.Int("edges", crossRepoEdges)}
+	if skipped {
+		fields = append(fields, zap.String("skipped", "single_repo"))
+	}
+	fields = append(fields, zap.Duration("elapsed", time.Since(crStart)))
+	mi.logger.Info("global pass: cross-repo edges", fields...)
 	mi.logger.Info("global passes complete",
 		zap.Duration("total", time.Since(globalStart)))
 }
@@ -2194,14 +2199,14 @@ func (mi *MultiIndexer) goModuleSnapshot() (map[string]string, uint64) {
 		}
 		files[prefix] = stamp
 	}
-	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && maps.Equal(mi.goModuleFiles, files) {
+	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && maps.Equal(mi.goModuleFiles, files) && !goModuleStampsRacy(mi.goModuleFiles, mi.goModuleStampedAt) {
 		return mi.goModuleCache, mi.goModuleGeneration
 	}
 	modules := readTrackedGoModules(roots)
 	replacements := mi.readGoModuleReplacements(roots)
 	sameReplacements := maps.EqualFunc(replacements, mi.goModuleReplacements, slices.Equal[[]resolver.GoModuleReplacement])
 	mi.goModuleReplacements = replacements
-	mi.goModuleFiles = files
+	mi.goModuleFiles, mi.goModuleStampedAt = files, now
 	sameRules := true
 	if mi.configMgr != nil && (mi.goModuleCache == nil || mi.goModuleRevision != revision || mi.goModuleRepoCount != count) {
 		rules, _ := mi.collectCrossWorkspaceRules()
@@ -2224,6 +2229,20 @@ func (mi *MultiIndexer) goModuleSnapshot() (map[string]string, uint64) {
 type goModuleFileStamp struct {
 	root           string
 	size, modified int64
+}
+
+// goModuleStampsRacy reports whether any go.mod changed within
+// manifestRacyWindow of when its stamp was taken. Such a stamp cannot prove
+// the file unchanged, so the snapshot reads the files again; equal contents
+// keep the cached map and its generation.
+func goModuleStampsRacy(files map[string]goModuleFileStamp, stampedAt time.Time) bool {
+	racy := stampedAt.Add(-manifestRacyWindow).UnixNano()
+	for _, stamp := range files {
+		if stamp.modified >= racy {
+			return true
+		}
+	}
+	return false
 }
 
 func readTrackedGoModules(roots map[string]string) map[string]string {

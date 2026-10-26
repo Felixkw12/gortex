@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -379,6 +380,23 @@ func TestTrackedNpmPackageLazySnapshot(t *testing.T) {
 	mi.repos = map[string]*RepoMetadata{"new": {RootPath: root}}
 	assert.Contains(t, mi.npmPackageLookup()("q"), "new", "track/untrack replaces roots")
 	assert.Contains(t, fresh("q"), "lib", "old pass keeps captured roots")
+}
+
+// A rewrite of the same size inside one filesystem timestamp tick keeps the
+// manifest's size and modification time. The snapshot recorded that stamp
+// while the file could still change unseen, so the next pass reads it again.
+func TestTrackedNpmPackageSnapshotSeesSameStampRewrite(t *testing.T) {
+	root := t.TempDir()
+	manifest := filepath.Join(writePackageJSON(t, root, `{"name":"p","main":"index.ts"}`), "package.json")
+	info, err := os.Stat(manifest)
+	require.NoError(t, err)
+	mi := &MultiIndexer{repos: map[string]*RepoMetadata{"lib": {RootPath: root}}}
+	require.Contains(t, mi.npmPackageLookup()("p"), "lib")
+	writePackageJSON(t, root, `{"name":"q","main":"other.ts"}`)
+	require.NoError(t, os.Chtimes(manifest, info.ModTime(), info.ModTime()))
+	next := mi.npmPackageLookup()
+	assert.Empty(t, next("p"))
+	assert.Contains(t, next("q"), "lib", "a same-stamp rewrite is read again")
 }
 
 func TestTrackedNpmPackagePnpmWorkspace(t *testing.T) {
