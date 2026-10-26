@@ -913,6 +913,54 @@ End Class
 	}
 }
 
+// A multiline lambda passed as an argument closes with `End Function)` or
+// `End Sub, ...)`. Its opener counts as nesting, so its closer must end that
+// nesting too, or the enclosing callable runs past its own End and loses the
+// calls after the lambda.
+func TestVBNetExtractor_ArgumentLambdaClosersEndNesting(t *testing.T) {
+	src := []byte(`Public Class Worker
+    Public Function Find() As Integer
+        Dim x = items.FirstOrDefault(Function(d)
+                                         Return d.Ok()
+                                     End Function)
+        Return client.Save()
+    End Function
+
+    Public Sub Each()
+        items.ForEach(Sub(x)
+                          x.Touch()
+                      End Sub)
+        client.Load()
+    End Sub
+
+    Public Sub Pair()
+        Register(Sub()
+                     client.Open()
+                 End Sub, Nothing)
+        client.Close()
+    End Sub
+End Class
+`)
+	res, err := NewVBNetExtractor().Extract("w.vb", src)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name, callee string
+		start, end   int
+	}{
+		{"Find", "Save", 2, 7},
+		{"Each", "Load", 9, 14},
+		{"Pair", "Close", 16, 21},
+	} {
+		n := vbFind(res.Nodes, tc.name)
+		require.NotNil(t, n, tc.name)
+		assert.Equal(t, tc.start, n.StartLine, tc.name)
+		assert.Equal(t, tc.end, n.EndLine, tc.name)
+		assert.True(t, vbHasEdge(res.Edges, graph.EdgeCalls, n.ID, "unresolved::"+tc.callee),
+			"%s must keep its call to %s", tc.name, tc.callee)
+	}
+}
+
 // Interface method sets feed the resolver's IMPLEMENTS inference, which reads
 // Meta["methods"] rather than member edges. csharp.go stamps this and VB
 // mirrors it, so a VB interface supports the same inference as a C# one.

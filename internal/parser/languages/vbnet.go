@@ -148,7 +148,7 @@ func (e *VBNetExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	for _, m := range vbNamespaceRe.FindAllSubmatchIndex(src, -1) {
 		name := string(src[m[2]:m[3]])
 		line := lineAt(src, m[0])
-		end := vbContainerEnd(lines, line, vbNamespaceRe.MatchString, "end namespace")
+		end := vbContainerEnd(lines, line, vbNamespaceRe.MatchString, hasPrefixWord, "end namespace")
 		id := add(filePath+"::"+name, name, graph.KindPackage, line, end, nil)
 		if id != "" {
 			namespaces = append(namespaces, vbRange{name: name, id: id, start: line, end: end})
@@ -185,7 +185,7 @@ func (e *VBNetExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 		for _, m := range spec.re.FindAllSubmatchIndex(src, -1) {
 			name := string(src[m[2]:m[3]])
 			line := lineAt(src, m[0])
-			end := vbContainerEnd(lines, line, spec.re.MatchString, spec.endKw)
+			end := vbContainerEnd(lines, line, spec.re.MatchString, hasPrefixWord, spec.endKw)
 			meta := map[string]any{"type_flavor": spec.flavor}
 			if ns := enclosingNS(line); ns != "" {
 				meta["scope_ns"] = ns
@@ -311,8 +311,9 @@ func (e *VBNetExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 			var end int
 			if spec.nests != nil {
 				// Sub/Function count same-kind multiline lambdas as nesting;
-				// masked lines keep `' Example: Sub()` from opening one.
-				end = vbContainerEnd(codeLines, line, spec.nests, spec.endKw)
+				// masked lines keep `' Example: Sub()` from opening one, and
+				// vbEndsBlock closes a lambda passed as an argument.
+				end = vbContainerEnd(codeLines, line, spec.nests, vbEndsBlock, spec.endKw)
 			} else {
 				end = findKeywordBlockEnd(lines, line, spec.endKw)
 			}
@@ -553,7 +554,7 @@ func vbIsRem(src []byte, i int) bool {
 //
 // Returns startLine when no terminator is found, matching
 // findKeywordBlockEnd's degradation for an unterminated block.
-func vbContainerEnd(lines []string, startLine int, opens func(string) bool, endKw string) int {
+func vbContainerEnd(lines []string, startLine int, opens func(string) bool, ends func(line, endKw string) bool, endKw string) int {
 	if startLine < 1 || startLine > len(lines) {
 		return startLine
 	}
@@ -566,7 +567,7 @@ func vbContainerEnd(lines []string, startLine int, opens func(string) bool, endK
 		// Terminator first: "End Class" never satisfies the opening pattern
 		// (End is not a modifier), but checking it first keeps that
 		// independent of the pattern's exact shape.
-		if hasPrefixWord(toLower(trimmedLine), endKw) {
+		if ends(toLower(trimmedLine), endKw) {
 			depth--
 			if depth == 0 {
 				return i + 1
@@ -578,6 +579,23 @@ func vbContainerEnd(lines []string, startLine int, opens func(string) bool, endK
 		}
 	}
 	return startLine
+}
+
+// vbEndsBlock reports whether a lowercased, trimmed, comment-masked line
+// starts with endKw as a whole word. Unlike hasPrefixWord it accepts any
+// character that cannot continue an identifier, so a multiline lambda passed
+// as an argument (`End Function)`, `End Sub, Nothing)`) closes the nesting
+// its opener counted. Namespaces and types keep hasPrefixWord: they scan
+// unmasked lines, where `End Namespace"` can sit inside a string literal.
+func vbEndsBlock(line, endKw string) bool {
+	if !strings.HasPrefix(line, endKw) {
+		return false
+	}
+	if len(line) == len(endKw) {
+		return true
+	}
+	c := line[len(endKw)]
+	return c != '_' && (c < 'a' || c > 'z') && (c < '0' || c > '9')
 }
 
 // vbLambdaOpener returns a predicate reporting whether a comment-masked line
