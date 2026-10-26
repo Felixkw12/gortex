@@ -498,8 +498,8 @@ func (c *DerivedCorrection) deleteSourceEdgesTx(ctx context.Context, tx *sql.Tx,
 			args = append(args, id)
 		}
 		args = append(args, c.kindList...)
-		res, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE view_gen = ? AND from_id IN (`+
-			strings.TrimSuffix(strings.Repeat("?,", end-start), ",")+`) AND kind IN (`+kindMarks+`)`, args...)
+		res, err := countEdgeWrite(tx.ExecContext(ctx, `DELETE FROM edges WHERE view_gen = ? AND from_id IN (`+
+			strings.TrimSuffix(strings.Repeat("?,", end-start), ",")+`) AND kind IN (`+kindMarks+`)`, args...))
 		if err != nil {
 			return deleted, err
 		}

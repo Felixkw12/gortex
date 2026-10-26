@@ -38,3 +38,25 @@ func BenchmarkVFSIOCell(b *testing.B) {
 		c.readBytes.Add(4096)
 	}
 }
+
+func TestVFSIOSplitWriterMainWrites(t *testing.T) {
+	s, _ := openWALReclaimStore(t)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	if !vfsIOInstalled.Load() {
+		t.Skip("vfs io counters not installed")
+	}
+	seedWALChurnTable(t, s)
+	growWAL(t, s, 4)
+	before := WriteMark()
+	s.writeMu.Lock()
+	var busy, frames, copied int
+	err := s.writerDB.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &frames, &copied)
+	s.writeMu.Unlock()
+	require.NoError(t, err)
+	require.Zero(t, busy)
+	d := WriteMark().Since(before)
+	require.Positive(t, d.WriterMainWrites)
+	require.Positive(t, d.WriterMainWriteBytes)
+	require.Positive(t, d.WriterMainWriteTime)
+	require.Zero(t, d.OtherMainWrites)
+}

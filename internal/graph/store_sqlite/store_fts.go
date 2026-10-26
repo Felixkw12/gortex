@@ -122,7 +122,7 @@ func (s *Store) ResetSymbolFTS(repoPrefix string) error {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck // rollback after Commit is a no-op
-	if _, err := tx.Exec(deleteSymbolFTSForRepoSQL, s.viewGen, repoPrefix); err != nil {
+	if _, err := countSymbolFTSWrite(tx.Exec(deleteSymbolFTSForRepoSQL, s.viewGen, repoPrefix)); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM symbol_fts_rowid WHERE view_gen = ? AND repo_prefix = ?`, s.viewGen, repoPrefix); err != nil {
@@ -192,9 +192,9 @@ func (s *Store) deleteSymbolFTSTx(tx *sql.Tx, ids []string) error {
 		for _, nodeID := range chunk {
 			args = append(args, nodeID)
 		}
-		if _, err := tx.Exec(`DELETE FROM symbol_fts WHERE rowid IN (
+		if _, err := countSymbolFTSWrite(tx.Exec(`DELETE FROM symbol_fts WHERE rowid IN (
 SELECT fts_rowid FROM symbol_fts_rowid WHERE view_gen = ? AND node_id IN (`+placeholders+`)
-)`, args...); err != nil {
+)`, args...)); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM symbol_fts_rowid WHERE view_gen = ? AND node_id IN (`+placeholders+`)`, args...); err != nil {
@@ -330,7 +330,7 @@ ORDER BY wanted.ord`)
 			wipe.WriteByte('?')
 		}
 		wipe.WriteByte(')')
-		if _, err := tx.Exec(wipe.String(), oldRowids...); err != nil {
+		if _, err := countSymbolFTSWrite(tx.Exec(wipe.String(), oldRowids...)); err != nil {
 			return err
 		}
 		stats.deleteStatements++
@@ -348,7 +348,7 @@ ORDER BY wanted.ord`)
 			insert.WriteString(`(?, ?, ?, ?)`)
 			insertArgs = append(insertArgs, states[i].rowid, item.NodeID, states[i].repoPrefix, item.Tokens)
 		}
-		if _, err := tx.Exec(insert.String(), insertArgs...); err != nil {
+		if _, err := countSymbolFTSWrite(tx.Exec(insert.String(), insertArgs...)); err != nil {
 			return err
 		}
 		stats.insertStatements++
@@ -460,7 +460,7 @@ func (s *Store) ReplaceSymbolFTS(repoPrefix string, produce func(emit func([]gra
 
 	// Drive the wipe through the indexed rowid sidecar, and drop the sidecar
 	// rows in lockstep so the two can never diverge.
-	if _, err := tx.Exec(deleteSymbolFTSForRepoSQL, s.viewGen, repoPrefix); err != nil {
+	if _, err := countSymbolFTSWrite(tx.Exec(deleteSymbolFTSForRepoSQL, s.viewGen, repoPrefix)); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM symbol_fts_rowid WHERE view_gen = ? AND repo_prefix = ?`, s.viewGen, repoPrefix); err != nil {
@@ -549,7 +549,7 @@ func (s *Store) BulkUpsertSymbolFTS(repoPrefix string, items []graph.SymbolFTSIt
 	// Drive the wipe through the indexed rowid sidecar. Filtering the FTS5
 	// table's UNINDEXED repo_prefix column here used to rescan the growing
 	// corpus once per repository during a cold multi-repo build.
-	if _, err := tx.Exec(deleteSymbolFTSForRepoSQL, s.viewGen, repoPrefix); err != nil {
+	if _, err := countSymbolFTSWrite(tx.Exec(deleteSymbolFTSForRepoSQL, s.viewGen, repoPrefix)); err != nil {
 		return err
 	}
 	// Drop this repo's rowid-map entries in lockstep with the symbol_fts
@@ -577,7 +577,7 @@ func (s *Store) BulkUpsertSymbolFTS(repoPrefix string, items []graph.SymbolFTSIt
 			b.WriteString(`(?,?,?,?)`)
 			args = append(args, nextRowid+int64(start+i), it.NodeID, repoPrefix, it.Tokens)
 		}
-		if _, err := tx.Exec(b.String(), args...); err != nil {
+		if _, err := countSymbolFTSWrite(tx.Exec(b.String(), args...)); err != nil {
 			return err
 		}
 

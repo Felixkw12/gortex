@@ -129,7 +129,7 @@ func (s *Store) PurgeRepo(prefix string) error {
 		}
 	}
 
-	res, err := tx.Exec(`DELETE FROM nodes WHERE repo_prefix = ?`, prefix)
+	res, err := countNodeWrite(tx.Exec(`DELETE FROM nodes WHERE repo_prefix = ?`, prefix))
 	if err != nil {
 		return fmt.Errorf("store_sqlite: PurgeRepo nodes: %w", err)
 	}

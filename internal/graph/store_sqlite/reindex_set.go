@@ -454,7 +454,7 @@ func updateSQLiteResolvedConversionsTxLimited(
 		if encodeErr != nil {
 			return updatedRows, statements, repairDeletes, repairInserts, encodeErr
 		}
-		result, execErr := tx.Exec(query, payload, viewGen)
+		result, execErr := countEdgeWrite(tx.Exec(query, payload, viewGen))
 		if execErr != nil {
 			return updatedRows, statements, repairDeletes, repairInserts, execErr
 		}
@@ -824,7 +824,7 @@ func deleteSQLiteReindexRowsTxLimited(tx *sql.Tx, viewGen int64, keys []sqliteRe
 		args = append(args, viewGen)
 
 		query := edgeExactDeleteByIdentitySQL(multiValues(rowCount, reindexKeyParamsPerRow))
-		result, err := tx.Exec(query, args...)
+		result, err := countEdgeWrite(tx.Exec(query, args...))
 		if tooManySQLVariables(err) && rowCount > 1 {
 			rowLimit = lowerBatchVariableLimit(variableLimit, reindexKeyParamsPerRow, rowCount)
 			pos = chunkStart
@@ -880,7 +880,7 @@ func insertSQLiteReindexRowsTxLimited(tx *sql.Tx, viewGen int64, rows []sqliteRe
 		}
 
 		query := `INSERT OR IGNORE INTO edges (` + edgeInsertColumns + `) VALUES ` + multiValues(rowCount, reindexRowParamsPerRow)
-		result, err := tx.Exec(query, args...)
+		result, err := countEdgeWrite(tx.Exec(query, args...))
 		if tooManySQLVariables(err) && rowCount > 1 {
 			rowLimit = lowerBatchVariableLimit(variableLimit, reindexRowParamsPerRow, rowCount)
 			pos = chunkStart

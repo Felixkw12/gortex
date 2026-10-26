@@ -67,7 +67,7 @@ func (s *Store) BackfillWorkspaceSlugsWithImpact(slugs []graph.WorkspaceSlug) gr
 		}
 		backfill.ResolutionAffected += resolutionAffected
 		query, args := workspaceSlugUpdate(s.viewGen, chunk)
-		result, execErr := tx.Exec(query, args...)
+		result, execErr := countNodeWrite(tx.Exec(query, args...))
 		if execErr != nil {
 			_ = tx.Rollback()
 			panicOnFatal(execErr)

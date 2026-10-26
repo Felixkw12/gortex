@@ -222,7 +222,7 @@ func (s *Store) evictByPredicateResult(predicate string, arg any, scope evictSco
 
 	scopedNodes := `SELECT id FROM nodes WHERE ` + nodeScoped
 	for _, column := range []string{"from_id", "to_id"} {
-		result, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE `+column+` IN (`+scopedNodes+`)`+edgeScope, edgeArgs...)
+		result, err := countEdgeWrite(tx.ExecContext(ctx, `DELETE FROM edges WHERE `+column+` IN (`+scopedNodes+`)`+edgeScope, edgeArgs...))
 		if err != nil {
 			return 0, 0, err
 		}
@@ -232,7 +232,7 @@ func (s *Store) evictByPredicateResult(predicate string, arg any, scope evictSco
 		}
 		edgesRemoved += int(removed)
 	}
-	result, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE `+nodeScoped, nodeArgs...)
+	result, err := countNodeWrite(tx.ExecContext(ctx, `DELETE FROM nodes WHERE `+nodeScoped, nodeArgs...))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -596,12 +596,12 @@ func (s *Store) applyContractFileEvictionTx(tx *sql.Tx, plan contractFileEvictio
 	// A retained canonical used to be deleted wholesale. Retire its removed
 	// file's incident owner rows even when their symbolic source survives.
 	// Do not discover unrelated FilePath-only edges outside affectedJSON.
-	result, err := tx.Exec(`DELETE FROM edges
+	result, err := countEdgeWrite(tx.Exec(`DELETE FROM edges
 WHERE to_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
   AND file_path IN (SELECT CAST(value AS TEXT) FROM json_each(?))
   AND view_gen = ? AND kind IN (?, ?, ?)`,
 		plan.affectedJSON, plan.filesJSON, s.viewGen,
-		string(graph.EdgeProvides), string(graph.EdgeConsumes), string(graph.EdgeHandlesRoute))
+		string(graph.EdgeProvides), string(graph.EdgeConsumes), string(graph.EdgeHandlesRoute)))
 	if err != nil {
 		return 0, 0, err
 	}

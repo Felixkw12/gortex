@@ -146,10 +146,12 @@ type VFSIOMark struct {
 	// writer connection.
 	ReadCalls, ReadNanos, ReadBytes    [3][2]int64
 	WriteCalls, WriteNanos, WriteBytes [3][2]int64
+	Rows                               RowWriteCounts
+	Transactions                       int64
 }
 
 func vfsIOMark() VFSIOMark {
-	var m VFSIOMark
+	m := VFSIOMark{Rows: rowWriteMark(), Transactions: WriteTransactionsBegun()}
 	for f := 0; f < 3; f++ {
 		for w := 0; w < 2; w++ {
 			c := &vfsIO[f][w]
@@ -166,29 +168,42 @@ type VFSIOSplit struct {
 	WriterMainReads, WriterWALReads, OtherMainReads, OtherWALReads int64
 	WriterMainReadTime, WriterWALReadTime                          time.Duration
 	OtherMainReadTime, OtherWALReadTime                            time.Duration
-	WriterWALWrites, OtherMainWrites                               int64
-	WriterWALWriteTime, OtherMainWriteTime                         time.Duration
-	WriterWALWriteBytes, OtherMainWriteBytes                       int64
+	WriterMainWrites, WriterWALWrites, OtherMainWrites             int64
+	WriterMainWriteTime, WriterWALWriteTime, OtherMainWriteTime    time.Duration
+	WriterMainWriteBytes, WriterWALWriteBytes, OtherMainWriteBytes int64
+	Rows                                                           RowWriteCounts
+	Transactions                                                   int64
 }
+
+// WriteMark samples process-wide VFS writes, logical statement rows and begun
+// write transactions without taking a store lock. Concurrent stores and writers
+// contribute to the interval. Rows count successful statements even if their
+// transaction later rolls back; transactions count begins, not commits.
+func WriteMark() VFSIOMark { return vfsIOMark() }
 
 // Since is the lap between prev and m.
 func (m VFSIOMark) Since(prev VFSIOMark) VFSIOSplit {
 	d := func(a, b [3][2]int64, f, w int) int64 { return a[f][w] - b[f][w] }
 	return VFSIOSplit{
-		WriterMainReads:     d(m.ReadCalls, prev.ReadCalls, vfsFileMain, 1),
-		WriterWALReads:      d(m.ReadCalls, prev.ReadCalls, vfsFileWAL, 1),
-		OtherMainReads:      d(m.ReadCalls, prev.ReadCalls, vfsFileMain, 0),
-		OtherWALReads:       d(m.ReadCalls, prev.ReadCalls, vfsFileWAL, 0),
-		WriterMainReadTime:  time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileMain, 1)),
-		WriterWALReadTime:   time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileWAL, 1)),
-		OtherMainReadTime:   time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileMain, 0)),
-		OtherWALReadTime:    time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileWAL, 0)),
-		WriterWALWrites:     d(m.WriteCalls, prev.WriteCalls, vfsFileWAL, 1),
-		OtherMainWrites:     d(m.WriteCalls, prev.WriteCalls, vfsFileMain, 0),
-		WriterWALWriteTime:  time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileWAL, 1)),
-		OtherMainWriteTime:  time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileMain, 0)),
-		WriterWALWriteBytes: d(m.WriteBytes, prev.WriteBytes, vfsFileWAL, 1),
-		OtherMainWriteBytes: d(m.WriteBytes, prev.WriteBytes, vfsFileMain, 0),
+		Rows:                 m.Rows.Since(prev.Rows),
+		Transactions:         m.Transactions - prev.Transactions,
+		WriterMainWrites:     d(m.WriteCalls, prev.WriteCalls, vfsFileMain, 1),
+		WriterMainWriteTime:  time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileMain, 1)),
+		WriterMainWriteBytes: d(m.WriteBytes, prev.WriteBytes, vfsFileMain, 1),
+		WriterMainReads:      d(m.ReadCalls, prev.ReadCalls, vfsFileMain, 1),
+		WriterWALReads:       d(m.ReadCalls, prev.ReadCalls, vfsFileWAL, 1),
+		OtherMainReads:       d(m.ReadCalls, prev.ReadCalls, vfsFileMain, 0),
+		OtherWALReads:        d(m.ReadCalls, prev.ReadCalls, vfsFileWAL, 0),
+		WriterMainReadTime:   time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileMain, 1)),
+		WriterWALReadTime:    time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileWAL, 1)),
+		OtherMainReadTime:    time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileMain, 0)),
+		OtherWALReadTime:     time.Duration(d(m.ReadNanos, prev.ReadNanos, vfsFileWAL, 0)),
+		WriterWALWrites:      d(m.WriteCalls, prev.WriteCalls, vfsFileWAL, 1),
+		OtherMainWrites:      d(m.WriteCalls, prev.WriteCalls, vfsFileMain, 0),
+		WriterWALWriteTime:   time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileWAL, 1)),
+		OtherMainWriteTime:   time.Duration(d(m.WriteNanos, prev.WriteNanos, vfsFileMain, 0)),
+		WriterWALWriteBytes:  d(m.WriteBytes, prev.WriteBytes, vfsFileWAL, 1),
+		OtherMainWriteBytes:  d(m.WriteBytes, prev.WriteBytes, vfsFileMain, 0),
 	}
 }
 
