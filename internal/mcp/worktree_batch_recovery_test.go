@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/agents"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/platform"
 )
 
 func preparedWorktreeBatch(t *testing.T) (*realCheckoutMutationFixture, batchTransactionReceipt, context.Context) {
@@ -140,14 +141,28 @@ func TestWorktreeBatchJournalRejectsIncarnationAndReplacedRoot(t *testing.T) {
 				require.NoError(t, f.srv.persistBatchManifest(receipt))
 			} else {
 				saved := f.worktree + "-saved"
-				require.NoError(t, os.Rename(f.worktree, saved))
+				// The checkout coordinator outlives the simulated exit: the
+				// prepared lease's Close schedules a settle cycle one quiet
+				// window later, and its poll and racy-index heal can run at any
+				// time. They run `git -C <worktree>` and briefly open the
+				// directory, and Windows refuses to rename a directory that a
+				// running process has as its current directory or holds open,
+				// so retry that refusal until they are done.
+				require.NoError(t, platform.ReplaceFile(f.worktree, saved))
 				require.NoError(t, os.Mkdir(f.worktree, 0o755))
 				for _, name := range []string{".git", "edit.go", "caller.go"} {
 					bytes, err := os.ReadFile(filepath.Join(saved, name))
 					require.NoError(t, err)
 					require.NoError(t, os.WriteFile(filepath.Join(f.worktree, name), bytes, 0o600))
 				}
-				t.Cleanup(func() { require.NoError(t, os.RemoveAll(f.worktree)); require.NoError(t, os.Rename(saved, f.worktree)) })
+				t.Cleanup(func() {
+					// This runs before the fixture's own cleanup closes the
+					// lifecycle. Close it first: that joins the coordinator, so
+					// no git of its still runs in either directory.
+					require.NoError(t, f.srv.lifecycle.Close())
+					require.NoError(t, os.RemoveAll(f.worktree))
+					require.NoError(t, os.Rename(saved, f.worktree))
+				})
 			}
 			before, err := os.ReadFile(filepath.Join(f.worktree, "edit.go"))
 			require.NoError(t, err)

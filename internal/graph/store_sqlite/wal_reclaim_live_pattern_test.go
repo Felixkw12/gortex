@@ -398,6 +398,33 @@ func TestWALReclaimKeepsWriterFreeDuringParkedReaderWait(t *testing.T) {
 	}
 }
 
+// A non-urgent attempt whose pinned reader outlasts both reader waits gives
+// up without a reset and reports why.
+func TestWALReclaimReportsAReaderThatOutlastsTheWait(t *testing.T) {
+	t.Setenv("GORTEX_SQLITE_WAL_RECLAIM_MB", "0")
+	s, path := openWALReclaimStore(t)
+	defer func() { _ = s.Close() }()
+	seedWALChurnTable(t, s)
+	growWAL(t, s, 4)
+	pinned, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	defer func() { _ = pinned.Rollback() }()
+	var n int
+	require.NoError(t, pinned.QueryRow(`SELECT count(*) FROM wal_churn`).Scan(&n))
+	growWAL(t, s, 4)
+
+	ckpt, err := openWALReclaimCheckpointDB(s.dbPath)
+	require.NoError(t, err)
+	defer ckpt.Close()
+	cfg := walReclaimConfig{thresholdBytes: 1 << 30, drainDeadline: 250 * time.Millisecond, truncateBudget: walReclaimTruncateBudget, readerWait: 100 * time.Millisecond}
+	shortenWALReclaimLaneReaderWait(t, 100*time.Millisecond)
+
+	res := s.reclaimWALOnce(cfg, ckpt, path+"-wal")
+	require.False(t, res.urgent)
+	require.NotEqual(t, walReclaimReset, res.outcome, "the pinned reader keeps the log from a reset")
+	require.Contains(t, res.openGateReport, "older_readers_outlasted_wait")
+}
+
 // An announced mutation (AnnounceWrite, set before it waits on any lock of
 // its own) makes the reclaim leave the writer alone: an attempt that finds one
 // never takes the writer, and a hold in progress ends within the yield poll.

@@ -169,7 +169,8 @@ type Store interface {
 	// the first mover wins a fresh key. Repeated stationary updates apply in order.
 	// Simple intermediate chains are supported. Cross-store convergence is not
 	// guaranteed for distinct copied rows that converge at a fresh key and then
-	// move it again, or reuse a stored identity already moved by an earlier row.
+	// move it again, or reuse an identity an earlier row already moved, whether
+	// that identity was stored or created earlier in the batch.
 	// Losing candidates create no resolver receipt work. Disk backends may commit
 	// bounded chunks independently; the two-phase guarantee is per chunk, not
 	// across chunk boundaries. A loop of per-edge calls is not equivalent.
@@ -2034,6 +2035,12 @@ type EdgeAdjacencyForKinds interface {
 // save).
 type ExternalCallCandidates interface {
 	ExternalCallCandidateEdges() []*Edge
+}
+
+// ExternalCallCandidateIterator is the bounded, early-stoppable form of
+// ExternalCallCandidates. Callbacks may mutate the store between pages.
+type ExternalCallCandidateIterator interface {
+	ExternalCallCandidateEdgesSeq() iter.Seq[*Edge]
 }
 
 // CommunityCrossingsByKind is an optional capability backends MAY

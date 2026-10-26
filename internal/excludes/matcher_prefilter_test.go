@@ -95,10 +95,18 @@ func TestMatcherNoNegationPrefilterDifferential(t *testing.T) {
 	rng := rand.New(rand.NewSource(951))
 	pool := []string{"/**", "foo/**/", `\#*\#`, `.\#*`, "gen/", "*.tmp", "src/*", "a/**/b", "/root.go", "[ab]", "?x"}
 	paths := []string{"main.go", "src/pkg/server/main.go", "foo/bar.go", "gen/keep.go", "root.go", "#lock#", ".#lock", "a/b", "a/deep/b", "cache.tmp", "ax", "b"}
-	for range 400 {
+	lists := 400
+	if raceDetectorOn {
+		// The first 10 lists still draw every pattern.
+		lists = 10
+	}
+	drawn := make(map[string]bool, len(pool))
+	for range lists {
 		patterns := append(append([]string{}, Builtin...), `\#*\#`)
 		for range 1 + rng.Intn(len(pool)) {
-			patterns = append(patterns, pool[rng.Intn(len(pool))])
+			p := pool[rng.Intn(len(pool))]
+			drawn[p] = true
+			patterns = append(patterns, p)
 		}
 		m := New(patterns)
 		prefiltered := New(patterns)
@@ -114,6 +122,11 @@ func TestMatcherNoNegationPrefilterDifferential(t *testing.T) {
 					t.Fatalf("patterns=%q path=%q: either %v, prefiltered pair %v", patterns, rel, got, want)
 				}
 			}
+		}
+	}
+	for _, p := range pool {
+		if !drawn[p] {
+			t.Errorf("%d lists never drew pattern %q", lists, p)
 		}
 	}
 }
@@ -193,22 +206,47 @@ func TestMatchRelEitherNonmatchingNegationSkipsParents(t *testing.T) {
 	}
 }
 
+// When no negation can match a positively matched file, its parents can
+// only change which line explains it. MatchRel skips them; a nil directory
+// matcher makes any parent query fail.
+func TestMatchRelNonmatchingNegationSkipsParents(t *testing.T) {
+	for _, rel := range []string{"node_modules/pkg/index.js", "node_modules/pkg/a/b/c/d/e/f/index.js"} {
+		m := New(append(append([]string{}, Builtin...), "!.gitkeep"))
+		m.dirs = nil
+		if !m.MatchRel(rel) {
+			t.Fatalf("excluded path admitted: %s", rel)
+		}
+	}
+}
+
 func TestMatcherNegationPrefilterDifferential(t *testing.T) {
 	rng := rand.New(rand.NewSource(95103))
 	pool := []string{"gen/", "node_modules/", "*.tmp", "/**", "gen/**/", "gen/**", "a/b/*", "[ab]", "?x", `\#*\#`, "!.gitkeep", "!*.proto", "!gen/", "!gen/keep/", "!**/keep.go", "!a/**/b", "!gen?/", "!/[ab]/", `!a\*b/`, "!*", "!/**", "!café/", "!foo//", "!!bang", "!!bang/", "bang", "!#x", "src/"}
 	includePool := []string{"*.proto", "gen/", "vendor/acme/lib/", "/gen/keep/", "**/keep.go", "a?/", "[ab]/"}
 	paths := []string{"main.go", "index.js", ".gitkeep", "schema.proto", "keep.go", "keep/file.go", "gen", "gen/lib/file.go", "gen/keep/a.tmp", "node_modules/pkg/index.js", "node_modules/pkg/.gitkeep", "node_modules/pkg/schema.proto", "node_modules/pkg/a/b/c/d/index.js", "a/b", "a/deep/b", "a/b/file.go", "foo", "foo//child", "cache.tmp", "a", "b", "ax", "#lock#", "cafe\u0301/x", "café/keep.go", "vendor/x.proto", "vendor/acme/lib/x.go", "!bang/x", "bang", "src/bang", "src/x/y.go"}
+	lists := 2000
+	if raceDetectorOn {
+		// The first 50 lists still draw every pattern, with and without
+		// Builtin, and every include.
+		lists = 50
+	}
+	drawnPatterns := make(map[string]bool, len(pool))
+	drawnIncludes := make(map[string]bool, len(includePool))
 	queries := 0
-	for range 2000 {
+	for range lists {
 		var patterns, includes []string
 		if rng.Intn(2) == 0 {
 			patterns = append(patterns, Builtin...)
 		}
 		for range 1 + rng.Intn(12) {
-			patterns = append(patterns, pool[rng.Intn(len(pool))])
+			p := pool[rng.Intn(len(pool))]
+			drawnPatterns[p] = true
+			patterns = append(patterns, p)
 		}
 		for range rng.Intn(4) {
-			includes = append(includes, includePool[rng.Intn(len(includePool))])
+			include := includePool[rng.Intn(len(includePool))]
+			drawnIncludes[include] = true
+			includes = append(includes, include)
 		}
 		m := NewWithIncludes(patterns, includes)
 		ungated := NewWithIncludes(patterns, includes)
@@ -229,7 +267,17 @@ func TestMatcherNegationPrefilterDifferential(t *testing.T) {
 			}
 		}
 	}
-	if queries != 186000 {
-		t.Fatalf("checked %d paths, want 186000", queries)
+	if want := lists * len(paths) * 3; queries != want {
+		t.Fatalf("checked %d paths, want %d", queries, want)
+	}
+	for _, p := range pool {
+		if !drawnPatterns[p] {
+			t.Errorf("%d lists never drew pattern %q", lists, p)
+		}
+	}
+	for _, p := range includePool {
+		if !drawnIncludes[p] {
+			t.Errorf("%d lists never drew include %q", lists, p)
+		}
 	}
 }
