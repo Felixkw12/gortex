@@ -26,11 +26,9 @@ import tempfile
 import threading
 import time
 
-GROUPS = {
-    "indexer": "/internal/indexer",
-    "mcp": "/internal/mcp",
-    "store": "/internal/graph/store_sqlite",
-}
+from ci_test_selection import policy, validate_selection
+
+GROUPS = policy()["groups"]
 REST = "rest"
 # Instrumenting the SQLite C that modernc transpiled to Go, and its libc,
 # makes store tests about 8x slower under -race. The driver's Go layer stays
@@ -98,6 +96,10 @@ def check_layout(rows):
 
 def workflow_rows(text):
     """(os, partition) jobs of ci.yml's test matrix: os x partition lists, plus includes."""
+    if "matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}" in text:
+        config = policy()
+        return [(target["runner"], partition) for target in config["targets"]
+                for partition in config["partitions"]]
     if re.search(r"(?m)^\s+exclude:", text):
         raise ValueError("the test matrix must not use exclude:, which this check does not model")
 
@@ -452,6 +454,8 @@ def main():
         stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--partition", default=os.environ.get("TEST_PARTITION"), required=False)
+    parser.add_argument("--selection", type=Path, help="validated affected/full package manifest")
+    parser.add_argument("--target", default=os.environ.get("TEST_TARGET"))
     parser.add_argument("--check-workflow", type=Path, help="validate this workflow's test layout and exit")
     args = parser.parse_args()
     if args.check_workflow:
@@ -474,6 +478,16 @@ def main():
     large = {group: module + suffix for group, suffix in GROUPS.items()}
     if not set(large.values()) <= set(packages):
         raise ValueError(f"missing large packages: {sorted(set(large.values()) - set(packages))}")
+    selected = None
+    if args.selection:
+        data = json.loads(args.selection.read_text())
+        selected = validate_selection(data, Path.cwd(), args.target, packages)
+        if {"os": args.target, "partition": args.partition} not in data["matrix"]["include"]:
+            raise ValueError("this job is absent from the validated selection matrix")
+        if selected is not None:
+            print(f"affected selection: {len(selected)} complete packages on {args.target}", flush=True)
+    elif args.target:
+        raise ValueError("a selection target requires --selection")
     # Short paths: tests bind Unix sockets under the worker's temp directory,
     # and macOS caps a socket path at 104 bytes.
     base = os.environ.get("RUNNER_TEMP") or ("/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir())
@@ -494,11 +508,15 @@ def main():
     try:
         for group, shard, count in items:
             if group == REST:
-                job.run_rest([package for package in packages if package not in large.values()])
-                if sys.platform == "darwin" and not race:
+                rest = [package for package in packages if package not in large.values()
+                        and (selected is None or package in selected)]
+                if rest:
+                    job.run_rest(rest)
+                if (sys.platform == "darwin" and not race and
+                        (selected is None or large["indexer"] in selected)):
                     job.run_package("indexer", large["indexer"], 0, 1, directory("indexer"),
                                     race=True, select=DARWIN_RACE_TESTS)
-            else:
+            elif selected is None or large[group] in selected:
                 job.run_package(group, large[group], shard, count, directory(group))
     finally:
         job.report()

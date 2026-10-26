@@ -3,11 +3,14 @@ import json
 from pathlib import Path
 import re
 import shutil
+import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
 
+
+sys.path.insert(0, str(Path(__file__).parent))
 
 spec = importlib.util.spec_from_file_location(
     "ci_test_partition", Path(__file__).with_name("ci-test-partition.py"))
