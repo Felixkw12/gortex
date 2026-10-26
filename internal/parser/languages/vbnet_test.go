@@ -869,6 +869,50 @@ End Class
 		"call after a Function lambda must stay attributed to Compute")
 }
 
+// Lambda parameter lists may nest parentheses (array and generic types), and
+// lambda-shaped text in a comment must not open a nested block.
+func TestVBNetExtractor_MultilineLambdaNestedParensAndComments(t *testing.T) {
+	src := []byte(`Public Class Worker
+    Public Sub Run()
+        Dim action = Sub(xs() As Integer)
+                         Work()
+                     End Sub
+        client.Save()
+    End Sub
+
+    Public Function Compute() As Integer
+        Dim f = Function(xs As List(Of Integer)) As List(Of Integer)
+                    Return xs
+                End Function
+        Return calc.Apply(f)
+    End Function
+
+    Public Sub Commented()
+        ' Example: Sub()
+        client.Save()
+    End Sub
+End Class
+`)
+	res, err := NewVBNetExtractor().Extract("w.vb", src)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name, callee string
+		start, end   int
+	}{
+		{"Run", "Save", 2, 7},
+		{"Compute", "Apply", 9, 14},
+		{"Commented", "Save", 16, 19},
+	} {
+		n := vbFind(res.Nodes, tc.name)
+		require.NotNil(t, n, tc.name)
+		assert.Equal(t, tc.start, n.StartLine, tc.name)
+		assert.Equal(t, tc.end, n.EndLine, tc.name)
+		assert.True(t, vbHasEdge(res.Edges, graph.EdgeCalls, n.ID, "unresolved::"+tc.callee),
+			"%s must keep its call to %s", tc.name, tc.callee)
+	}
+}
+
 // Interface method sets feed the resolver's IMPLEMENTS inference, which reads
 // Meta["methods"] rather than member edges. csharp.go stamps this and VB
 // mirrors it, so a VB interface supports the same inference as a C# one.
