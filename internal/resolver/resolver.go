@@ -1188,6 +1188,9 @@ func (r *Resolver) ResolveAllContext(ctx context.Context) (*ResolveStats, error)
 								origin:     clone.Origin,
 								meta:       clone.Meta,
 							}
+							if clone.CrossRepo && clone.Meta["go_import"] != nil {
+								job.moduleLabel, job.hasModuleLabel = clone.ConfidenceLabel, true
+							}
 							if r.validateLiveness {
 								// resolveEdge mutates only clone, so e still holds the
 								// exact persisted payload observed before resolution.
@@ -1250,6 +1253,9 @@ func (r *Resolver) ResolveAllContext(ctx context.Context) (*ResolveStats, error)
 					j.edge.Confidence = j.confidence
 					j.edge.Origin = j.origin
 					j.edge.Meta = j.meta
+					if j.hasModuleLabel {
+						j.edge.ConfidenceLabel = j.moduleLabel
+					}
 					reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: j.edge, OldTo: j.oldTo, OldKind: j.oldKind})
 					if graph.IsUnresolvedTarget(j.oldTo) && !graph.IsUnresolvedTarget(j.newTo) {
 						reindexConversions++
@@ -1283,6 +1289,9 @@ func (r *Resolver) ResolveAllContext(ctx context.Context) (*ResolveStats, error)
 				for _, ri := range reindexBatch {
 					r.noteRetargetedCall(ri.Edge)
 				}
+				// Without a cold shadow this pass can bind straight into another
+				// tracked repository; give those calls their parallel here.
+				DetectCrossRepoEdgesForReindexes(r.graph, crossRepoReindexes(reindexBatch))
 				reindexTotal += len(reindexBatch)
 				if pageRevisionKnown {
 					// Ignore this pass's own committed mutations. A later delta
@@ -3818,6 +3827,10 @@ type reindexJob struct {
 	confidence    float64
 	origin        string
 	meta          map[string]any
+	// moduleLabel carries the label a cross-repository Go module binding
+	// sets (bindGoModuleEdge), which the other provenance fields don't.
+	moduleLabel    string
+	hasModuleLabel bool
 	// restubRoundTrip marks an incoming-leg job whose parked reference
 	// bound back to the target it held before the re-parse; the
 	// cross-package guard leaves it alone (guardCrossPackageCallEdges).

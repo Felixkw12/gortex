@@ -720,8 +720,6 @@ func (mi *MultiIndexer) postPublishGoModules(ctx context.Context, idx *Indexer, 
 	if idx.deferResolve.Load() {
 		return nil // the batch's shared pass owns resolution
 	}
-	// Cold shadows can bind before publication; those edges never reindex.
-	resolver.DetectCrossRepoEdgesForRepos(mi.graph, []string{idx.repoPrefix})
 	if err := mi.resolveIncomingGoModules(idx.repoPrefix); err != nil {
 		return err
 	}
@@ -759,7 +757,7 @@ func (mi *MultiIndexer) synthesizeDemotedGoModuleCalls(files []string) {
 			enabled = append(enabled, file)
 		}
 	}
-	resolver.SynthesizeExternalCallsForFiles(mi.graph, true, enabled)
+	resolver.SynthesizeDemotedGoCallsForFiles(mi.graph, true, enabled)
 }
 
 // SeedGoModuleDeps warms the persisted-binding retry state. The daemon's
