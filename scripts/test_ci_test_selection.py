@@ -151,6 +151,11 @@ class SelectionTests(Repository):
         data = self.plan(self.changed("embedding/child/value.go"))
         self.assertEqual(data["mode"], "full")
         self.assertIn("embedded", data["reason"])
+        self.git("reset", "--hard", self.base)
+        self.write("embedding/child/new.go", "package child\nfunc Added() int {return 42}\n")
+        added = self.plan(self.commit())
+        self.assertEqual(added["mode"], "full")
+        self.assertIn("embedded", added["reason"], "unchanged globs must capture new Go resources")
 
     def test_event_uses_dependabot_pr_author_instead_of_rerun_actor(self):
         head = self.changed()
