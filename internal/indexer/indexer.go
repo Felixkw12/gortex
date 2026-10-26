@@ -506,7 +506,7 @@ type Indexer struct {
 
 	goModuleSourceMu    sync.Mutex
 	goModuleSourceCache map[string]goModuleSourceCacheEntry
-	goModuleSourceEpoch uint64 // bumped by each known save; guarded by goModuleSourceMu
+	goModuleSourceEpoch uint64 // bumped by each known save and eviction; guarded by goModuleSourceMu
 
 	// deferResolve, when set, makes IndexCtx skip the cross-cutting passes
 	// (per-repo ResolveAll / semantic enrichment / contract extraction +

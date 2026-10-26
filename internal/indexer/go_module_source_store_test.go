@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/zzet/gortex/internal/resolver"
 )
 
 // Given a caller recovery that reads the file while a save of that file is
@@ -58,4 +60,50 @@ func TestGoModuleSourceStoreDropsTrustAfterConcurrentSave(t *testing.T) {
 			assert.Equal(t, 2, reads, "an undisturbed verification restores stat trust")
 		})
 	}
+}
+
+// Given a caller recovery that reads the file while it is deleted and
+// evicted, when the recovery stores its result, then the stat is not trusted,
+// and a file that comes back with other bytes but the same size and
+// modification time is read again instead of restoring the old calls.
+func TestGoModuleSourceStoreDropsTrustAfterConcurrentEviction(t *testing.T) {
+	mi, _, repos := goModuleLifecycleFixture(t, "memory")
+	main := filepath.Join(repos[0].Path, "main.go")
+	writeFile(t, filepath.Join(repos[1].Path, "lib.go"), "package library\nfunc Hello(){}\nfunc Other(){}\n")
+	for _, entry := range repos[:2] {
+		_, err := mi.TrackRepoCtx(t.Context(), entry)
+		require.NoError(t, err)
+	}
+	mi.runCrossRepoResolveFiles([]string{"b/lib.go"})
+	idx := mi.GetIndexer("a")
+	delete(idx.goModuleSourceCache, "main.go")
+	info, err := os.Stat(main)
+	require.NoError(t, err)
+	original := readGoModuleCallerFile
+	reads := 0
+	readGoModuleCallerFile = func(path string) ([]byte, error) {
+		reads++
+		src, err := original(path)
+		if reads == 1 {
+			// The file is deleted and evicted during the read.
+			require.NoError(t, os.Remove(main))
+			idx.evictDeletedFilesBatched([]string{"main.go"}, &DerivedInvalidationPlan{})
+		}
+		return src, err
+	}
+	t.Cleanup(func() { readGoModuleCallerFile = original })
+	cr := mi.newCrossRepoResolver()
+	mi.restoreGoModuleSourceFile(cr, "a/main.go")
+	require.Equal(t, 1, reads)
+	assert.Zero(t, idx.goModuleSourceCache["main.go"].size, "a result read before an eviction must not be trusted by stat")
+	// The file comes back with a different call, the same size and the same modification time.
+	writeFile(t, main, "package caller\nimport library \"example.org/library\"\nfunc Caller() { library.Other() }\n")
+	require.NoError(t, os.Chtimes(main, info.ModTime(), info.ModTime()))
+	mi.restoreGoModuleSourceFile(cr, "a/main.go")
+	assert.Equal(t, 2, reads, "the returned file is read again")
+	var specs []string
+	for _, e := range idx.goModuleSourceCache["main.go"].edges {
+		specs = append(specs, resolver.GoModuleCallSpec(e))
+	}
+	assert.Equal(t, []string{"example.org/library::Other"}, specs)
 }
