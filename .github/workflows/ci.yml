@@ -57,7 +57,7 @@ jobs:
       - name: Test selection and runner fixtures
         run: python3 -m unittest discover -s scripts -p 'test_ci*.py'
       - name: Test workflow policy through the production gate
-        run: go test -count=1 ./scripts
+        run: go test -count=1 ./scripts/ci-result
       - name: Select complete packages or fall back to full
         id: select
         env:
@@ -300,7 +300,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false # This small tool needs only the standard library.
       - name: Require the planned tests and all unchanged CI gates
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
-        run: python3 scripts/ci_test_gate.py
+        run: go run ./scripts/ci-result

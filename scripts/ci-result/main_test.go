@@ -1,28 +1,19 @@
-package scripts
+package main
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
-type ciNeed struct {
-	Result  string            `json:"result"`
-	Outputs map[string]string `json:"outputs,omitempty"`
-}
-
 // This is one concrete, valid affected-PR receipt. Other scenarios alter the
-// receipt and invoke the production gate, rather than reimplement its rules.
+// receipt and invoke the production CLI path, rather than reimplement its rules.
 func affectedPRNeeds() map[string]ciNeed {
 	return map[string]ciNeed{
 		"plan": {Result: "success", Outputs: map[string]string{
@@ -39,61 +30,26 @@ func affectedPRNeeds() map[string]ciNeed {
 	}
 }
 
-func gatePython(t *testing.T) string {
-	t.Helper()
-	// Windows runners provide python; Unix runners normally provide python3.
-	// Resolve argv directly and require Python 3, without a shell or aliases.
-	names := []string{"python3", "python"}
-	if runtime.GOOS == "windows" {
-		names = []string{"python", "python3"}
-	}
-	for _, name := range names {
-		path, err := exec.LookPath(name)
-		if err != nil {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-		err = exec.CommandContext(ctx, path, "-c", "import sys; sys.exit(sys.version_info.major != 3)").Run()
-		cancel()
-		if err == nil {
-			return path
-		}
-	}
-	t.Fatal("CI gate tests require Python 3 (python3 or python), as the production gate does")
-	return ""
-}
-
-func runCIGate(t *testing.T, python, event string, needs map[string]ciNeed, wantError string) {
+func runCIGate(t *testing.T, event string, needs map[string]ciNeed, wantError string) {
 	t.Helper()
 	payload, err := json.Marshal(needs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, python, "ci_test_gate.py")
-	cmd.Env = append(os.Environ(), "CI_NEEDS="+string(payload), "GITHUB_EVENT_NAME="+event)
-	output, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("gate timed out: %v\n%s", ctx.Err(), output)
-	}
+	var stdout, stderr bytes.Buffer
+	code := run(string(payload), event, &stdout, &stderr)
 	if wantError == "" {
-		if err != nil || !strings.Contains(string(output), "All required CI checks passed") {
-			t.Fatalf("gate rejected a valid receipt: %v\n%s", err, output)
+		if code != 0 || !strings.Contains(stdout.String(), "All required CI checks passed") || stderr.Len() != 0 {
+			t.Fatalf("gate rejected a valid receipt: exit=%d\nstdout=%s\nstderr=%s", code, &stdout, &stderr)
 		}
 		return
 	}
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() == 0 {
-		t.Fatalf("gate must reject the receipt with a nonzero exit: %v\n%s", err, output)
-	}
-	if !strings.Contains(string(output), "ValueError: "+wantError) {
-		t.Fatalf("gate rejected for the wrong reason; want %q:\n%s", wantError, output)
+	if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "CI result: "+wantError) {
+		t.Fatalf("gate must reject for %q: exit=%d\nstdout=%s\nstderr=%s", wantError, code, &stdout, &stderr)
 	}
 }
 
 func TestCIResultGateAcceptsValidReceipts(t *testing.T) {
-	python := gatePython(t)
 	for _, tc := range []struct {
 		name, event string
 		outputs     map[string]string
@@ -118,13 +74,12 @@ func TestCIResultGateAcceptsValidReceipts(t *testing.T) {
 			for job, result := range tc.results {
 				needs[job] = ciNeed{Result: result}
 			}
-			runCIGate(t, python, tc.event, needs, "")
+			runCIGate(t, tc.event, needs, "")
 		})
 	}
 }
 
 func TestCIResultGateRejectsFailedCancelledOrUnexpectedlySkippedJobs(t *testing.T) {
-	python := gatePython(t)
 	for job, receipt := range affectedPRNeeds() {
 		for _, result := range []string{"failure", "cancelled", "skipped"} {
 			if result == receipt.Result {
@@ -135,14 +90,13 @@ func TestCIResultGateRejectsFailedCancelledOrUnexpectedlySkippedJobs(t *testing.
 				changed := needs[job]
 				changed.Result = result
 				needs[job] = changed
-				runCIGate(t, python, "pull_request", needs, job+" must be ")
+				runCIGate(t, "pull_request", needs, job+" must be ")
 			})
 		}
 	}
 }
 
 func TestCIResultGateRejectsInvalidPlanningOutputs(t *testing.T) {
-	python := gatePython(t)
 	for _, tc := range []struct {
 		name, wantError string
 		outputs         map[string]string
@@ -161,17 +115,22 @@ func TestCIResultGateRejectsInvalidPlanningOutputs(t *testing.T) {
 			if tc.outputs["has_tests"] == "false" {
 				needs["test"] = ciNeed{Result: "skipped"}
 			}
-			runCIGate(t, python, "pull_request", needs, tc.wantError)
+			runCIGate(t, "pull_request", needs, tc.wantError)
 		})
 	}
 }
 
 func TestCIWorkflowWiresSelectionBuildsCoverageAndStableGate(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "ci.yml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	lf := strings.ReplaceAll(string(data), "\r\n", "\n")
+	_, resultJob, found := strings.Cut(lf, "  ci-result:\n")
+	if !found || !strings.Contains(resultJob, "uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e") ||
+		!strings.Contains(resultJob, "go-version-file: go.mod") {
+		t.Fatal("the final gate must install the repository's pinned Go toolchain")
+	}
 	for _, tc := range []struct{ name, text string }{
 		{"LF", lf},
 		{"CRLF", strings.ReplaceAll(lf, "\n", "\r\n")},
@@ -192,7 +151,7 @@ func assertCIWorkflowWiring(t *testing.T, input string) {
 		"fetch-depth: 0", "--selection test-selection.json",
 		"needs.plan.outputs.mode == 'full'", "name: affected-coverage-",
 		"  build-native:\n", "  lint:\n", "  build-linux-static:\n", "  build-onnx:\n", "  ci-result:\n",
-		"if: always()", "go test -count=1 ./scripts", "run: python3 scripts/ci_test_gate.py",
+		"if: always()", "go test -count=1 ./scripts/ci-result", "run: go run ./scripts/ci-result",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("workflow is missing required wiring %q", required)
@@ -209,5 +168,24 @@ func assertCIWorkflowWiring(t *testing.T, input string) {
 	want := map[string]bool{"opened": true, "synchronize": true, "reopened": true, "labeled": true, "unlabeled": true}
 	if !maps.Equal(got, want) {
 		t.Errorf("pull request events = %v, want %v", got, want)
+	}
+}
+
+func TestCIResultCLIRejectsMissingMalformedOrNonObjectNeeds(t *testing.T) {
+	for _, tc := range []struct{ name, payload, want string }{
+		{"missing", "", "invalid CI_NEEDS"},
+		{"malformed", "{", "invalid CI_NEEDS"},
+		{"non-object", "[]", "invalid CI_NEEDS"},
+		{"null", "null", "plan must be success"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.payload, "pull_request", &stdout, &stderr); code == 0 {
+				t.Fatal("invalid CLI input must produce a nonzero exit")
+			}
+			if stdout.Len() != 0 || !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("unexpected invalid-input response: stdout=%s stderr=%s", &stdout, &stderr)
+			}
+		})
 	}
 }

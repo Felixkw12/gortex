@@ -88,8 +88,10 @@ checks or change administrative rulesets.
 
 ## Validation and expected scope
 
-The Go workflow-policy tests (`go test ./scripts`) invoke the production Python
-gate CLI directly, covering valid and rejected receipts and workflow wiring.
+The gate and its workflow-policy tests live in the standalone Go tool
+`scripts/ci-result` (`go test ./scripts/ci-result`). Tests exercise the actual CLI
+input/output path, valid and rejected receipts, malformed input, and workflow
+wiring with LF/CRLF checkouts. Ordinary Go tests need no Python bridge.
 The selector and runner fixtures remain Python tests. They create isolated
 Git/Go modules and exercise reverse imports,
 test-only/race/platform imports, local replacement bridges, additions,
