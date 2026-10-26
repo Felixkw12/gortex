@@ -261,7 +261,16 @@ func (cr *CrossRepoResolver) resolveTrackedNpmImport(e *graph.Edge, importPath s
 		}
 	}
 	if picked == nil {
-		if spec, _ := e.Meta[NpmImportSpecifierMeta].(string); spec != "" && e.To != "external::"+spec {
+		spec, _ := e.Meta[NpmImportSpecifierMeta].(string)
+		if module, _ := splitImportSpecSymbol(spec); spec != "" && len(cr.npmPackages(module)) == 0 {
+			// No tracked package claims the import any more; a cold index
+			// parks it without the marker.
+			delete(e.Meta, NpmImportSpecifierMeta)
+			e.To = "external::" + spec
+			e.CrossRepo = false
+			return true
+		}
+		if spec != "" && e.To != "external::"+spec {
 			e.To = "external::" + spec
 			e.CrossRepo = false
 			return true
