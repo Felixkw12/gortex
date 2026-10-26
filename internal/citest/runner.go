@@ -430,7 +430,7 @@ func (j *job) runRest(packages []string) error {
 			continue
 		}
 		text := eventEvidence(events, pkg, r.output)
-		if action.status == "fail" && !hardFailure(attributed) && !(attributed == "" && globalHard != "") {
+		if action.status == "fail" && !hardFailure(attributed) && (attributed != "" || globalHard == "") {
 			retries = append(retries, retry{pkg, failed, text})
 		} else {
 			j.packageFailure(pkg, events, text)

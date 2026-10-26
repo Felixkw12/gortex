@@ -489,7 +489,7 @@ func (p *Planner) Validate(ctx context.Context, m Manifest, target string, packa
 		return nil, err
 	}
 	if version != m.Toolchain {
-		return nil, fmt.Errorf("Go toolchain does not match selection")
+		return nil, fmt.Errorf("native Go toolchain does not match selection")
 	}
 	module, err := p.exec(ctx, p.Env, "go", "list", "-m")
 	if err != nil {
