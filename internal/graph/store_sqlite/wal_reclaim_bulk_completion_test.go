@@ -215,9 +215,9 @@ func TestWALBulkCompletionBoundsPinnedReaderAndParentCancellation(t *testing.T) 
 			require.Zero(t, res.pause)
 			require.False(t, s.readGate.closed.Load())
 			require.Zero(t, s.WALReclaimStats().LastResortRuns)
-			limit := walReclaimMaxWriterHold + 100*time.Millisecond
+			limit := walReclaimMaxWriterHold + testTimingSlack(100*time.Millisecond)
 			if kind == "ordinary" {
-				limit = walReclaimResetHold + 100*time.Millisecond
+				limit = walReclaimResetHold + testTimingSlack(100*time.Millisecond)
 			}
 			if kind == "parent_cancel" {
 				limit = time.Second
@@ -249,4 +249,53 @@ func bulkCompletionHeldCaller() bool {
 			return false
 		}
 	}
+}
+
+// A bulk completion resets on the pinned bulk connection, whose busy_timeout
+// is the writer's 5 s. SQLite's wait for a reader holding the log never
+// checks the interrupt, so that timeout, not the hold's deadline, bounded the
+// reset: a reader that left after the cap kept the writer until it left. The
+// cap is lowered to 200 ms; the reader stays until the attempt returns, or
+// 1 s at most.
+func TestWALBulkCompletionResetHoldsTheWriterAtMostTheCap(t *testing.T) {
+	s, db := finalBackfillFixture(t)
+	const holdCap = 200 * time.Millisecond
+	s.walLaneHoldOverride = holdCap
+	engaged, err := s.BeginGenerationBulkLoad(77)
+	require.NoError(t, err)
+	require.True(t, engaged)
+	defer func() { require.NoError(t, s.EndGenerationBulkLoadFor(77)) }()
+	s.writeMu.Lock()
+	tx, err := s.beginWriteContext(t.Context())
+	if err == nil {
+		if _, err = tx.Exec(`UPDATE wal_churn SET payload = 'bulk' WHERE id = 1`); err == nil {
+			err = tx.Commit()
+		} else {
+			_ = tx.Rollback()
+		}
+	}
+	s.writeMu.Unlock()
+	require.NoError(t, err)
+	// Begun after the last commit, the reader holds a WAL read mark at the
+	// log's end: the copy completes, and only the reset waits for it.
+	reader, err := s.db.BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	defer func() { _ = reader.Rollback() }()
+	var payload string
+	require.NoError(t, reader.QueryRow(`SELECT payload FROM wal_churn WHERE id = 1`).Scan(&payload))
+	leave := time.AfterFunc(time.Second, func() { _ = reader.Rollback() })
+	defer leave.Stop()
+	cfg := walReclaimConfig{thresholdBytes: 1, readerWait: time.Second, truncateBudget: walReclaimTruncateBudget}
+	res := &walReclaimResult{urgent: true, bulkCompletion: true, leaseOverride: true}
+	err = s.reclaimWALInLane(t.Context(), cfg, db, res)
+	leave.Stop()
+	require.Error(t, err, "the reader outlived the hold: the reset is deferred")
+	require.True(t, strings.HasPrefix(res.reason, "writer_hold_cap"), "the hold ran to its cap: %s", res.reason)
+	require.Less(t, res.writerHold, holdCap+100*time.Millisecond)
+	var busy int
+	s.writeMu.Lock()
+	err = s.bulkConn.QueryRowContext(t.Context(), `PRAGMA busy_timeout`).Scan(&busy)
+	s.writeMu.Unlock()
+	require.NoError(t, err)
+	require.Equal(t, sqliteBusyTimeoutMillis, busy, "the bulk connection's busy_timeout is restored")
 }

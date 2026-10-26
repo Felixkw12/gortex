@@ -664,6 +664,16 @@ type Resolver struct {
 	// SetWorkspaceMembership before ResolveAll runs.
 	workspaceMembers WorkspaceMembership
 
+	goModules                 map[string]string // tracked repo prefix → root go.mod module path
+	goModulePaths             goModulePathIndex
+	goModuleReplacements      map[string][]GoModuleReplacement
+	goModuleReplacementLookup func() map[string][]GoModuleReplacement
+	crossWorkspaceLookup      CrossWorkspaceDepLookup
+	goModuleLookup            func() map[string]string
+	deferGoModuleMisses       bool
+	deferredGoMu              sync.Mutex
+	deferredGoEdges           map[graph.EdgeIdentity]*graph.Edge
+
 	// scope, when non-empty, restricts the next ResolveAll pass to the
 	// pending edges that could resolve into one of the named repo
 	// prefixes — the warm-restart optimisation that avoids a whole-graph
@@ -813,6 +823,7 @@ func (r *Resolver) ResolveAllContext(ctx context.Context) (*ResolveStats, error)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refreshGoModules()
 	if err := ctx.Err(); err != nil {
 		return &ResolveStats{}, err
 	}
@@ -1177,6 +1188,9 @@ func (r *Resolver) ResolveAllContext(ctx context.Context) (*ResolveStats, error)
 								origin:     clone.Origin,
 								meta:       clone.Meta,
 							}
+							if clone.CrossRepo && clone.Meta["go_import"] != nil {
+								job.moduleLabel, job.hasModuleLabel = clone.ConfidenceLabel, true
+							}
 							if r.validateLiveness {
 								// resolveEdge mutates only clone, so e still holds the
 								// exact persisted payload observed before resolution.
@@ -1239,6 +1253,9 @@ func (r *Resolver) ResolveAllContext(ctx context.Context) (*ResolveStats, error)
 					j.edge.Confidence = j.confidence
 					j.edge.Origin = j.origin
 					j.edge.Meta = j.meta
+					if j.hasModuleLabel {
+						j.edge.ConfidenceLabel = j.moduleLabel
+					}
 					reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: j.edge, OldTo: j.oldTo, OldKind: j.oldKind})
 					if graph.IsUnresolvedTarget(j.oldTo) && !graph.IsUnresolvedTarget(j.newTo) {
 						reindexConversions++
@@ -1272,6 +1289,9 @@ func (r *Resolver) ResolveAllContext(ctx context.Context) (*ResolveStats, error)
 				for _, ri := range reindexBatch {
 					r.noteRetargetedCall(ri.Edge)
 				}
+				// Without a cold shadow this pass can bind straight into another
+				// tracked repository; give those calls their parallel here.
+				DetectCrossRepoEdgesForReindexes(r.graph, crossRepoReindexes(reindexBatch))
 				reindexTotal += len(reindexBatch)
 				if pageRevisionKnown {
 					// Ignore this pass's own committed mutations. A later delta
@@ -2639,6 +2659,7 @@ func (r *Resolver) buildPassIndexesForPending(pending []*graph.Edge) (clear func
 func (r *Resolver) ResolveFile(filePath string) *ResolveStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refreshGoModules()
 	r.scopedCSharpVisibilityInvalidate([]string{filePath})
 
 	clear := r.buildPassIndexes()
@@ -2659,6 +2680,7 @@ func (r *Resolver) ResolveFileAndIncoming(filePath string) *ResolveStats {
 	started := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refreshGoModules()
 	// The edited file may have (re)stamped global usings — reconcile the
 	// persistent index instead of paying the workspace rescan per save.
 	r.scopedCSharpVisibilityInvalidate([]string{filePath})
@@ -3097,6 +3119,7 @@ func (r *Resolver) ResolveFilesAndIncoming(filePaths []string) *ResolveStats {
 	finish := startIncrementalPhase(logger, "wait_lock")
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refreshGoModules()
 	lockDuration = finish()
 	// The edited files may have (re)stamped global usings — reconcile the
 	// persistent index instead of paying the workspace rescan per save.
@@ -3553,6 +3576,7 @@ func (r *Resolver) runFileAttributionPassesForFileLocked(filePath string) {
 func (r *Resolver) ResolveIncomingForFile(filePath string) *ResolveStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refreshGoModules()
 	r.scopedCSharpVisibilityInvalidate([]string{filePath})
 
 	clear := r.buildPassIndexes()
@@ -3580,6 +3604,7 @@ func (r *Resolver) ResolveIncomingForNames(names, repoPrefixes []string) *Resolv
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refreshGoModules()
 
 	seen := make(map[string]struct{}, len(names))
 	var stubKeys []string
@@ -3802,6 +3827,10 @@ type reindexJob struct {
 	confidence    float64
 	origin        string
 	meta          map[string]any
+	// moduleLabel carries the label a cross-repository Go module binding
+	// sets (bindGoModuleEdge), which the other provenance fields don't.
+	moduleLabel    string
+	hasModuleLabel bool
 	// restubRoundTrip marks an incoming-leg job whose parked reference
 	// bound back to the target it held before the re-parse; the
 	// cross-package guard leaves it alone (guardCrossPackageCallEdges).
@@ -4057,10 +4086,9 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string
 // by the parser when a selector call's receiver matches an import alias.
 //
 // Resolution order:
-//  1. Look for <symbol> defined in a file whose dir matches the import
-//     path — this catches cross-repo calls into another indexed tree
-//     (e.g. service A calls service B's exported function).
-//  2. Otherwise, keep the package-qualified target so the UI can render
+//  1. For Go, match a tracked go.mod module and its package-relative directory.
+//  2. Fall back to <symbol> in a file whose dir matches the import path.
+//  3. Otherwise, keep the package-qualified target so the UI can render
 //     "crosses web → encoding/json" instead of a bare em-dash. The
 //     prefix chosen encodes whether the path looks stdlib-like (no dot
 //     in first segment, for Go) vs a module path (dotted or vendored).
@@ -4104,6 +4132,21 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 		stats.Unresolved++
 		return
 	}
+	if r.resolveGoModuleExtern(e, importPath, callerRepo, goOwnership.filterNodes(candidates), stats) {
+		return
+	}
+	// A configured module may not be visible in this repository's cold
+	// shadow yet. Preserve its symbol for the whole-store cross-repo pass.
+	if r.pendingGoModuleExtern(e) {
+		r.noteDeferredGoModuleEdge(e)
+		stats.Unresolved++
+		return
+	}
+	var modules map[string]string
+	if strings.HasSuffix(e.FilePath, ".go") {
+		modules = r.goModules
+	}
+	trackedImport := strings.HasSuffix(e.FilePath, ".go") && trackedGoImport(r.goModulePaths, importPath)
 	// A Go selector into a caller-local package must agree with resolveImport,
 	// which prefers the caller's own instance of a duplicated module. Keep the
 	// first eligible foreign candidate as a fallback instead of letting global
@@ -4112,6 +4155,10 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 	preferLocal := callerRepo != "" && caller != nil && caller.Language == "go"
 	var foreignFallback *graph.Node
 	for _, c := range candidates {
+		crossRepo := callerRepo != "" && c.RepoPrefix != "" && c.RepoPrefix != callerRepo
+		if crossRepo && (modules[c.RepoPrefix] != "" || trackedImport) {
+			continue // a cross-repo module identity cannot fall back to a directory guess
+		}
 		if c.Kind != graph.KindFunction && c.Kind != graph.KindMethod && c.Kind != graph.KindType && c.Kind != graph.KindInterface {
 			continue
 		}
@@ -4119,9 +4166,11 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 			continue
 		}
 		dir := r.dirFor(c.FilePath)
-		crossRepo := callerRepo != "" && c.RepoPrefix != "" && c.RepoPrefix != callerRepo
 		var matches bool
 		if crossRepo {
+			if !r.externWorkspaceEligible(e, c, importPath) {
+				continue
+			}
 			// Cross-repo extern call: require a precise import-path
 			// suffix match. The old loose last-component test
 			// (`*/go`) resolved every tree-sitter binding's
@@ -4163,7 +4212,7 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 	// the caller's repo prefix (see internal/graph/stub.go) so two repos
 	// pinned to different Go SDK versions get distinct fmt::Errorf nodes
 	// instead of one shared, version-conflated terminal.
-	if isStdlibLike(importPath) {
+	if isStdlibLike(importPath) && !trackedImport {
 		e.To = graph.StubID(r.stubRepoPrefix(e), graph.StubKindStdlib, importPath, symbol)
 	} else {
 		e.To = "dep::" + importPath + "::" + symbol

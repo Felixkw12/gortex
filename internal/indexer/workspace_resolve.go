@@ -481,8 +481,13 @@ func (mi *MultiIndexer) newCrossRepoResolver() *resolver.CrossRepoResolver {
 	cr := resolver.NewCrossRepo(mi.graph)
 	cr.SetLogger(mi.logger)
 	cr.SetCrossWorkspaceDepLookup(mi.crossWorkspacePassLookup())
+	modules, revision := mi.goModuleSnapshot()
+	cr.SetGoModules(modules)
+	cr.SetGoModuleReplacements(mi.trackedGoModuleReplacements())
+	cr.SetGoModuleDepRetry(&mi.goModuleRetry, revision)
 	cr.SetNpmAliasResolver(mi.npmAliasResolver())
 	cr.SetNpmDependencyLookup(mi.npmDependencyLookup())
+	cr.SetNpmPackageLookup(mi.npmPackageLookup())
 	cr.SetPathAliasResolver(mi.pathAliasResolver())
 	cr.SetWorkspaceMembership(mi.workspaceMembershipResolver())
 	mi.applyRemoteStitch(cr)
@@ -500,6 +505,19 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 	if cr == nil {
 		return nil
 	}
+	mi.mu.RLock()
+	indexers := make([]*Indexer, 0, len(mi.indexers))
+	for _, idx := range mi.indexers {
+		indexers = append(indexers, idx)
+	}
+	mi.mu.RUnlock()
+	for _, idx := range indexers {
+		edges := idx.resolver.TakeDeferredGoModuleEdges()
+		if err := cr.ResolveDeferredGoModuleEdges(edges); err != nil {
+			return err
+		}
+		mi.synthesizeDeferredGoModuleCalls(idx, edges)
+	}
 	if _, err := cr.ResolveAllContext(ctx); err != nil {
 		return err
 	}
@@ -508,6 +526,7 @@ func (mi *MultiIndexer) runCrossRepoResolveContext(ctx context.Context, reconcil
 	}
 	// Bounded by the calls this pass actually bound; the deferred
 	// fallback lane runs with no global test-edges pass behind it.
+	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 	return nil
 }
@@ -533,6 +552,7 @@ func (mi *MultiIndexer) runCrossRepoResolveMutationFrontiers(resolutionFiles, ed
 		return
 	}
 	cr.ResolveMutationFrontiers(resolutionFiles, edgeSourceFiles, definitionFiles)
+	mi.finishGoModuleCalls(cr)
 	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
 }
 
@@ -660,4 +680,97 @@ func (mi *MultiIndexer) crossWorkspaceLookup() resolver.CrossWorkspaceDepLookup 
 		// returning them directly keeps this hot lookup allocation-free.
 		return snapshot.rulesByWorkspace[sourceWS]
 	}
+}
+
+// resolveDeferredGoModules is the post-publication tail shared by cold-shadow callers.
+func (mi *MultiIndexer) resolveDeferredGoModules(idx *Indexer) error {
+	edges := idx.resolver.TakeDeferredGoModuleEdges()
+	if len(edges) == 0 {
+		return nil
+	}
+	cr := mi.newCrossRepoResolver()
+	if err := cr.ResolveDeferredGoModuleEdges(edges); err != nil {
+		return err
+	}
+	mi.synthesizeDeferredGoModuleCalls(idx, edges)
+	mi.finishGoModuleCalls(cr)
+	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	return nil
+}
+
+func (mi *MultiIndexer) resolveIncomingGoModules(repo string) error {
+	if mi.graph == nil || len(mi.graph.RepoPrefixes()) < 2 || mi.trackedGoModules()[repo] == "" {
+		return nil
+	}
+	cr := mi.newCrossRepoResolver()
+	if err := cr.ResolveGoModuleIncomingForRepo(repo); err != nil {
+		return err
+	}
+	mi.finishGoModuleCalls(cr)
+	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	return nil
+}
+
+// postPublishGoModules keeps every full-index caller on the same module tail.
+// New providers need the revision sweep; re-indexes probe their definitions.
+func (mi *MultiIndexer) postPublishGoModules(ctx context.Context, idx *Indexer, newProvider bool) error {
+	if err := mi.resolveDeferredGoModules(idx); err != nil {
+		return err
+	}
+	if idx.deferResolve.Load() {
+		return nil // the batch's shared pass owns resolution
+	}
+	if err := mi.resolveIncomingGoModules(idx.repoPrefix); err != nil {
+		return err
+	}
+	if !newProvider {
+		return nil
+	}
+	cr := mi.newCrossRepoResolver()
+	if err := cr.RetryGoModuleDeps(ctx); err != nil {
+		return err
+	}
+	mi.finishGoModuleCalls(cr)
+	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	return nil
+}
+
+func (mi *MultiIndexer) synthesizeDeferredGoModuleCalls(idx *Indexer, edges []*graph.Edge) {
+	if !idx.externalCallSynthesisEnabled() || len(edges) == 0 {
+		return
+	}
+	seen := make(map[string]bool)
+	var files []string
+	for _, e := range edges {
+		if e != nil && e.FilePath != "" && !seen[e.FilePath] {
+			seen[e.FilePath] = true
+			files = append(files, e.FilePath)
+		}
+	}
+	resolver.SynthesizeExternalCallsForFiles(mi.graph, true, files)
+}
+
+func (mi *MultiIndexer) synthesizeDemotedGoModuleCalls(files []string) {
+	var enabled []string
+	for _, file := range files {
+		if idx := mi.GetIndexer(graph.RepoPrefixOfID(file)); idx != nil && idx.externalCallSynthesisEnabled() {
+			enabled = append(enabled, file)
+		}
+	}
+	resolver.SynthesizeDemotedGoCallsForFiles(mi.graph, true, enabled)
+}
+
+// SeedGoModuleDeps warms the persisted-binding retry state. The daemon's
+// background warmup owns this call after readiness, before starting watchers.
+func (mi *MultiIndexer) SeedGoModuleDeps(ctx context.Context) error {
+	cr := mi.newCrossRepoResolver()
+	if cr == nil {
+		return nil
+	}
+	if err := cr.RetryGoModuleDeps(ctx); err != nil {
+		return err
+	}
+	mi.finishGoModuleCalls(cr)
+	mi.reconcileRetargetedTestCalls(cr.TakeRetargetedTestCallFiles())
+	return nil
 }

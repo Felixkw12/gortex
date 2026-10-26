@@ -1410,8 +1410,8 @@ func TestContractAnalysisCoordinatorPublishedIsLevelTriggered(t *testing.T) {
 	since := c.publishedEpoch()
 	c.Published(t.Context(), "repo-a", "")
 	start := time.Now()
-	require.True(t, c.waitPublished(t.Context(), since, time.Now().Add(time.Minute)), "an announcement before the wait still wakes it")
-	require.Less(t, time.Since(start), 30*time.Second, "the wait returns at once, not at its deadline")
+	require.True(t, c.waitPublished(t.Context(), since, time.Now().Add(2*testTimingSlack(30*time.Second))), "an announcement before the wait still wakes it")
+	require.Less(t, time.Since(start), testTimingSlack(30*time.Second), "the wait returns at once, not at its deadline")
 
 	since = c.publishedEpoch()
 	go func() {
@@ -3937,9 +3937,10 @@ func TestContractJobProvesInTheGapAfterApplyWindowsCoveringItsRounds(t *testing.
 	const (
 		owner   = "fixture/consts.go"
 		applies = 30
-		// roundWait bounds a wait no window close ends; none may run out.
-		roundWait = 5 * time.Second
 	)
+	// Scale the wait and its half-wait wake bound together, so a timer-only
+	// fallback still fails the wake assertion on a slow host.
+	roundWait := testTimingSlack(5 * time.Second)
 	a := &contractHeldApplies{f: f, path: owner}
 	defer a.wg.Wait()
 	staged, begun, wakes, released := false, 0, 0, 0
@@ -4297,7 +4298,7 @@ func TestContractConvergenceWaitWakesOnTheCloseOfAWindowItWaitsOn(t *testing.T) 
 			since := c.wake()
 			woke := make(chan time.Time, 1)
 			go func() {
-				if c.waitWake(since, time.Now().Add(5*time.Second)) {
+				if c.waitWake(since, time.Now().Add(2*testTimingSlack(time.Second))) {
 					woke <- time.Now()
 				}
 				close(woke)
@@ -4309,7 +4310,7 @@ func TestContractConvergenceWaitWakesOnTheCloseOfAWindowItWaitsOn(t *testing.T) 
 			if !row.window {
 				at, ok := <-woke
 				require.True(t, ok, "a refusal no window holds wakes on any event")
-				require.Less(t, at.Sub(began), time.Second)
+				require.Less(t, at.Sub(began), testTimingSlack(time.Second))
 				return
 			}
 			select {
@@ -4321,7 +4322,7 @@ func TestContractConvergenceWaitWakesOnTheCloseOfAWindowItWaitsOn(t *testing.T) 
 			emit(false)
 			at, ok := <-woke
 			require.True(t, ok, "the close woke the wait")
-			require.Less(t, at.Sub(closed), time.Second)
+			require.Less(t, at.Sub(closed), testTimingSlack(time.Second))
 		})
 	}
 }
@@ -4361,7 +4362,7 @@ func TestContractConvergenceWaitWakesOnACloseFollowedAtOnceByTheNextBegin(t *tes
 	since := c.wake()
 	done := make(chan bool, 1)
 	start := time.Now()
-	go func() { done <- c.waitWake(since, start.Add(5*time.Second)) }()
+	go func() { done <- c.waitWake(since, start.Add(2*testTimingSlack(time.Second))) }()
 	time.Sleep(50 * time.Millisecond)
 	// The window of seq 1 closes (an event) and the next apply opens seq 2
 	// before any scan runs.
@@ -4373,7 +4374,7 @@ func TestContractConvergenceWaitWakesOnACloseFollowedAtOnceByTheNextBegin(t *tes
 	mu.Unlock()
 	woke := <-done
 	require.True(t, woke, "the window the wait was armed on closed")
-	require.Less(t, time.Since(start), time.Second, "the wait woke on the close, not at its deadline")
+	require.Less(t, time.Since(start), testTimingSlack(time.Second), "the wait woke on the close, not at its deadline")
 }
 
 // TestContractConvergenceWaitSeesWhatLandedBeforeItListened: the wait is
@@ -4433,9 +4434,9 @@ func TestContractConvergenceWaitSeesWhatLandedBeforeItListened(t *testing.T) {
 			}
 			mu.Unlock()
 			start := time.Now()
-			woke := c.waitWake(since, start.Add(2*time.Second))
+			woke := c.waitWake(since, start.Add(2*testTimingSlack(time.Second)))
 			require.True(t, woke, "what landed before the wait listened woke it")
-			require.Less(t, time.Since(start), time.Second, "the wait woke at once, not at its deadline")
+			require.Less(t, time.Since(start), testTimingSlack(time.Second), "the wait woke at once, not at its deadline")
 		})
 	}
 }
@@ -4480,7 +4481,7 @@ func TestContractConvergenceWaitWakesOnTheCloseOfAnyWindowItWaitsOn(t *testing.T
 	since := c.wake()
 	done := make(chan bool, 1)
 	start := time.Now()
-	go func() { done <- c.waitWake(since, start.Add(5*time.Second)) }()
+	go func() { done <- c.waitWake(since, start.Add(2*testTimingSlack(time.Second))) }()
 	time.Sleep(50 * time.Millisecond)
 	// Only the second window closes.
 	mu.Lock()
@@ -4490,7 +4491,7 @@ func TestContractConvergenceWaitWakesOnTheCloseOfAnyWindowItWaitsOn(t *testing.T
 	changed = make(chan struct{})
 	mu.Unlock()
 	require.True(t, <-done, "the close of one window woke the wait")
-	require.Less(t, time.Since(start), time.Second, "the wait did not wait for the other window")
+	require.Less(t, time.Since(start), testTimingSlack(time.Second), "the wait did not wait for the other window")
 }
 
 // TestContractJobPublishesWhileEveryCloseIsFollowedAtOnceByTheNextBegin: the
@@ -5109,7 +5110,7 @@ func TestContractConvergenceWaitWakesWhenAWaitedOnRowDeparts(t *testing.T) {
 			since := c.wake()
 			done := make(chan bool, 1)
 			start := time.Now()
-			go func() { done <- c.waitWake(since, start.Add(5*time.Second)) }()
+			go func() { done <- c.waitWake(since, start.Add(2*testTimingSlack(time.Second))) }()
 			time.Sleep(50 * time.Millisecond)
 			mu.Lock()
 			events++
@@ -5119,7 +5120,7 @@ func TestContractConvergenceWaitWakesWhenAWaitedOnRowDeparts(t *testing.T) {
 			changed = make(chan struct{})
 			mu.Unlock()
 			require.True(t, <-done, "nothing is left to wait on")
-			require.Less(t, time.Since(start), time.Second, "the wait woke on the event, not at its deadline")
+			require.Less(t, time.Since(start), testTimingSlack(time.Second), "the wait woke on the event, not at its deadline")
 		})
 	}
 }

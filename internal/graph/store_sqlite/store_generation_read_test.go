@@ -1222,6 +1222,41 @@ func generationReadProbes() []genProbe {
 			sort.Strings(out)
 			return out
 		}},
+		{name: "ScopedOutlineCounts", run: func(t *testing.T, s *Store) []string {
+			counts, err := s.ScopedOutlineCounts(graph.NodeScope{WorkspaceID: genReadRepo, RepoAllow: map[string]bool{genReadRepo: true}})
+			if err != nil {
+				t.Fatalf("ScopedOutlineCounts: %v", err)
+			}
+			return outlineCountTokens(counts)
+		}},
+		{name: "ScopedAnalysisCommunitySummaries", run: func(t *testing.T, s *Store) []string {
+			mark := genZeroMark
+			if s.ViewGeneration() != 0 {
+				mark = genOneMark
+			}
+			community := "community-" + mark
+			id := publishOutlineCommunities(t, s,
+				[]graph.AnalysisCommunitySummary{{ID: community, Label: mark, Size: 1}},
+				[]graph.AnalysisNodeMetric{{NodeID: genOnlyID(mark), CommunityID: community}})
+			rows, _, err := s.ScopedAnalysisCommunitySummaries(id, graph.NodeScope{RepoAllow: map[string]bool{genReadRepo: true}}, 1, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out []string
+			for _, row := range rows {
+				out = append(out, row.ID+" "+row.Label)
+			}
+			return out
+		}},
+		{name: "ScopedOutlineCountsFiltered", run: func(t *testing.T, s *Store) []string {
+			counts, err := s.ScopedOutlineCountsFiltered(graph.NodeScope{WorkspaceID: genReadRepo, RepoAllow: map[string]bool{genReadRepo: true}}, graph.OutlineEdgeFilter{
+				ExcludeKinds: []graph.EdgeKind{graph.EdgeReferences}, ExcludeNodeKinds: []graph.NodeKind{graph.KindContract}, ExcludeVia: "spring.Bean",
+			})
+			if err != nil {
+				t.Fatalf("ScopedOutlineCountsFiltered: %v", err)
+			}
+			return outlineCountTokens(counts)
+		}},
 		{name: "FileImporters", run: func(t *testing.T, s *Store) []string {
 			var out []string
 			for _, mark := range []string{genZeroMark, genOneMark} {
@@ -1617,6 +1652,17 @@ func crossRepoTokens(rows []graph.CrossRepoCandidateRow) []string {
 	return out
 }
 
+// Include both scalar aggregates and marked import targets: a generation-
+// blind outline must fail even when an aggregate happens to have equal counts.
+func outlineCountTokens(counts graph.OutlineCounts) []string {
+	out := []string{fmt.Sprintf("outline nodes=%d edges=%d", counts.TotalNodes, counts.TotalEdges)}
+	out = append(out, sortedCountTokens("language", counts.ByLanguage)...)
+	for _, row := range counts.FileImports {
+		out = append(out, fmt.Sprintf("outline import %s=%d", row.FilePath, row.Count))
+	}
+	return out
+}
+
 // TestGenerationReadIsolation is the fence itself.
 func TestGenerationReadIsolation(t *testing.T) {
 	base, derived := openGenerationReadPair(t)
@@ -1979,6 +2025,7 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.AnalysisGenerationStore)(nil), skip: skipSidecar},
 		{iface: (*graph.AnalysisPageBinder)(nil), probe: "BindAnalysisPages"},
 		{iface: (*graph.AnalysisQueryStore)(nil), skip: skipSidecar},
+		{iface: (*graph.ScopedAnalysisCommunityReader)(nil), probe: "ScopedAnalysisCommunitySummaries"},
 		{iface: (*graph.AtomicVectorCorpusInstaller)(nil), skip: skipSidecar},
 		{iface: (*graph.BFSCapable)(nil), probe: "BFS"},
 		{iface: (*graph.BlameEnrichmentReader)(nil), skip: skipSidecar},
@@ -2056,6 +2103,8 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.FileBatchEvicter)(nil), skip: skipWrite, writeFence: "TestGenerationScopedFileEvict"},
 		{iface: (*graph.FileEditingContext)(nil), probe: "FileEditingContext"},
 		{iface: (*graph.FileImportAggregator)(nil), probe: "FileImportCounts"},
+		{iface: (*graph.ScopedOutlineAggregator)(nil), probe: "ScopedOutlineCounts"},
+		{iface: (*graph.FilteredScopedOutlineAggregator)(nil), probe: "ScopedOutlineCountsFiltered"},
 		{iface: (*graph.FileImporters)(nil), probe: "FileImporters"},
 		{iface: (*graph.FileIndexFailureReader)(nil), skip: "v21 generation-keyed sidecar; read/write isolation and recovery covered by TestFileIndexFailuresPersistAndScope"},
 		{iface: (*graph.FileIndexFailureWriter)(nil), skip: "v21 generation-keyed sidecar; read/write isolation and recovery covered by TestFileIndexFailuresPersistAndScope"},

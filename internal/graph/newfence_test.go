@@ -48,6 +48,10 @@ var harnessCallers = []string{
 	// graph.OverlayLayerReader — the in-memory layer from this package and the
 	// persisted generation layer from internal/graphview.
 	"internal/graph/overlaytest/conformance.go",
+	// Backend outline conformance compares SQLite and the in-memory
+	// reference. This shared harness is imported only by store tests; a
+	// package-local _test.go cannot be called by the SQLite test package.
+	"internal/graph/storetest/scoped_outline.go",
 }
 
 // graphImportPath is the package under fence. The scan resolves whatever local

@@ -71,9 +71,10 @@ type storeCore struct {
 
 	// Test-only overrides of fixed real-time budgets. Zero means the
 	// production constant; tests set them before the store does any work.
-	// See retirementQuantum and walPressureHold.
+	// See retirementQuantum, walPressureHold and walLaneHoldCap.
 	retirementQuantumOverride time.Duration
 	walPressureHoldOverride   time.Duration
+	walLaneHoldOverride       time.Duration
 
 	// derivedCorrectionEpochs counts finished derived-row corrections per
 	// generation (generation id → *atomic.Uint64); see derivation_stamps.go.
@@ -81,6 +82,10 @@ type storeCore struct {
 	// walShrinkPending: the WAL reclaim reset a big log in place and its
 	// file still has to be shrunk in slices (wal_shrink.go).
 	walShrinkPending atomic.Bool
+	// walLimitKept: an in-place reset gave up on this fully copied log and
+	// left the writer's journal_size_limit lifted; the shrink restores it
+	// once the log has restarted (wal_shrink.go).
+	walLimitKept atomic.Pointer[walReclaimFrontier]
 	// rowCountersReady: generation_row_counts is installed and seeded, so
 	// NodeCount / EdgeCount read it (row_counters.go).
 	rowCountersReady atomic.Bool
@@ -2762,12 +2767,19 @@ var errReindexWriterGateContended = errors.New("store_sqlite: reindex writer gat
 // destination payloads, and persists only the net final-state differences.
 // Stationary destinations keep their payloads (including same-batch refreshes);
 // the first mover wins a fresh key. Distinct copied rows that converge at a
-// fresh key and then move it again, or reuse an already-moved stored identity,
-// are not guaranteed to converge across stores (see graph.Store.ReindexEdges).
+// fresh key and then move it again, or reuse an identity an earlier row already
+// moved (stored or created earlier in the batch), are not guaranteed to
+// converge across stores (see graph.Store.ReindexEdges).
 // Transactions hold at most 5000 entries.
 // A chain or swap split across transactions can still lose one edge, as before;
 // it does not retain the losing mover's payload at a stationary destination.
 func (s *Store) ReindexEdges(batch []graph.EdgeReindex) {
+	s.ReindexEdgesApplied(batch)
+}
+
+// ReindexEdgesApplied reports a dropped writer-gate batch to retry-aware callers.
+// Fatal store failures retain ReindexEdges' existing panic contract.
+func (s *Store) ReindexEdgesApplied(batch []graph.EdgeReindex) bool {
 	for _, r := range batch {
 		if r.Edge != nil && graph.IsUnresolvedTarget(r.Edge.To) {
 			s.unresolvedInserts.Add(1)
@@ -2776,10 +2788,12 @@ func (s *Store) ReindexEdges(batch []graph.EdgeReindex) {
 	if _, err := s.reindexEdgesSetOriented(batch); err != nil {
 		if errors.Is(err, errReindexWriterGateContended) {
 			log.Printf("store_sqlite: reindex writer gate contended, dropping %d rebind(s) — a later resolve pass rebinds them: %v", len(batch), err)
-			return
+			return false
 		}
 		panicOnFatal(err)
+		return false
 	}
+	return true
 }
 
 // SetEdgeProvenanceBatch applies origin promotions through bounded VALUES

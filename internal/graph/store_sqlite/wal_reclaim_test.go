@@ -70,6 +70,16 @@ func growWAL(t *testing.T, s *Store, writes int) {
 	}
 }
 
+// walLogIsReset reports whether the log is at its start: an empty file, or a
+// wal-index with no frames.
+func walLogIsReset(dbPath, walPath string) bool {
+	if walFileSize(walPath) == 0 {
+		return true
+	}
+	snap, ok := readWALIndexSnapshot(dbPath)
+	return ok && snap.MxFrame == 0
+}
+
 // A reader that never leaves: the reclaim gives up at the drain deadline,
 // reopens the gate, backs off, and never blocks other readers past the bound.
 func TestWALReclaimDefersWhenReadersNeverDrain(t *testing.T) {

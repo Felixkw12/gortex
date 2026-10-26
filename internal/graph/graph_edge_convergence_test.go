@@ -229,3 +229,39 @@ func TestGraphReindexEdgesNonconvergingRefresh(t *testing.T) {
 	assert.Equal(t, 1, g.RepoMemoryEstimate("repo").EdgeCount)
 	require.NoError(t, g.VerifyEdgeIdentities())
 }
+
+// A batch whose rows all name stored identities never folds an intermediate
+// identity, so it must not pay for that bookkeeping: allocations per batch
+// stay flat as the batch grows instead of costing one per row.
+func TestGraphReindexEdgesAllocationsDoNotGrowWithRows(t *testing.T) {
+	const rows = 512
+	g := New()
+	edges := make([]*Edge, rows)
+	resolved, stubs := make([]string, rows), make([]string, rows)
+	forward, back := make([]EdgeReindex, rows), make([]EdgeReindex, rows)
+	for i := range edges {
+		resolved[i], stubs[i] = fmt.Sprintf("b::T%d", i), fmt.Sprintf("unresolved::T%d", i)
+		// Background rows keep both incoming buckets alive, so the measured
+		// batches never create or drop a bucket.
+		g.AddEdge(&Edge{From: "c::C", To: resolved[i], Kind: EdgeReferences, FilePath: "c.go", Line: i})
+		g.AddEdge(&Edge{From: "c::C", To: stubs[i], Kind: EdgeReferences, FilePath: "c.go", Line: i})
+		edges[i] = &Edge{From: "a::A", To: stubs[i], Kind: EdgeCalls, FilePath: "a.go", Line: i}
+		g.AddEdge(edges[i])
+		forward[i] = EdgeReindex{Edge: edges[i], OldTo: stubs[i]}
+		back[i] = EdgeReindex{Edge: edges[i], OldTo: resolved[i]}
+	}
+	toResolved := false
+	allocs := testing.AllocsPerRun(20, func() {
+		toResolved = !toResolved
+		batch, targets := back, stubs
+		if toResolved {
+			batch, targets = forward, resolved
+		}
+		for i, e := range edges {
+			e.To = targets[i]
+		}
+		g.ReindexEdges(batch)
+	})
+	require.NoError(t, g.VerifyEdgeIdentities())
+	assert.Less(t, allocs, float64(rows/8), "allocations per batch must not grow with its rows")
+}

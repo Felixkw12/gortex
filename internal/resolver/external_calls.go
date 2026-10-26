@@ -104,6 +104,65 @@ func SynthesizeExternalCallsForFiles(g graph.Store, enabled bool, files []string
 	return synthesizeExternalCalls(g, externalCallCandidateEdgesForFiles(g, files))
 }
 
+// SynthesizeDemotedGoCallsForFiles is SynthesizeExternalCallsForFiles for Go
+// calls that a module change just demoted. A demoted call can land on a site
+// whose package terminal another call already holds. That row first goes back
+// to its own symbol, so the site converges in the cold order (the smallest
+// original terminal keeps the row) instead of keeping whichever call reached
+// the terminal first.
+func SynthesizeDemotedGoCallsForFiles(g graph.Store, enabled bool, files []string) int {
+	if g == nil || !enabled || len(files) == 0 {
+		return 0
+	}
+	reopenSharedGoTerminals(g, files)
+	return SynthesizeExternalCallsForFiles(g, enabled, files)
+}
+
+// reopenSharedGoTerminals moves each landed Go terminal row that shares its
+// site and package with a pending dep:: call back to the symbol it recorded.
+func reopenSharedGoTerminals(g graph.Store, files []string) {
+	mu := g.ResolveMutex()
+	mu.Lock()
+	defer mu.Unlock()
+	type destination struct {
+		site graph.EdgeSite
+		file string
+		node string
+	}
+	pending := make(map[destination]struct{})
+	var landed []*graph.Edge
+	externalCallCandidateEdgesForFiles(g, files)(func(row externalCallCandidate) bool {
+		e := row.edge
+		if e == nil {
+			return true
+		}
+		if strings.HasPrefix(e.To, externalCallPrefix) {
+			if target, _ := e.Meta["go_extern_target"].(string); strings.HasPrefix(target, "dep::") {
+				landed = append(landed, e)
+			}
+			return true
+		}
+		if ecosystem, importPath, ok := parseExternalCallTarget(e.To); ok && ecosystem == "dep" {
+			pending[destination{graph.EdgeSite{From: e.From, Line: e.Line, Kind: e.Kind}, e.FilePath, externalCallNodeID(ecosystem, importPath)}] = struct{}{}
+		}
+		return true
+	})
+	var reopened []graph.EdgeReindex
+	for _, e := range landed {
+		if _, shared := pending[destination{graph.EdgeSite{From: e.From, Line: e.Line, Kind: e.Kind}, e.FilePath, e.To}]; !shared {
+			continue
+		}
+		oldTo := e.To
+		e.To, _ = e.Meta["go_extern_target"].(string)
+		delete(e.Meta, "go_extern_target")
+		delete(e.Meta, "external_call")
+		reopened = append(reopened, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+	}
+	if len(reopened) > 0 {
+		g.ReindexEdges(reopened)
+	}
+}
+
 // SynthesizeExternalCallsForRepos is the repo-scoped counterpart used by the
 // end-of-batch global passes when only some repos re-indexed: it materialises
 // external-call nodes for the out-edges of the changed repos' symbols only, so
@@ -228,6 +287,14 @@ func synthesizeExternalCalls(g graph.Store, collect externalCallCandidateSeq) in
 				e.Meta = map[string]any{}
 			}
 			e.Meta["external_call"] = true
+			// Keep Go's symbol-bearing identity for a module tracked later.
+			// Older package-only synthetic targets still need re-extraction.
+			if callerLang == "go" && strings.HasPrefix(oldTo, "dep::") {
+				e.Meta["go_extern_target"] = oldTo
+			}
+			graph.RestoreRestubProvenance(e)
+			delete(e.Meta, "go_import")
+			delete(e.Meta, "npm_import")
 			reindexes = append(reindexes, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		}
 		if len(nodes) > 0 {
@@ -333,6 +400,14 @@ func sameExternalCallDestination(a, b externalCallParsedCandidate) bool {
 // falls back to the EdgesByKinds scan + prefix filter otherwise.
 func externalCallCandidateEdges(g graph.Store) externalCallCandidateSeq {
 	return func(yield func(externalCallCandidate) bool) {
+		if cap, ok := g.(graph.ExternalCallCandidateIterator); ok {
+			for e := range cap.ExternalCallCandidateEdgesSeq() {
+				if e != nil && isExternalCandidateTarget(e.To) && !yield(externalCallCandidate{edge: e}) {
+					return
+				}
+			}
+			return
+		}
 		if cap, ok := g.(graph.ExternalCallCandidates); ok {
 			for _, e := range cap.ExternalCallCandidateEdges() {
 				if e != nil && isExternalCandidateTarget(e.To) &&

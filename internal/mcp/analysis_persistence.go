@@ -173,6 +173,7 @@ func (s *Server) populateAnalysis(takeLock, background bool) analysisRunMetrics 
 					s.adjacencyToken = sourceToken
 					s.hotspots = nil
 					s.hotspotsReady = false
+					s.hotspotsOwned = false
 					s.analysisEpoch++
 				}
 				if generationWriter.CommitAnalysisSnapshot(header.GraphRevision, locked(installHeader)) {
@@ -359,6 +360,7 @@ func (s *Server) populateAnalysis(takeLock, background bool) analysisRunMetrics 
 			}
 			s.hotspots = nil
 			s.hotspotsReady = false
+			s.hotspotsOwned = false
 			s.analysisEpoch++
 		}
 
@@ -394,6 +396,7 @@ func (s *Server) populateAnalysis(takeLock, background bool) analysisRunMetrics 
 	s.adjacencyToken = communityCacheToken{}
 	s.hotspots = nil
 	s.hotspotsReady = false
+	s.hotspotsOwned = false
 	s.analysisEpoch++
 	if s.logger != nil {
 		s.logger.Warn("mcp: analysis publication abandoned after concurrent graph mutations",
