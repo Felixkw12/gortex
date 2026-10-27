@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -157,9 +157,12 @@ func validateCorpus(c Corpus) error {
 	if !labelPattern.MatchString(c.Label) || c.Source == "" || !commitPattern.MatchString(c.Commit) {
 		return errors.New("corpus requires a neutral label, source, and full 40-digit commit SHA")
 	}
-	path := filepath.FromSlash(c.File)
-	if c.File == "" || filepath.IsAbs(path) || filepath.Clean(path) == ".." || strings.HasPrefix(filepath.Clean(path), ".."+string(filepath.Separator)) || strings.Contains(c.File, "\\") {
-		return fmt.Errorf("corpus %s: file must be a repo-relative path", c.Label)
+	// The manifest format is logical slash-relative on every host. IsAbs alone
+	// accepts slash-rooted paths on Windows; VolumeName alone misses Windows
+	// drives when the same manifest is validated on Unix. Reject both dialects
+	// lexically, including drive-relative paths/alternate streams and traversal.
+	if c.File == "." || !fs.ValidPath(c.File) || strings.ContainsAny(c.File, "\\:\x00") {
+		return fmt.Errorf("corpus %s: file must be a canonical slash-separated repo-relative path", c.Label)
 	}
 	if c.Symbol == "" || strings.HasPrefix(c.Symbol, "ext::") || c.Query == "" {
 		return fmt.Errorf("corpus %s: requires a source-backed symbol and query; ext:: targets are excluded", c.Label)

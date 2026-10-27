@@ -108,7 +108,7 @@ func matchedLatencyRatios(labels []string, records []pairedRecord) map[string]ma
 			}
 			a, aOK := record.Samples[labels[0]]
 			b, bOK := record.Samples[label]
-			if !aOK || !bOK || a.Outcome != "success" || b.Outcome != "success" || a.RequestHash != record.Tuple.RequestHash || b.RequestHash != record.Tuple.RequestHash || a.Repo != record.Tuple.Repo || b.Repo != record.Tuple.Repo || a.Commit != record.Tuple.Commit || b.Commit != record.Tuple.Commit || a.Latency.Value == nil || b.Latency.Value == nil || *a.Latency.Value <= 0 {
+			if !aOK || !bOK || a.Outcome != "success" || b.Outcome != "success" || a.RequestHash != record.Tuple.RequestHash || b.RequestHash != record.Tuple.RequestHash || a.Repo != record.Tuple.Repo || b.Repo != record.Tuple.Repo || a.Commit != record.Tuple.Commit || b.Commit != record.Tuple.Commit || a.Latency.Value == nil || b.Latency.Value == nil || *a.Latency.Value <= 0 || *b.Latency.Value <= 0 {
 				row.Excluded++
 			} else {
 				row.Matched++

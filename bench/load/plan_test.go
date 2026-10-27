@@ -92,11 +92,18 @@ func TestSourceTargetsAndStablePlan(t *testing.T) {
 			t.Fatalf("unsafe symbol %q accepted", symbol)
 		}
 	}
-	for _, path := range []string{"../secret.go", "/secret.go", `a\secret.go`, ""} {
+	for _, path := range []string{"../secret.go", "/secret.go", `a\secret.go`, "", ".", "./secret.go", "a/../secret.go", "a//secret.go", "C:secret.go", "C:/secret.go", `C:\secret.go`, "//server/share/secret.go", `\\server\share\secret.go`, `\secret.go`, `\\?\C:\secret.go`, "source.go:stream", "source\x00.go"} {
 		c = sampleCorpus()
 		c.File = path
 		if _, err := readingPlan(c); err == nil {
 			t.Fatalf("unsafe file %q accepted", path)
+		}
+	}
+	for _, file := range []string{"source.go", "internal/store/source.go", "src/δ.go"} {
+		c = sampleCorpus()
+		c.File = file
+		if _, err := readingPlan(c); err != nil {
+			t.Fatalf("canonical repo-relative path %q rejected: %v", file, err)
 		}
 	}
 }

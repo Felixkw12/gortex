@@ -73,7 +73,11 @@ func TestPairedWireRequestsRotateWithinEachCategory(t *testing.T) {
 		}
 	}
 	ratios := matchedLatencyRatios(c.labels, c.records)["main/tag"]
-	if ratios["workload.search.symbols"].Matched != 2 || ratios["probe.search.symbols"].Matched != 2 {
+	// Wire identity/order is independent of clock resolution. A real request
+	// can finish within one Windows clock tick and correctly be excluded from
+	// latency ratios; deterministic positive/zero samples are tested separately.
+	workload, probes := ratios["workload.search.symbols"], ratios["probe.search.symbols"]
+	if workload.Matched+workload.Excluded != 2 || probes.Matched+probes.Excluded != 2 {
 		t.Fatalf("probe/workload matching mixed: %+v", ratios)
 	}
 }

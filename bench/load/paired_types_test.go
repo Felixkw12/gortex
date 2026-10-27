@@ -88,3 +88,22 @@ func TestMatchedRatiosUseMedianAndRetainExclusions(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchedRatiosExcludeZeroClockSamplesOnEitherBuild(t *testing.T) {
+	for _, test := range []struct {
+		a, b    float64
+		matched int
+	}{{0, 1, 0}, {1, 0, 0}, {0, 0, 0}, {-1, 1, 0}, {1, -1, 0}, {.1, .2, 1}} {
+		record := pairedRecord{Tuple: requestTuple{Tool: "read.source", Role: "workload", RequestHash: "same"}, Order: []string{"tag", "main"}, Samples: map[string]pairedSample{
+			"tag":  {Outcome: "success", RequestHash: "same", Latency: measured(test.a, "ms")},
+			"main": {Outcome: "success", RequestHash: "same", Latency: measured(test.b, "ms")},
+		}}
+		row := matchedLatencyRatios([]string{"tag", "main"}, []pairedRecord{record})["main/tag"]["workload.read.source"]
+		if row.Matched != test.matched || row.Excluded != 1-test.matched || (row.Median.Value != nil) != (test.matched == 1) {
+			t.Fatalf("unresolved clock sample became a ratio: a%g b%g %+v", test.a, test.b, row)
+		}
+		if *record.Samples["tag"].Latency.Value != test.a || *record.Samples["main"].Latency.Value != test.b {
+			t.Fatal("excluded raw clock sample was rewritten")
+		}
+	}
+}
