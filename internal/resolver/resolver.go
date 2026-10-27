@@ -316,6 +316,7 @@ type Resolver struct {
 	goPackageOwnershipPrepared  map[string]GoPackageOwnershipLookup
 	graph                       graph.Store
 	writeCounters               func() store_sqlite.VFSIOMark
+	writeCounterDefault         atomic.Pointer[func() store_sqlite.VFSIOMark]
 	logger                      *zap.Logger
 	dirIndex                    map[string][]graph.FileNodeIdentity
 	lastDirIndex                map[string][]graph.FileNodeIdentity
@@ -714,12 +715,14 @@ type depModuleEntry struct {
 // the same Store, so their ResolveAll / ResolveFile calls serialise
 // end-to-end across cross-repo / temporal / external passes.
 func New(g graph.Store) *Resolver {
-	return &Resolver{
+	r := &Resolver{
 		graph:                g,
 		mu:                   g.ResolveMutex(),
 		logger:               zap.NewNop(),
 		lspResolvePassBudget: lspResolvePassBudgetFromEnv(),
 	}
+	r.setDefaultWriteCounterSource(g)
+	return r
 }
 
 // SetLogger attaches a logger so ResolveAll emits pass-progress
@@ -772,6 +775,7 @@ func (r *Resolver) SetGraph(g graph.Store) {
 		oldMu.Lock()
 	}
 	r.graph = g
+	r.setDefaultWriteCounterSource(g)
 	r.mu = g.ResolveMutex()
 	// Deferred entries hold edge pointers from the previous store. Carrying
 	// them across a graph swap could reindex an unrelated/stale row.
@@ -3279,6 +3283,17 @@ func incrementalAdmissionSummary(frontier incrementalFileFrontier, sources map[s
 	return repos, omittedRepos, omittedAdmissions
 }
 
+// Publish the default separately from the setup-only override. Sampling the
+// wait-lock phase precedes r.mu.Lock, so it must not inspect r.graph while
+// SetGraph retargets it. Each phase captures one source for both endpoints.
+func (r *Resolver) setDefaultWriteCounterSource(g graph.Store) {
+	sample := store_sqlite.WriteMark
+	if source, ok := g.(interface{ WriteMark() store_sqlite.VFSIOMark }); ok {
+		sample = source.WriteMark
+	}
+	r.writeCounterDefault.Store(&sample)
+}
+
 // SetWriteCounterSource preserves the underlying store's WAL-position fallback
 // when the resolver reads through a delta graph. Install before using the resolver.
 func (r *Resolver) SetWriteCounterSource(sample func() store_sqlite.VFSIOMark) {
@@ -3293,8 +3308,8 @@ func (r *Resolver) startIncrementalPhase(logger *zap.Logger, phase string) func(
 	sample := r.writeCounters
 	if sample == nil {
 		sample = store_sqlite.WriteMark
-		if source, ok := r.graph.(interface{ WriteMark() store_sqlite.VFSIOMark }); ok {
-			sample = source.WriteMark
+		if current := r.writeCounterDefault.Load(); current != nil {
+			sample = *current
 		}
 	}
 	writes := sample()
