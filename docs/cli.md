@@ -444,7 +444,7 @@ its saved active selection stays unchanged, even when the daemon process has a
 A second start leaves already-current files unchanged.
 
 Automatic refresh accepts only recorded generated files or exact known legacy
-profile bodies. It preserves customized, unrecognized or symlinked files and
+profile bodies from v0.64.10 and v0.64.11. It preserves customized, unrecognized or symlinked files and
 logs how to resolve the conflict; the daemon continues serving. Back up and move
 conflicting generated files aside, then run `gortex instructions regen` to
 restore them and record the current version. Keep personal guidance in your
