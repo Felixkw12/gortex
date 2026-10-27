@@ -42,7 +42,11 @@ func TestAddEdgesContextCancelsActualSQLiteAdmission(t *testing.T) {
 		require.Zero(t, got.added, "unadmitted edges counted as completed")
 	case <-time.After(3 * time.Second):
 		unlock()
-		<-done
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("legacy writer fixture did not join after releasing its owned gate")
+		}
 		t.Fatal("cochange called the uninterruptible checked writer instead of the context-capable API")
 	}
 	require.Zero(t, s.EdgeCount())
