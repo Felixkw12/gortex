@@ -75,3 +75,18 @@ func noteReindexWrites(s sqliteReindexSetStats) {
 	reindexGeneric.Add(int64(s.genericFallback))
 	reindexReceipt.Add(int64(s.receiptFallback))
 }
+
+// noteTableRows is for existing helpers whose payload table is a parameter.
+// Sidecars, FTS ownership maps and catalog tables intentionally contribute zero.
+func noteTableRows(table string, result sql.Result, err error) {
+	switch table {
+	case "nodes":
+		countStatementRows(&nodeRowsWritten, result, err)
+	case "edges":
+		countStatementRows(&edgeRowsWritten, result, err)
+	case "symbol_fts":
+		countStatementRows(&symbolFTSRowsWritten, result, err)
+	case "content_fts":
+		countStatementRows(&contentFTSRowsWritten, result, err)
+	}
+}

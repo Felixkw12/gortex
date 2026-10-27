@@ -62,3 +62,43 @@ func TestWriteMarkReturningAndFTSRows(t *testing.T) {
 	require.NoError(t, s.ReplaceContentFiles("repo", []graph.ContentFTSFileReplacement{{FilePath: "doc.md"}}))
 	require.Equal(t, int64(2), WriteMark().Since(before).Rows.ContentFTS)
 }
+
+func TestWriteMarkDynamicPayloadHelpersCountEachTableOnce(t *testing.T) {
+	for _, operation := range []string{"copy_and_retire", "purge"} {
+		t.Run(operation, func(t *testing.T) {
+			s := openCatalogStore(t)
+			seedGenerationZero(t, s, copyFixtureRepo, 8, 16)
+			expected := RowWriteCounts{
+				Nodes: int64(len(generationRows(t, s, "nodes", 0, copyFixtureRepo))),
+				Edges: int64(len(generationRows(t, s, "edges", 0, copyFixtureRepo))),
+			}
+			for _, mapping := range generationFTSDocidMaps {
+				count := int64(len(ftsDocuments(t, s, mapping, 0, copyFixtureRepo)))
+				switch mapping.fts {
+				case "symbol_fts":
+					expected.SymbolFTS = count
+				case "content_fts":
+					expected.ContentFTS = count
+				}
+			}
+			require.Positive(t, expected.Nodes)
+			require.Positive(t, expected.Edges)
+			require.Positive(t, expected.SymbolFTS)
+			require.Positive(t, expected.ContentFTS)
+			if operation == "purge" {
+				before := s.WriteMark()
+				require.NoError(t, s.PurgeRepo(copyFixtureRepo))
+				require.Equal(t, expected, s.WriteMark().Since(before).Rows)
+				return
+			}
+			destination := reservedGeneration(t, s, "write-counters")
+			before := s.WriteMark()
+			_, err := s.CopyPayloadGeneration(t.Context(), 0, destination, copyFixtureRepo)
+			require.NoError(t, err)
+			require.Equal(t, expected, s.WriteMark().Since(before).Rows, "a copied statement is counted once, without sidecars/triggers")
+			before = s.WriteMark()
+			require.NoError(t, s.RetirePayloadGeneration(t.Context(), destination, nil))
+			require.Equal(t, expected, s.WriteMark().Since(before).Rows, "dynamic retirement deletes are direct row writes too")
+		})
+	}
+}

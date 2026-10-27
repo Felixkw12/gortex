@@ -318,6 +318,7 @@ SELECT ` + strings.Join(projection, ", ") + ` FROM ` + table + ` WHERE ` + viewG
 		args = append(args, repoPrefix)
 	}
 	result, err := tx.ExecContext(ctx, query, args...)
+	noteTableRows(table, result, err)
 	if err != nil {
 		return 0, fmt.Errorf("store_sqlite: copy %s from generation %d to %d: %w", table, from, to, err)
 	}
@@ -377,7 +378,7 @@ func copyGenerationEdgesTx(ctx context.Context, tx *sql.Tx, from, to int64, repo
 SELECT ` + strings.Join(projection, ", ") + `
 ` + generationCopyEdgesFromSQL
 	args = append(args, from, repoPrefix)
-	result, err := tx.ExecContext(ctx, query, args...)
+	result, err := countEdgeWrite(tx.ExecContext(ctx, query, args...))
 	if err != nil {
 		return 0, fmt.Errorf("store_sqlite: copy edges from generation %d to %d: %w", from, to, err)
 	}
@@ -561,7 +562,9 @@ func generationCopyWriteFTSChunk(
 		ownerArgs = append(ownerArgs, to, docid)
 		ownerArgs = append(ownerArgs, row.carried...)
 	}
-	if _, err := tx.ExecContext(ctx, documents.String(), documentArgs...); err != nil {
+	result, err := tx.ExecContext(ctx, documents.String(), documentArgs...)
+	noteTableRows(docidMap.fts, result, err)
+	if err != nil {
 		return 0, fmt.Errorf("store_sqlite: write %s rows for a generation copy: %w", docidMap.fts, err)
 	}
 	if _, err := tx.ExecContext(ctx, owners.String(), ownerArgs...); err != nil {
