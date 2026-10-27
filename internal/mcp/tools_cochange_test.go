@@ -302,3 +302,12 @@ func TestTheCoChangeHandlerAsksThroughTheViewGate(t *testing.T) {
 			"the base request left the one-shot unconsumed")
 	})
 }
+
+func TestCochangeMineFailureDoesNotPublishCompletedEmptyCache(t *testing.T) {
+	stack := newViewStack(t)
+	// The fixture is constructed with real Git first. A missing executable is
+	// then an actual mine failure, not evidence of a successfully empty history.
+	t.Setenv("PATH", t.TempDir())
+	stack.srv.mineCoChange()
+	require.False(t, stack.srv.coChangeReady(), "failed Git scan was published as a completed empty mine")
+}

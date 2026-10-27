@@ -543,12 +543,12 @@ func (c *realController) EnrichCochange(ctx context.Context, p daemon.EnrichCoch
 			c.logSupersededEnrichment(gortexmcp.EnrichProducerCochange, t.prefix, superseded)
 			continue
 		}
-		// Control-only fixtures retain the historical context-free door.
+		// A control-only caller still propagates cancellation through the producer.
 		out, err := c.beginBaseEnrichment(ctx, gortexmcp.EnrichProducerCochange, t.prefix, t.root)
 		if err != nil {
 			return daemon.EnrichCochangeResult{}, fmt.Errorf("enrich %s: %w", t.prefix, err)
 		}
-		count, err := cochange.EnrichGraph(out.Store, out.Root, t.prefix)
+		count, err := cochange.EnrichGraphContext(ctx, out.Store, out.Root, t.prefix)
 		if err != nil {
 			out.Abandon()
 			return daemon.EnrichCochangeResult{}, fmt.Errorf("enrich %s: %w", t.prefix, err)

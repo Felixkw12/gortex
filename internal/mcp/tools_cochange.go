@@ -231,14 +231,8 @@ func (s *Server) EnrichCochange(parent context.Context, prefix, root string) (in
 		return 0, false, err
 	}
 	defer out.Abandon()
-	res := cochange.Mine(ctx, out.Root, cochange.Options{})
-	if err := ctx.Err(); err != nil {
-		return 0, false, err
-	}
-	// This legacy batch call cannot yet cancel a queued writer. Keep its
-	// actual return inside the owner rather than detach it at cancellation.
-	count := cochange.AddEdges(out.Store, res.Pairs, prefix)
-	if err := ctx.Err(); err != nil {
+	count, err := cochange.EnrichGraphContext(ctx, out.Store, out.Root, prefix)
+	if err != nil {
 		return count, false, err
 	}
 	superseded, err := out.Settle()
@@ -346,9 +340,12 @@ func (s *Server) mineCoChangeContext(ctx context.Context) {
 			}
 			continue
 		}
-		res := cochange.Mine(ctx, out.Root, cochange.Options{})
-		if ctx.Err() != nil {
+		res, err := cochange.MineContext(ctx, out.Root, cochange.Options{})
+		if err != nil {
 			out.Abandon()
+			if s.logger != nil && ctx.Err() == nil {
+				s.logger.Warn("co-change mine failed; cache not published", zap.String("prefix", prefix), zap.Error(err))
+			}
 			return
 		}
 		if len(res.Pairs) == 0 {
@@ -356,6 +353,10 @@ func (s *Server) mineCoChangeContext(ctx context.Context) {
 			continue
 		}
 		for _, p := range res.Pairs {
+			if ctx.Err() != nil {
+				out.Abandon()
+				return
+			}
 			fa, fb := p.FileA, p.FileB
 			if prefix != "" {
 				fa = prefix + "/" + fa
@@ -377,11 +378,11 @@ func (s *Server) mineCoChangeContext(ctx context.Context) {
 			out.Abandon()
 			return
 		}
-		// Legacy AddEdges remains physically owned until it returns. A later
-		// context-aware batch boundary can interrupt an in-flight writer gate.
-		cochange.AddEdges(out.Store, res.Pairs, prefix)
-		if ctx.Err() != nil {
+		if _, err := cochange.AddEdgesContext(ctx, out.Store, res.Pairs, prefix); err != nil {
 			out.Abandon()
+			if s.logger != nil && ctx.Err() == nil {
+				s.logger.Warn("co-change write failed; cache not published", zap.String("prefix", prefix), zap.Error(err))
+			}
 			return
 		}
 		// A supersession here is an ordering statement, not a failure: the
@@ -392,6 +393,7 @@ func (s *Server) mineCoChangeContext(ctx context.Context) {
 				s.logger.Warn("co-change mine: output generation not settled",
 					zap.String("prefix", prefix), zap.Error(err))
 			}
+			return
 		} else if superseded && s.logger != nil {
 			s.logger.Debug("co-change mine superseded by a newer run; its edges are persisted",
 				zap.String("prefix", prefix))
