@@ -3015,6 +3015,7 @@ func (s *Server) runAnalysis(background bool) {
 
 	analysisMetrics := s.populateAnalysis(true, background)
 	hotspotsWarmup := s.warmOutlineHotspots()
+	outlineWarmup := s.warmOutlineSummaries(context.Background())
 
 	// The graph was just rebuilt, so the lazy-enrichment ledger — symbol
 	// IDs whose incoming refs were confirmed against the *previous* graph
@@ -3060,6 +3061,10 @@ func (s *Server) runAnalysis(background bool) {
 			zap.Duration("auto_concepts", analysisMetrics.autoConcepts),
 			zap.Duration("hits", analysisMetrics.hits),
 			zap.Duration("hotspots_warmup", hotspotsWarmup),
+			zap.Duration("outline_summary_warmup", outlineWarmup.elapsed),
+			zap.Int("outline_summary_scopes", outlineWarmup.scopes),
+			zap.Int("outline_summary_ready", outlineWarmup.ready),
+			zap.Int("outline_summary_owned_estimate_bytes", outlineWarmup.bytes),
 			zap.Int("attempts", analysisMetrics.attempts),
 			zap.Int("superseded", analysisMetrics.superseded),
 			zap.String("superseded_at", analysisMetrics.supersededAt),

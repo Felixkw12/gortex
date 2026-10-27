@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
@@ -27,11 +28,17 @@ type outlineResponseKey struct {
 	scope, mask       string
 }
 
+const outlineSummaryEntries = 16
+
 type outlineResponseCache struct {
-	mu         sync.Mutex
-	scopeEpoch uint64
-	keys       []outlineResponseKey
-	values     map[outlineResponseKey]map[string]any
+	proof       outlineResponseKey
+	proofSet    bool
+	summaryKeys []outlineResponseKey
+	summaries   map[outlineResponseKey]outlinePreparedSummary
+	mu          sync.Mutex
+	scopeEpoch  uint64
+	keys        []outlineResponseKey
+	values      map[outlineResponseKey]map[string]any
 }
 
 // Only known concrete stores and the exact contract-core mask are cacheable.
@@ -86,6 +93,17 @@ func (s *Server) outlineCacheKey(reader graph.Reader, scope graph.NodeScope, bou
 	if current && !hotReady {
 		return outlineResponseKey{}, false
 	}
+	key.scope = outlineScopeIdentity(scope)
+	if len(key.scope) > outlineCacheIdentityBytes || len(key.mask) > outlineCacheIdentityBytes {
+		return outlineResponseKey{}, false
+	}
+	s.outlineResponses.mu.Lock()
+	key.scopeEpoch = s.outlineResponses.scopeEpoch
+	s.outlineResponses.mu.Unlock()
+	return key, true
+}
+
+func outlineScopeIdentity(scope graph.NodeScope) string {
 	repos := make([]string, 0, len(scope.RepoAllow))
 	for repo, allowed := range scope.RepoAllow {
 		if allowed {
@@ -98,14 +116,7 @@ func (s *Server) outlineCacheKey(reader graph.Reader, scope graph.NodeScope, bou
 		Narrow             bool
 		Repos              []string
 	}{scope.WorkspaceID, scope.ProjectID, len(scope.RepoAllow) > 0, repos})
-	key.scope = string(data)
-	if len(key.scope) > outlineCacheIdentityBytes || len(key.mask) > outlineCacheIdentityBytes {
-		return outlineResponseKey{}, false
-	}
-	s.outlineResponses.mu.Lock()
-	key.scopeEpoch = s.outlineResponses.scopeEpoch
-	s.outlineResponses.mu.Unlock()
-	return key, true
+	return string(data)
 }
 
 func (c *outlineResponseCache) clear() {
@@ -113,6 +124,9 @@ func (c *outlineResponseCache) clear() {
 	c.scopeEpoch++
 	c.keys = nil
 	c.values = nil
+	c.summaryKeys = nil
+	c.summaries = nil
+	c.proofSet = false
 	c.mu.Unlock()
 }
 func (c *outlineResponseCache) get(key outlineResponseKey) (map[string]any, bool) {
@@ -132,17 +146,8 @@ func (c *outlineResponseCache) put(key outlineResponseKey, payload map[string]an
 	owned := cloneOutlinePayload(payload)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if key.scopeEpoch != c.scopeEpoch {
+	if !c.prepareProofLocked(key) {
 		return
-	}
-	// Keep only the currently observed graph/analysis epoch, never a revision
-	// history. Scope variants share this fixed-size FIFO for the current proof.
-	if len(c.keys) > 0 {
-		last := c.keys[len(c.keys)-1]
-		if last.reader != key.reader || last.revision != key.revision || last.analysisReader != key.analysisReader || last.analysisRevision != key.analysisRevision || last.epoch != key.epoch || last.generation != key.generation || last.ready != key.ready {
-			c.keys = nil
-			c.values = nil
-		}
 	}
 	if _, ok := c.values[key]; ok {
 		return
@@ -157,6 +162,139 @@ func (c *outlineResponseCache) put(key outlineResponseKey, payload map[string]an
 	}
 	c.keys = append(c.keys, key)
 	c.values[key] = owned
+}
+
+// prepareProofLocked drops old derived state and rejects a delayed producer
+// from an older mutation/analysis epoch instead of letting it evict fresh data.
+func (c *outlineResponseCache) prepareProofLocked(key outlineResponseKey) bool {
+	if key.scopeEpoch != c.scopeEpoch {
+		return false
+	}
+	if c.proofSet {
+		old := c.proof
+		if old.reader == key.reader && old.analysisReader == key.analysisReader && (key.revision < old.revision || key.analysisRevision < old.analysisRevision || key.epoch < old.epoch) {
+			return false
+		}
+		if old.reader != key.reader || old.revision != key.revision || old.analysisReader != key.analysisReader || old.analysisRevision != key.analysisRevision || old.epoch != key.epoch || old.generation != key.generation || old.ready != key.ready {
+			c.keys = nil
+			c.values = nil
+			c.summaryKeys = nil
+			c.summaries = nil
+		}
+	}
+	c.proof = key
+	c.proofSet = true
+	return true
+}
+
+type outlinePreparedSummary struct {
+	imports     []map[string]any // Complete displayed top ten, not an incomplete graph aggregate API.
+	counts      graph.OutlineCounts
+	communities map[string]any // nil means unavailable: retain the exact live fallback.
+}
+
+func (c *outlineResponseCache) getSummary(key outlineResponseKey) (outlinePreparedSummary, bool) {
+	c.mu.Lock()
+	summary, ok := c.summaries[key]
+	c.mu.Unlock()
+	if !ok {
+		return outlinePreparedSummary{}, false
+	}
+	out := outlinePreparedSummary{counts: cloneOutlineCounts(summary.counts)}
+	out.imports = cloneOutlineValue(summary.imports).([]map[string]any)
+	if summary.communities != nil {
+		out.communities = cloneOutlinePayload(summary.communities)
+	}
+	return out, true
+}
+func (c *outlineResponseCache) putSummary(key outlineResponseKey, counts graph.OutlineCounts, communities map[string]any) (int, bool) {
+	imports := make(map[string]int, len(counts.FileImports))
+	for _, row := range counts.FileImports {
+		imports[row.FilePath] = row.Count
+	}
+	displayed := rankImportedFiles(imports, outlineMostImportedLimit)
+	// Only outlines consume this private preparation. Retain the complete final
+	// top-ten section; do not retain all candidate paths or change graph APIs.
+	counts.FileImports = nil
+	bytes := outlineSummaryOwnedBytes(counts)
+	data, err := json.Marshal(displayed)
+	if err != nil {
+		return 0, false
+	}
+	bytes += len(data) + 4096
+
+	if communities != nil {
+		data, err := json.Marshal(communities)
+		if err != nil {
+			return 0, false
+		}
+		bytes += len(data) + 2048 // fixed section: at most five small maps and scalar leaves.
+	}
+	if bytes > outlineCachePayloadBytes {
+		return 0, false
+	}
+	owned := outlinePreparedSummary{counts: cloneOutlineCounts(counts), imports: cloneOutlineValue(displayed).([]map[string]any)}
+	if communities != nil {
+		owned.communities = cloneOutlinePayload(communities)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.prepareProofLocked(key) {
+		return 0, false
+	}
+	if _, exists := c.summaries[key]; exists {
+		return bytes, true
+	}
+	if len(c.summaryKeys) == outlineSummaryEntries {
+		return 0, false
+	}
+	if c.summaries == nil {
+		c.summaries = make(map[outlineResponseKey]outlinePreparedSummary)
+	}
+	c.summaryKeys = append(c.summaryKeys, key)
+	c.summaries[key] = owned
+	return bytes, true
+}
+
+// A conservative owned-allocation envelope, including exact-length row slice,
+// cloned string allocation rounding, and map storage (128 bytes per entry is
+// above the Go map slot/bucket share). Reject before cloning, never truncate.
+func outlineSummaryOwnedBytes(counts graph.OutlineCounts) int {
+	bytes := int(unsafe.Sizeof(counts)) + 64
+	add := func(n int) bool {
+		if n > outlineCachePayloadBytes-bytes {
+			bytes = outlineCachePayloadBytes + 1
+			return false
+		}
+		bytes += n
+		return true
+	}
+	for language := range counts.ByLanguage {
+		if !add(128 + len(language) + 16) {
+			return bytes
+		}
+	}
+	for _, row := range counts.FileImports {
+		if !add(int(unsafe.Sizeof(row)) + len(row.FilePath) + 16) {
+			return bytes
+		}
+	}
+	return bytes
+}
+
+func cloneOutlineCounts(counts graph.OutlineCounts) graph.OutlineCounts {
+	out := counts
+	out.ByLanguage = make(map[string]int, len(counts.ByLanguage))
+	for language, count := range counts.ByLanguage {
+		out.ByLanguage[strings.Clone(language)] = count
+	}
+	if counts.FileImports != nil {
+		out.FileImports = make([]graph.FileImportCountRow, len(counts.FileImports))
+		for i, row := range counts.FileImports {
+			out.FileImports[i] = graph.FileImportCountRow{FilePath: strings.Clone(row.FilePath), Count: row.Count}
+		}
+	}
+	return out
 }
 
 // The payload has one small, fixed map/list vocabulary. Copy it before

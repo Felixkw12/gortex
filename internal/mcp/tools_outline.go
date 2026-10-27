@@ -60,22 +60,31 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
+const outlineMostImportedLimit = 10
+
 type outlineLanguage struct {
 	Name  string `json:"name"`
 	Nodes int    `json:"nodes"`
 }
 
 func (s *Server) buildRepoOutline(ctx context.Context, reader graph.Reader, opts query.QueryOptions, bound bool) (map[string]any, error) {
-	reader = graph.BindReadContext(reader, ctx)
 	const (
-		topCommunitiesN  = 5
-		topHotspotsN     = 5
-		topMostImportedN = 10
-		topEntryPointsN  = 10
-		topLanguagesN    = 5
+		topHotspotsN    = 5
+		topEntryPointsN = 10
+		topLanguagesN   = 5
 	)
 
 	scope := graph.NodeScope{WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow}
+	var prepared *outlinePreparedSummary
+	if key, ok := s.outlineCacheKey(reader, scope, bound); ok {
+		if counts, ready := s.outlineResponses.getSummary(key); ready {
+			if after, valid := s.outlineCacheKey(reader, scope, bound); valid && after == key {
+				prepared = &counts
+			}
+		}
+	}
+	reader = graph.BindReadContext(reader, ctx)
+
 	scopedNodes, _ := graph.BindReadContext(contractCoreSelectedReader(reader), ctx).(graph.ScopedOutlineNodeReader)
 	var candidateErr error
 
@@ -83,7 +92,9 @@ func (s *Server) buildRepoOutline(ctx context.Context, reader graph.Reader, opts
 	var inScope map[string]bool
 	var aggregated *graph.OutlineCounts
 	if bound {
-		if counts, ok, err := scopedOutlineCountsFor(reader, graph.NodeScope{
+		if prepared != nil {
+			aggregated = &prepared.counts
+		} else if counts, ok, err := scopedOutlineCountsFor(reader, graph.NodeScope{
 			WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow,
 		}); err != nil {
 			return nil, err
@@ -213,45 +224,39 @@ func (s *Server) buildRepoOutline(ctx context.Context, reader graph.Reader, opts
 	// Communities — top N by member count, filtered to communities
 	// with at least one member inside the session's workspace.
 	communitiesSection := map[string]any{"count": 0}
-	var comms *analysis.CommunityResult
-	generationCommunities := false
-	if aggregated != nil {
-		var err error
-		comms, generationCommunities, err = s.outlineGenerationCommunities(ctx, reader, graph.NodeScope{
-			WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow,
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	if !generationCommunities {
-		comms = s.getCommunities()
-	}
-	if comms != nil && (generationCommunities || len(comms.Communities) > 0) {
-		sorted := make([]analysis.Community, 0, len(comms.Communities))
-		if generationCommunities {
-			sorted = append(sorted, comms.Communities...)
-		} else if aggregated != nil {
-			sorted = outlineCommunitiesInScope(comms.Communities, loadCandidates, candidateScope)
-		} else {
-			for _, c := range comms.Communities {
-				if allowsAny(c.Members) {
-					sorted = append(sorted, c)
-				}
+	if prepared != nil && prepared.communities != nil {
+		communitiesSection = prepared.communities
+	} else {
+		var comms *analysis.CommunityResult
+		generationCommunities := false
+		if aggregated != nil {
+			var err error
+			comms, generationCommunities, err = s.outlineGenerationCommunities(ctx, reader, graph.NodeScope{
+				WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow,
+			})
+			if err != nil {
+				return nil, err
 			}
 		}
-		sort.Slice(sorted, func(i, j int) bool {
-			return sorted[i].Size > sorted[j].Size
-		})
-		top := sorted
-		if len(top) > topCommunitiesN {
-			top = top[:topCommunitiesN]
+		if !generationCommunities {
+			comms = s.getCommunities()
 		}
-		communitiesSection = map[string]any{
-			"count":      len(sorted),
-			"modularity": comms.Modularity,
-			"top":        topCommunitiesSummary(top),
+		if comms != nil && (generationCommunities || len(comms.Communities) > 0) {
+			sorted := make([]analysis.Community, 0, len(comms.Communities))
+			if generationCommunities {
+				sorted = append(sorted, comms.Communities...)
+			} else if aggregated != nil {
+				sorted = outlineCommunitiesInScope(comms.Communities, loadCandidates, candidateScope)
+			} else {
+				for _, c := range comms.Communities {
+					if allowsAny(c.Members) {
+						sorted = append(sorted, c)
+					}
+				}
+			}
+			communitiesSection = outlineCommunitySection(sorted, comms.Modularity)
 		}
+
 	}
 
 	// Hotspots — load-bearing symbols by fan-in/out/crossings. Use a low
@@ -294,7 +299,11 @@ func (s *Server) buildRepoOutline(ctx context.Context, reader graph.Reader, opts
 		for _, row := range aggregated.FileImports {
 			counts[row.FilePath] = row.Count
 		}
-		imported = rankImportedFiles(counts, topMostImportedN)
+		if prepared != nil {
+			imported = prepared.imports
+		} else {
+			imported = rankImportedFiles(counts, outlineMostImportedLimit)
+		}
 		if scopedNodes != nil {
 			mains, err := scopedNodes.OutlineNodesByName(scope, "main")
 			if err != nil {
@@ -315,7 +324,7 @@ func (s *Server) buildRepoOutline(ctx context.Context, reader graph.Reader, opts
 			entries = entryPointsForNodes(mains, candidateScope, topEntryPointsN)
 		}
 	} else {
-		imported = mostImportedFiles(reader, inScope, topMostImportedN)
+		imported = mostImportedFiles(reader, inScope, outlineMostImportedLimit)
 		entries = entryPoints(reader, inScope, topEntryPointsN)
 	}
 	if candidateErr != nil {
@@ -331,6 +340,17 @@ func (s *Server) buildRepoOutline(ctx context.Context, reader graph.Reader, opts
 		"most_imported_files": imported,
 		"entry_points":        entries,
 	}, nil
+}
+
+// outlineCommunitySection shares the exact legacy ranking/tie behavior with
+// explicit summary preparation; only the small final section is retained.
+func outlineCommunitySection(sorted []analysis.Community, modularity float64) map[string]any {
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Size > sorted[j].Size })
+	top := sorted
+	if len(top) > 5 {
+		top = top[:5]
+	}
+	return map[string]any{"count": len(sorted), "modularity": modularity, "top": topCommunitiesSummary(top)}
 }
 
 // topCommunitiesSummary shapes a subset of communities for the outline.
