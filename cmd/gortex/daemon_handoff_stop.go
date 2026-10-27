@@ -71,6 +71,9 @@ func (g *daemonHandoffPID) validate(requireSocket bool) error {
 	if requireSocket {
 		current := runningDaemonInfo()
 		if current.peerPID != pid || current.version != g.identity.version || current.protocol != g.identity.protocol || current.protocolKnown != g.identity.protocolKnown || current.instance != g.identity.instance || current.mismatch() != g.identity.mismatch() || !current.olderThan(binaryVersion()) {
+			if current.mismatch() {
+				return fmt.Errorf("daemon socket identity changed before signaling: %w", current.err)
+			}
 			return fmt.Errorf("daemon socket identity changed before signaling")
 		}
 		socket, err := os.Stat(daemon.SocketPath())

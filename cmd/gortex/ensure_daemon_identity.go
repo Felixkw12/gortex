@@ -101,18 +101,22 @@ func daemonHandoffError(previous daemonIdentity, stage string, err error) error 
 
 // Keep the existing proxy startup cutoff. Hold the spawn lock while waiting
 // so a supervisor's asynchronous restart cannot trigger another replacement.
-func waitForReplacementDaemon() (daemonIdentity, error) {
+func waitForReplacementDaemon() (daemonIdentity, daemonIdentity, error) {
 	deadline := time.Now().Add(proxyDialRetryWindow)
+	var observedMismatch daemonIdentity
 	for {
 		current := runningDaemonInfo()
+		if current.mismatch() {
+			observedMismatch = current
+		}
 		if current.err == nil && current.protocolKnown && current.protocol == daemon.ProtocolVersion && !current.olderThan(binaryVersion()) {
-			return current, nil
+			return current, observedMismatch, nil
 		}
 		if current.mismatch() && !current.olderThan(binaryVersion()) {
-			return current, daemonMismatchError(current)
+			return current, observedMismatch, daemonMismatchError(current)
 		}
 		if !time.Now().Before(deadline) {
-			return current, context.DeadlineExceeded
+			return current, observedMismatch, context.DeadlineExceeded
 		}
 		time.Sleep(proxyDialRetryInterval)
 	}

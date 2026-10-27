@@ -168,9 +168,9 @@ func ensureDaemonReadyWithError(autostart bool) (daemonDecision, daemonIdentity,
 	if isDaemonRunning() {
 		identity := runningDaemonInfo()
 		if autostart && identity.olderThan(binaryVersion()) {
-			decision, err := replaceStaleDaemon(identity)
-			if identity.mismatch() {
-				return decision, identity, err
+			decision, observedMismatch, err := replaceStaleDaemon(identity)
+			if observedMismatch.mismatch() {
+				return decision, observedMismatch, err
 			}
 			// Compatible release handoffs retain the existing policy: a
 			// failed stop can continue using the old compatible daemon, and
@@ -242,7 +242,11 @@ func ensureDaemonReadyWithError(autostart bool) (daemonDecision, daemonIdentity,
 // the lock, then re-check and find the new daemon current. Any failure to
 // stop leaves the old daemon serving — the proxy's skew warning still tells
 // the user to restart it.
-func replaceStaleDaemon(observed daemonIdentity) (daemonDecision, error) {
+func replaceStaleDaemon(observed daemonIdentity) (daemonDecision, daemonIdentity, error) {
+	var observedMismatch daemonIdentity
+	if observed.mismatch() {
+		observedMismatch = observed
+	}
 	lockPath := daemon.SpawnLockPath()
 	_ = os.MkdirAll(filepath.Dir(lockPath), 0o700)
 	lock := flock.New(lockPath)
@@ -254,63 +258,87 @@ func replaceStaleDaemon(observed daemonIdentity) (daemonDecision, error) {
 		if err == nil {
 			err = context.DeadlineExceeded
 		}
-		return daemonUnavailable, daemonHandoffError(observed, "wait for spawn lock", err)
+		return daemonUnavailable, observedMismatch, daemonHandoffError(observed, "wait for spawn lock", err)
 	}
 	defer func() { _ = lock.Unlock() }()
 
 	identity := runningDaemonInfo()
+	if identity.mismatch() {
+		observedMismatch = identity
+	}
 	if !isDaemonRunning() || !identity.olderThan(binaryVersion()) {
 		// A peer replaced it (or it went away) while we waited for the lock.
 		if identity.mismatch() {
-			return daemonReady, daemonMismatchError(identity)
+			return daemonReady, observedMismatch, daemonMismatchError(identity)
 		}
 		if isDaemonRunning() {
-			return daemonReady, nil
+			return daemonReady, observedMismatch, nil
 		}
-		return daemonUnavailable, daemonHandoffError(observed, "recheck live daemon", daemon.ErrDaemonUnavailable)
+		return daemonUnavailable, observedMismatch, daemonHandoffError(observed, "recheck live daemon", daemon.ErrDaemonUnavailable)
 	}
 	// A supervised daemon is bounced through its supervisor, as `daemon
 	// restart` does; a manual stop+start would orphan it from the unit.
 	if serviceActive() {
 		if err := serviceRestart(io.Discard); err != nil {
-			return daemonReady, daemonHandoffError(identity, "supervisor restart", err)
+			return daemonReady, observedMismatch, daemonHandoffError(identity, "supervisor restart", err)
 		}
-		current, err := waitForReplacementDaemon()
+		current, duringWait, err := waitForReplacementDaemon()
+		if duringWait.mismatch() {
+			observedMismatch = duringWait
+		}
 		if err != nil {
-			return daemonReady, daemonHandoffError(identity, "wait for supervised replacement", err)
+			failureIdentity := identity
+			if duringWait.mismatch() {
+				failureIdentity = duringWait
+			}
+			return daemonReady, observedMismatch, daemonHandoffError(failureIdentity, "wait for supervised replacement", err)
 		}
 		logDaemonHandoff(identity, current)
-		return daemonReady, nil
+		return daemonReady, observedMismatch, nil
 	}
 	if err := stopStaleDaemon(identity); err != nil {
-		return daemonReady, daemonHandoffError(identity, "stop old daemon", err)
+		if errors.Is(err, daemon.ErrProtocolVersionMismatch) {
+			observedMismatch = daemonIdentityFromMismatch(err)
+			return daemonReady, observedMismatch, daemonHandoffError(observedMismatch, "stop old daemon", err)
+		}
+		return daemonReady, observedMismatch, daemonHandoffError(identity, "stop old daemon", err)
 	}
 	// The store-lock wait may have allowed an independently started daemon
 	// to appear. Revalidate under the spawn lock before starting anything.
 	current := runningDaemonInfo()
+	if current.mismatch() {
+		observedMismatch = current
+	}
 	if current.err == nil {
 		if !current.olderThan(binaryVersion()) {
 			logDaemonHandoff(identity, current)
-			return daemonReady, nil
+			return daemonReady, observedMismatch, nil
 		}
-		return daemonReady, daemonHandoffError(identity, "old daemon still running", fmt.Errorf("shutdown did not retire the old daemon"))
+		return daemonReady, observedMismatch, daemonHandoffError(identity, "old daemon still running", fmt.Errorf("shutdown did not retire the old daemon"))
 	}
 	if !errors.Is(current.err, daemon.ErrDaemonUnavailable) {
 		if current.mismatch() {
-			return daemonReady, daemonMismatchError(current)
+			return daemonReady, observedMismatch, daemonMismatchError(current)
 		}
-		return daemonUnavailable, daemonHandoffError(identity, "recheck daemon after close", current.err)
+		return daemonUnavailable, observedMismatch, daemonHandoffError(identity, "recheck daemon after close", current.err)
 	}
 	if err := spawnDaemon(); err != nil {
 		stampSpawnFailure()
-		return daemonUnavailable, daemonHandoffError(identity, "start replacement", err)
+		return daemonUnavailable, observedMismatch, daemonHandoffError(identity, "start replacement", err)
 	}
-	current, err = waitForReplacementDaemon()
+	current, duringWait, err := waitForReplacementDaemon()
+	if duringWait.mismatch() {
+		observedMismatch = duringWait
+	}
 	if err != nil {
-		return daemonUnavailable, daemonHandoffError(identity, "wait for replacement", err)
+		failureIdentity := identity
+		if duringWait.mismatch() {
+			failureIdentity = duringWait
+		}
+		return daemonUnavailable, observedMismatch, daemonHandoffError(failureIdentity, "wait for replacement", err)
 	}
 	logDaemonHandoff(identity, current)
-	return daemonAutostarted, nil
+	return daemonAutostarted, observedMismatch, nil
 }
 
 func spawnFailedRecently() bool {

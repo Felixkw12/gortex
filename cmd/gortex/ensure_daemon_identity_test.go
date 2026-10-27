@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zzet/gortex/internal/daemon"
 )
@@ -74,5 +75,40 @@ func TestEnsureDaemonMismatchStopFailureRemainsTerminal(t *testing.T) {
 	_, observed, err := ensureDaemonReadyWithError(true)
 	if !errors.Is(err, daemon.ErrProtocolVersionMismatch) || !observed.mismatch() || f.spawns.Load() != 0 {
 		t.Fatalf("mismatch stop failure lost refusal: %+v, %v", observed, err)
+	}
+}
+
+func TestEnsureDaemonRetainsMismatchObservedWhileWaitingForReplacement(t *testing.T) {
+	installStaleDaemonFixture(t, "v0.64.10", "v0.64.12")
+	zero := 0
+	socket := serveMismatchAck(t, daemon.HandshakeAck{ErrorCode: daemon.ErrProtocolMismatch, ErrorMsg: "daemon expects protocol 0, client sent 1", DaemonVersion: "v0.64.10", DaemonProtocol: &zero})
+	_, wireErr := daemon.DialTo(socket, daemon.Handshake{Mode: daemon.ModeControl})
+	oldMismatch := daemonIdentityFromMismatch(wireErr)
+	if !oldMismatch.mismatch() {
+		t.Fatalf("wire mismatch = %v", wireErr)
+	}
+	stage := "old-compatible"
+	probedMismatch := false
+	runningDaemonInfo = func() daemonIdentity {
+		switch stage {
+		case "old-compatible":
+			return daemonIdentity{version: "v0.64.10", protocol: daemon.ProtocolVersion, protocolKnown: true}
+		case "absent":
+			return daemonIdentity{err: daemon.ErrDaemonUnavailable}
+		case "replacement-wait":
+			stage = "current"
+			probedMismatch = true
+			return oldMismatch
+		default:
+			return daemonIdentity{version: "v0.64.12", protocol: daemon.ProtocolVersion, protocolKnown: true}
+		}
+	}
+	isDaemonRunning = func() bool { return stage != "absent" }
+	stopStaleDaemon = func(daemonIdentity) error { stage = "absent"; return nil }
+	spawnDaemon = func() error { stage = "replacement-wait"; return nil }
+	withFastDialRetry(t, time.Second)
+	decision, observed, err := ensureDaemonReadyWithError(true)
+	if err != nil || decision != daemonAutostarted || !probedMismatch || !observed.mismatch() || !observed.protocolKnown || observed.protocol != 0 {
+		t.Fatalf("successful replacement lost transient refusal: decision=%v observed=%+v err=%v", decision, observed, err)
 	}
 }
