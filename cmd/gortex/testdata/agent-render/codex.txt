@@ -5,7 +5,7 @@ direct_only_tool_namespaces = ['mcp__gortex', 'gortex']
 
 [hooks]
 [[hooks.PostToolUse]]
-matcher = '^(Bash|apply_patch|(mcp__gortex__|gortex__)(explore|search|read|relations|trace|analyze))$'
+matcher = '^(Bash|apply_patch|(mcp__gortex__|gortex__)(explore|search|read|relations|trace|analyze|edit|edit_file|write_file|edit_symbol|batch_edit))$'
 
 [[hooks.PostToolUse.hooks]]
 command = 'gortex hook --agent=codex --mode=enrich'
@@ -794,7 +794,7 @@ direct_only_tool_namespaces = ['mcp__gortex', 'gortex']
 
 [hooks]
 [[hooks.PostToolUse]]
-matcher = '^(Bash|apply_patch|(mcp__gortex__|gortex__)(explore|search|read|relations|trace|analyze))$'
+matcher = '^(Bash|apply_patch|(mcp__gortex__|gortex__)(explore|search|read|relations|trace|analyze|edit|edit_file|write_file|edit_symbol|batch_edit))$'
 
 [[hooks.PostToolUse.hooks]]
 command = 'gortex hook --agent=codex --mode=enrich'
