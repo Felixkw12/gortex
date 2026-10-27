@@ -115,4 +115,12 @@ func TestEffectiveCgroupLimitsIncludeTighterAncestors(t *testing.T) {
 	if err := validateHostProfile(h); err == nil {
 		t.Fatal("tighter parent accepted as reference")
 	}
+	for dir, limit := range map[string]string{root: "max", filepath.Dir(child): "4294967296", child: "8589934592"} {
+		if err := os.WriteFile(filepath.Join(dir, "memory.swap.max"), []byte(limit), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if swap := effectiveCgroupFileLimit(child, root, "memory.swap.max"); swap.Value == nil || *swap.Value != 4*gib {
+		t.Fatalf("tighter ancestor swap cap ignored: %+v", swap)
+	}
 }

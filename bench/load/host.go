@@ -18,6 +18,7 @@ func inspectHost(profile, scratch string) (Host, string, error) {
 		return Host{}, "", err
 	}
 	h := Host{Machine: machine, OS: runtime.GOOS, Arch: runtime.GOARCH, Profile: profile, Kernel: "unavailable", Limits: map[string]Metric{"logical_cpus": measured(float64(runtime.NumCPU()), "cores"), "disk_capacity_bytes": volumeCapacity(scratch)}, Availability: make(map[string]string)}
+	h.Limits["page_size_bytes"] = measured(float64(os.Getpagesize()), "bytes")
 	if data, err := exec.Command("uname", "-r").Output(); err == nil {
 		h.Kernel = strings.TrimSpace(string(data))
 	}
@@ -41,7 +42,8 @@ func inspectHost(profile, scratch string) (Host, string, error) {
 			h.Limits["configured_memory_max"] = readLimit(filepath.Join(group, "memory.max"), "bytes")
 			h.Limits["cpu_quota"], h.Limits["memory_max"] = effectiveCgroupLimits(group, "/sys/fs/cgroup")
 			h.Availability["effective_limits"] = "minimum of all visible ancestors through the cgroup namespace mount root; hidden host ancestors are not observable"
-			h.Limits["swap_max"] = readLimit(filepath.Join(group, "memory.swap.max"), "bytes")
+			h.Limits["configured_swap_max"] = readLimit(filepath.Join(group, "memory.swap.max"), "bytes")
+			h.Limits["swap_max"] = effectiveCgroupFileLimit(group, "/sys/fs/cgroup", "memory.swap.max")
 		}
 	}
 	if profile == "native" {
@@ -158,6 +160,35 @@ func effectiveCgroupLimits(current, root string) (Metric, Metric) {
 		}
 	}
 	return cpu, memory
+}
+
+func effectiveCgroupFileLimit(current, root, name string) Metric {
+	value := unavailable("bytes", "all visible "+name+" limits are unbounded")
+	if !inside(root, current) {
+		return unavailable("bytes", "cgroup outside visible mount")
+	}
+	for path := filepath.Clean(current); ; path = filepath.Dir(path) {
+		data, err := os.ReadFile(filepath.Join(path, name))
+		if os.IsNotExist(err) && path == filepath.Clean(root) {
+			break
+		}
+		if err != nil {
+			return unavailable("bytes", "ancestor limit unavailable: "+err.Error())
+		}
+		if strings.TrimSpace(string(data)) != "max" {
+			next := readLimit(filepath.Join(path, name), "bytes")
+			if next.Value == nil {
+				return next
+			}
+			if value.Value == nil || *next.Value < *value.Value {
+				value = next
+			}
+		}
+		if path == filepath.Clean(root) {
+			break
+		}
+	}
+	return value
 }
 
 func cgroupMetrics(root string, pageSize int) map[string]Metric {
