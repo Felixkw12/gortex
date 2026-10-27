@@ -796,7 +796,7 @@ func openWithObserver(path string, current int, migrations []schemaMigration, al
 	installSQLiteSleepGauge()
 	installWALCopyPause()
 	writerDSN := sqliteWriterDSN(path)
-	db, err := sql.Open("sqlite", writerDSN)
+	db, err := openSQLiteStoreDB(writerDSN)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite open: %w", err)
 	}
@@ -851,7 +851,7 @@ func openWithObserver(path string, current int, migrations []schemaMigration, al
 		if err := removeStoreFiles(path); err != nil {
 			return nil, fmt.Errorf("sqlite rebuild: %w", err)
 		}
-		db, err = sql.Open("sqlite", writerDSN)
+		db, err = openSQLiteStoreDB(writerDSN)
 		if err != nil {
 			return nil, fmt.Errorf("sqlite reopen for rebuild: %w", err)
 		}
@@ -1328,7 +1328,7 @@ func (s *Store) runCheckpointLoop(interval time.Duration) {
 				return false, true
 			}
 			if checkpointDB == nil {
-				db, err := sql.Open("sqlite", sqliteCheckpointDSN(s.dbPath))
+				db, err := openSQLiteStoreDB(sqliteCheckpointDSN(s.dbPath))
 				if err != nil {
 					if ctx.Err() == nil {
 						log.Printf("store_sqlite: wal checkpoint deferred mode=PASSIVE reason=open error=%q", err)
