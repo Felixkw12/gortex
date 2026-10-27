@@ -110,6 +110,7 @@ func issue767WorktreeReadiness(t *testing.T, binary string, crossDrive bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.write(filepath.Join(f.root, "after-restart-before.go"), string(beforeRestartEdit))
 	secondMatch, secondReplacement := replacement, "func Issue767RestartedMarker()"
 	if strings.Count(string(beforeRestartEdit), secondMatch) != 1 {
 		t.Fatal("after-restart fixture must contain exactly one second edit target")
@@ -119,6 +120,7 @@ func issue767WorktreeReadiness(t *testing.T, binary string, crossDrive bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.write(filepath.Join(f.root, "after-restart-preview.go"), string(afterRestartPreview))
 	if string(afterRestartPreview) != string(beforeRestartEdit) {
 		t.Fatal("after-restart edit dry run modified the working copy")
 	}
@@ -127,6 +129,7 @@ func issue767WorktreeReadiness(t *testing.T, binary string, crossDrive bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.write(filepath.Join(f.root, "after-restart-edited.go"), string(afterRestartEdit))
 	if want := strings.Replace(string(beforeRestartEdit), secondMatch, secondReplacement, 1); string(afterRestartEdit) != want {
 		t.Fatalf("after-restart edit wrote unexpected source: %q", afterRestartEdit)
 	}
@@ -156,6 +159,9 @@ func issue767CrossDriveWorktree(t *testing.T, f *issue767Fixture) string {
 			continue
 		}
 		root := volume + string(filepath.Separator)
+		if !issue767FixedDrive(root) {
+			continue // do not allocate fixtures on removable or mapped network drives
+		}
 		info, err := os.Stat(root)
 		if err != nil || !info.IsDir() {
 			continue
@@ -178,7 +184,7 @@ func issue767CrossDriveWorktree(t *testing.T, f *issue767Fixture) string {
 		return filepath.Join(owned, "linked")
 	}
 	if len(unavailable) == 0 {
-		unavailable = append(unavailable, "no other accessible local drive root exists")
+		unavailable = append(unavailable, "no other accessible fixed local drive root exists")
 	}
 	t.Skipf("cross-drive variant unavailable: primary volume=%q; %s", primaryVolume, strings.Join(unavailable, "; "))
 	return ""
