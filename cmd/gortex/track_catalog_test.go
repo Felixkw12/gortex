@@ -183,7 +183,7 @@ func TestRunTrackCatalogUsesDaemonWorktreeName(t *testing.T) {
 				trackName, trackWait, trackAsWorktree = oldName, oldWait, oldAs
 				trackEnsureDaemonReadyFn = oldEnsure
 			})
-			trackName, trackWait, trackAsWorktree = "", false, scenario == "forced"
+			trackName, trackWait, trackAsWorktree = "", false, true // Test naming after explicit independent-graph opt-in.
 			trackEnsureDaemonReadyFn = func(bool) daemonDecision { return daemonReady }
 			cmd := &cobra.Command{}
 			cmd.SetErr(&bytes.Buffer{})
