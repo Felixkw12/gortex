@@ -115,7 +115,19 @@ func lifecycleOutputAuthority(l *CheckoutLifecycle) *OutputGenerationAuthority {
 // registered yet (a daemon still activating it, or a rehome in flight) is
 // waited for, bounded (awaitMutationCoordinator), and refused only if none
 // appears.
-func (l *CheckoutLifecycle) BeginCheckoutMutation(ctx context.Context, checkoutID, expectedRoot string, expectedRouteEpoch int64) (_ *CheckoutMutation, resultErr error) {
+func (l *CheckoutLifecycle) BeginCheckoutMutation(ctx context.Context, checkoutID, expectedRoot string, expectedRouteEpoch int64) (*CheckoutMutation, error) {
+	return l.beginCheckoutMutation(ctx, checkoutID, expectedRoot, expectedRouteEpoch, "", nil)
+}
+
+// BeginCheckoutMutationAtView preserves ordinary admission and additionally
+// carries a caller's already-materialized exact route/incarnation. Only refusal
+// policy uses this proof when admission cannot reach its own route check; it
+// does not replace any source admission/identity/snapshot guard.
+func (l *CheckoutLifecycle) BeginCheckoutMutationAtView(ctx context.Context, checkoutID, expectedRoot, incarnation string, route store_sqlite.CheckoutRoute) (*CheckoutMutation, error) {
+	return l.beginCheckoutMutation(ctx, checkoutID, expectedRoot, route.RouteEpoch, incarnation, &route)
+}
+
+func (l *CheckoutLifecycle) beginCheckoutMutation(ctx context.Context, checkoutID, expectedRoot string, expectedRouteEpoch int64, incarnation string, selected *store_sqlite.CheckoutRoute) (_ *CheckoutMutation, resultErr error) {
 	if l == nil || l.catalog == nil || checkoutID == "" || expectedRoot == "" || expectedRouteEpoch <= 0 {
 		return nil, fmt.Errorf("%w: exact checkout identity and route epoch are required", ErrCheckoutMutationStale)
 	}
@@ -130,7 +142,14 @@ func (l *CheckoutLifecycle) BeginCheckoutMutation(ctx context.Context, checkoutI
 		return nil, fmt.Errorf("%w: checkout root changed", ErrCheckoutMutationStale)
 	}
 	witness := l.mutationRefusalWitness(checkout, expectedRouteEpoch)
-	defer func() { resultErr = l.captureMutationRefusalError(resultErr, witness) }()
+	defer func() {
+		if selected != nil && selected.CheckoutID == checkoutID && checkout.Incarnation == incarnation {
+			// Deeper admission evidence wins over selection evidence. Never
+			// fetch a replacement row after the failure to fill this gap.
+			resultErr = withMutationRefusalRoute(resultErr, *selected)
+		}
+		resultErr = l.captureMutationRefusalError(resultErr, witness)
+	}()
 	rootInfo, err := checkoutRootFileInfo(checkout.RootPath)
 	if err != nil || !rootInfo.IsDir() {
 		return nil, fmt.Errorf("%w: checkout root is unavailable", ErrCheckoutMutationStale)

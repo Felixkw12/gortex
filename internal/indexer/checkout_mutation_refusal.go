@@ -140,18 +140,18 @@ func (l *CheckoutLifecycle) currentMutationRefusalRoute(ctx context.Context, che
 // Route publication invalidates the mark by identity, without adding another
 // callback to the coordinator's publication critical path. A later coverage
 // lookup retires the obsolete mark; it can never use it for the newer route.
-func (l *CheckoutLifecycle) RecordCheckoutMutationRefusal(ctx context.Context, err error) {
+func (l *CheckoutLifecycle) RecordCheckoutMutationRefusal(ctx context.Context, err error) bool {
 	var refused *checkoutMutationRefusalError
 	if l == nil || !errors.Is(err, ErrCheckoutMutationStale) || errors.Is(err, ErrCheckoutMutationBusy) || errors.Is(err, ErrCheckoutMutationPending) || !errors.As(err, &refused) {
-		return
+		return false
 	}
 	w := refused.witness
 	if w.slot == nil {
-		return
+		return false
 	}
 	checkout, route, known := l.currentMutationRefusalRoute(ctx, w.slot.checkoutID, w.slot.root)
 	if !known || checkout.Incarnation != w.slot.incarnation || route != w.route {
-		return
+		return false
 	}
 	reason := "checkout view is stale"
 	switch {
@@ -164,10 +164,10 @@ func (l *CheckoutLifecycle) RecordCheckoutMutationRefusal(ctx context.Context, e
 	l.mutationRefusalMu.Lock()
 	defer l.mutationRefusalMu.Unlock()
 	if l.mutationRefusals[w.slot.checkoutID] != w.slot || w.slot.revision != w.revision {
-		return
+		return false
 	}
 	if w.route.CheckoutID != w.slot.checkoutID || len(w.route.GraphID) > 256 {
-		return
+		return false
 	}
 	ownedRoute := w.route
 	ownedRoute.CheckoutID = strings.Clone(ownedRoute.CheckoutID)
@@ -175,6 +175,7 @@ func (l *CheckoutLifecycle) RecordCheckoutMutationRefusal(ctx context.Context, e
 	w.slot.revision++
 	l.mutationRefusalEpoch++
 	w.slot.mark = &checkoutMutationRefusalMark{route: ownedRoute, at: at, reason: reason}
+	return true
 }
 
 // CheckoutMutationState distinguishes an authoritative healthy route from an

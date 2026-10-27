@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/graphview"
 )
 
 // Drive real checked admission against changed bytes; merely constructing a
@@ -281,5 +282,59 @@ func TestCheckoutMutationProbeRevalidatesChangesDuringResolution(t *testing.T) {
 	l.RecordCheckoutMutationRefusal(t.Context(), old)
 	if state, _ := l.CheckoutMutationStateForProbe(t.Context(), f.checkoutID, f.worktree, beforeReplacement, true); state != "read_only" {
 		t.Fatalf("old resolution cleared replacement refusal: %s", state)
+	}
+}
+
+func TestCheckoutMutationSelectedRouteCoversCoordinatorClosingWithoutReread(t *testing.T) {
+	f, _, l := newCheckoutMutationFixture(t)
+	materializer := &graphview.Materializer{Store: f.store, Catalog: f.catalog, Leases: f.leases}
+	view, err := materializer.MaterializeCheckout(t.Context(), f.checkoutID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer view.Close()
+	route, known := view.CheckoutMutationRoute()
+	if !known || route != f.route() {
+		t.Fatal("materializer did not retain its actual pinned route")
+	}
+	checkout, found, err := f.catalog.GetCheckout(t.Context(), f.checkoutID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	l.coordMu.Lock()
+	l.coordinatorClosing = true
+	l.coordMu.Unlock()
+	// Compatibility API has no selected proof: preserve its original refusal
+	// semantics but do not invent a later route identity for hook relaxation.
+	lease, unproven := l.BeginCheckoutMutation(t.Context(), f.checkoutID, f.worktree, route.RouteEpoch)
+	if lease != nil {
+		lease.Close()
+	}
+	if !errors.Is(unproven, ErrCheckoutMutationStale) || l.RecordCheckoutMutationRefusal(t.Context(), unproven) {
+		t.Fatal("ordinary pre-route failure acquired an invented identity")
+	}
+	lease, refusal := l.BeginCheckoutMutationAtView(t.Context(), f.checkoutID, f.worktree, checkout.Incarnation, route)
+	if lease != nil {
+		lease.Close()
+	}
+	if !errors.Is(refusal, ErrCheckoutMutationStale) || !l.RecordCheckoutMutationRefusal(t.Context(), refusal) {
+		t.Fatalf("selected exact route did not cover coordinator closing: %v", refusal)
+	}
+	if state, _ := l.CheckoutMutationState(t.Context(), f.checkoutID, f.worktree); state != "read_only" {
+		t.Fatalf("modern coverage would override legacy fallback with %q", state)
+	}
+	l.coordMu.Lock()
+	l.coordinatorClosing = false
+	l.coordMu.Unlock()
+	lease, err = l.BeginCheckoutMutation(t.Context(), f.checkoutID, f.worktree, route.RouteEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Close()
+	if l.RecordCheckoutMutationRefusal(t.Context(), refusal) {
+		t.Fatal("old selected-route refusal rearmed after success")
+	}
+	if state, _ := l.CheckoutMutationState(t.Context(), f.checkoutID, f.worktree); state != "ready" {
+		t.Fatal("success did not restore authoritative ready")
 	}
 }

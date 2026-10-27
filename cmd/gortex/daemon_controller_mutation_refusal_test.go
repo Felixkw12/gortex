@@ -92,6 +92,9 @@ func TestFileCoverageObservedStaleRefusalAndSuccessfulAdmission(t *testing.T) {
 	wtGit(t, primary, "add", ".")
 	wtGit(t, primary, "commit", "-q", "-m", "initial owned fixture")
 	wtGit(t, primary, "worktree", "add", "-b", "fixture-edit", worktree)
+	gate := indexer.NewViewBuildGate()
+	gate.Open()
+	c.lifecycle.SetBuildGate(gate)
 	registered, err := c.lifecycle.Register(ctx, config.RepoEntry{Path: primary, Name: "fixture"}, indexer.TrackSourceCLI)
 	require.NoError(t, err)
 	require.NoError(t, registered.CatalogErr)
@@ -99,9 +102,6 @@ func TestFileCoverageObservedStaleRefusalAndSuccessfulAdmission(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, binding.Matched)
 	require.NotEmpty(t, binding.CheckoutID)
-	gate := indexer.NewViewBuildGate()
-	gate.Open()
-	c.lifecycle.SetBuildGate(gate)
 	require.True(t, c.lifecycle.ActivateCheckout(binding.CheckoutID, "coverage refusal test"))
 	var route store_sqlite.CheckoutRoute
 	require.Eventually(t, func() bool {
