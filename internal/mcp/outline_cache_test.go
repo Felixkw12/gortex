@@ -110,7 +110,7 @@ func TestOutlineCacheReformatsAndInvalidatesRealReplies(t *testing.T) {
 	require.NoError(t, err)
 	filtered := resultJSON(t, result)
 	require.Contains(t, filtered, "summary")
-	require.NotContains(t, filtered, "hotspots")
+	require.Empty(t, filtered["hotspots"].([]any)[0], "fields selects list-record fields while preserving the outline sections")
 	require.Equal(t, initial, outlineJSON(t, s, ctx, store), "field selection must not mutate a cached payload")
 	n := store.GetNode("a-main")
 	n.Name = "noLongerMain"
