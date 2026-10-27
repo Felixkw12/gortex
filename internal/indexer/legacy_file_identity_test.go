@@ -252,3 +252,90 @@ func TestLegacyIdentityRepairRebindsForeignCaller(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyIdentityRepairRespectsDataflowFrontier(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite", "delta"} {
+		for _, edit := range []string{"unchanged", "signature", "visibility", "field"} {
+			t.Run(backend+"/"+edit, func(t *testing.T) {
+				var store graph.Store = graph.New()
+				if backend == "sqlite" {
+					disk, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.db"))
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, disk.Close()) })
+					store = disk
+				}
+				path, legacy, callerPath := "repo/sub/sample.py", `repo/sub\sample.py`, "repo/caller.py"
+				makeNodes := func(file string) []*graph.Node {
+					return []*graph.Node{
+						{ID: file, Kind: graph.KindFile, Name: "sample.py", FilePath: file},
+						{ID: file + "::Helper", Kind: graph.KindFunction, Name: "Helper", FilePath: file, Meta: map[string]any{"signature": "Helper(x: int)", "visibility": "public"}},
+						{ID: file + "::Helper#param:x", Kind: graph.KindParam, Name: "x", FilePath: file, Meta: map[string]any{"position": 0, "type": "int"}},
+						{ID: file + "::Thing.value", Kind: graph.KindField, Name: "Thing.value", FilePath: file, Meta: map[string]any{"signature": "value: int", "visibility": "public"}},
+					}
+				}
+				prior, fresh := makeNodes(legacy), makeNodes(path)
+				ownerChanged := edit == "signature" || edit == "visibility"
+				switch edit {
+				case "signature":
+					fresh[1].Meta["signature"] = "Helper(y: str)"
+					fresh[2].ID, fresh[2].Name = path+"::Helper#param:y", "y"
+					fresh[2].Meta["type"] = "str"
+				case "visibility":
+					fresh[1].Meta["visibility"] = "private"
+				case "field":
+					fresh[3].Meta["signature"] = "value: str"
+				}
+				caller, result := callerPath+"::caller", callerPath+"::result"
+				edges := []*graph.Edge{
+					{From: prior[2].ID, To: prior[1].ID, Kind: graph.EdgeParamOf, FilePath: legacy},
+					{From: caller, To: prior[1].ID, Kind: graph.EdgeCalls, FilePath: callerPath, Line: 3},
+					{From: caller, To: prior[2].ID, Kind: graph.EdgeArgOf, FilePath: callerPath, Line: 3, Meta: map[string]any{"arg_position": 0}},
+					{From: caller, To: prior[2].ID, Kind: graph.EdgeCaptures, FilePath: callerPath, Line: 3},
+					{From: caller, To: prior[3].ID, Kind: graph.EdgeAccessesField, FilePath: callerPath, Line: 4},
+					{From: prior[1].ID, To: result, Kind: graph.EdgeValueFlow, FilePath: callerPath, Line: 3},
+				}
+				store.AddBatch(append(append([]*graph.Node{}, prior...),
+					&graph.Node{ID: caller, Kind: graph.KindFunction, Name: "caller", FilePath: callerPath},
+					&graph.Node{ID: result, Kind: graph.KindVariable, Name: "result", FilePath: callerPath}), edges)
+				if backend == "delta" {
+					store = graph.NewDeltaWriter(store, nil)
+				}
+				var ids []string
+				for _, node := range prior {
+					ids = append(ids, node.ID)
+				}
+				stage := &incrementalBatchStage{graphPath: path, legacyPath: legacy, legacyIDs: ids, priorNodes: prior, result: &parser.ExtractionResult{
+					Nodes: fresh, Edges: []*graph.Edge{{From: fresh[2].ID, To: fresh[1].ID, Kind: graph.EdgeParamOf, FilePath: path}},
+				}}
+				stages := []*incrementalBatchStage{stage}
+				carried, _ := restubIncomingRefsFromView(store, stages, loadIncrementalPriorView(store, stages))
+				store.(graph.FileIdentityBatchEvicter).EvictFilesWithNodeIDs([]string{path}, ids)
+				store.AddBatch(fresh, append(stage.result.Edges, carried...))
+				find := func(from, to string, kind graph.EdgeKind) bool {
+					for _, edge := range store.GetOutEdges(from) {
+						if edge.To == to && edge.Kind == kind {
+							return true
+						}
+					}
+					return false
+				}
+				if ownerChanged {
+					require.True(t, find(caller, graph.UnresolvedMarker+"Helper", graph.EdgeCalls), "changed declarations must still restub callers")
+					require.True(t, find(caller, path+"::Helper", graph.EdgeArgOf), "changed parameter goes back to its canonical owner for rematerialization")
+					require.False(t, find(caller, path+"::Helper#param:x", graph.EdgeCaptures), "changed parameters must not retain stale captures")
+					require.True(t, find("repo/"+graph.UnresolvedMarker+"Helper", result, graph.EdgeValueFlow), "outgoing caller-owned dataflow must follow the parked call placeholder")
+					require.False(t, find(path+"::Helper", result, graph.EdgeValueFlow))
+				} else {
+					require.True(t, find(caller, path+"::Helper", graph.EdgeCalls))
+					require.True(t, find(caller, path+"::Helper#param:x", graph.EdgeArgOf))
+					require.True(t, find(caller, path+"::Helper#param:x", graph.EdgeCaptures))
+					require.True(t, find(path+"::Helper", result, graph.EdgeValueFlow), "unchanged outgoing caller-owned dataflow must be rekeyed to the canonical definition")
+				}
+				require.Equal(t, edit != "field", find(caller, path+"::Thing.value", graph.EdgeAccessesField), "field contract checks must still control carry")
+				for _, edge := range store.AllEdges() {
+					require.False(t, strings.HasPrefix(edge.From, legacy) || strings.HasPrefix(edge.To, legacy), "no carried row may retain a retired ordinary endpoint")
+				}
+			})
+		}
+	}
+}

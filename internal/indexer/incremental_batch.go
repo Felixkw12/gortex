@@ -1379,27 +1379,14 @@ func restubIncomingRefsFromView(
 	carriedSeen := make(map[*graph.Edge]struct{})
 	for _, stage := range stages {
 		frontier := restubFrontierForStage(stage, view)
-		replacements := legacyReplacements(stage)
+		// Separator repair changes identity, not the declaration contract.
+		// The normal shape/visibility/parameter gates still decide every carry.
+		if !frontier.conservative {
+			for legacyID := range legacyReplacements(stage) {
+				frontier.survivingIDs[legacyID] = struct{}{}
+			}
+		}
 		for _, node := range stage.priorNodes {
-			if node == nil {
-				continue
-			}
-			if replacement := replacements[node.ID]; replacement != "" {
-				for _, edge := range view.inByNode[node.ID] {
-					if edge == nil || graph.IsResolvableRefEdge(edge.Kind) {
-						continue
-					}
-					if _, sourceEvicted := evicted[edge.From]; sourceEvicted {
-						continue
-					}
-					moved := *edge
-					moved.To = replacement
-					carried = append(carried, &moved)
-				}
-				if node.Kind == graph.KindFile || node.Kind == graph.KindParam {
-					continue
-				}
-			}
 			if node != nil && node.Kind == graph.KindFile {
 				// Another file's import of this one is recorded in the
 				// importer and names this file node, whose identity (the
@@ -1550,7 +1537,7 @@ func restubIncomingRefsFromView(
 	if len(reindexes) > 0 {
 		g.ReindexEdges(reindexes)
 	}
-	return carried, npmConsumers
+	return canonicalizeLegacyCarried(stages, evicted, carried), npmConsumers
 }
 
 // dataflowSourceSite is a reference's site: the file that records it and its

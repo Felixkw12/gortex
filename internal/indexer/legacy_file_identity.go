@@ -123,8 +123,8 @@ func (idx *Indexer) evictFileIdentities(paths, legacyIDs, legacyPaths []string) 
 	idx.deleteEnrichmentByNodeIDs(legacyIDs)
 }
 
-// legacyReplacements maps an identity-only rename for incoming imports and
-// caller-owned dataflow. Calls still take the normal declaration restub path.
+// legacyReplacements recognizes identity-equivalent declarations only. The
+// normal restub frontier still checks their shapes, visibility and parameters.
 func legacyReplacements(stage *incrementalBatchStage) map[string]string {
 	if stage.legacyPath == "" {
 		return nil
@@ -153,4 +153,53 @@ func extractionNodes(result *parser.ExtractionResult) []*graph.Node {
 		return nil
 	}
 	return result.Nodes
+}
+
+// canonicalizeLegacyCarried runs after the existing frontier rules selected
+// safe rows. In particular, a changed parameter first moves back to its owner,
+// and changed declarations' outgoing dataflow first moves to the call stub.
+// Rewrite only endpoints actually evicted as ordinary identities, never nodes
+// that merely share the legacy FilePath scalar (licenses, teams, modules).
+func canonicalizeLegacyCarried(stages []*incrementalBatchStage, evicted map[string]struct{}, carried []*graph.Edge) []*graph.Edge {
+	var replacements map[string]string
+	for _, stage := range stages {
+		if stage.legacyPath == "" {
+			continue
+		}
+		if replacements == nil {
+			replacements = make(map[string]string)
+		}
+		for _, node := range stage.priorNodes {
+			if node == nil {
+				continue
+			}
+			if _, removed := evicted[node.ID]; !removed {
+				continue
+			}
+			if node.ID == stage.legacyPath || strings.HasPrefix(node.ID, stage.legacyPath+"::") {
+				replacements[node.ID] = stage.graphPath + strings.TrimPrefix(node.ID, stage.legacyPath)
+			}
+		}
+	}
+	if len(replacements) == 0 {
+		return carried
+	}
+	for i, edge := range carried {
+		if edge == nil {
+			continue
+		}
+		from, to := replacements[edge.From], replacements[edge.To]
+		if from == "" && to == "" {
+			continue
+		}
+		moved := *edge
+		if from != "" {
+			moved.From = from
+		}
+		if to != "" {
+			moved.To = to
+		}
+		carried[i] = &moved
+	}
+	return carried
 }
