@@ -62,7 +62,7 @@ func TestOutlineRankingReusesRevisionProofWithoutCorpusCounts(t *testing.T) {
 	s, _ := newAnalysisWiringServer(t, store)
 	s.graph = store
 	s.RunAnalysis()
-	counter := &countingAnalysisStore{Store: s.graph.(graph.Store)}
+	counter := &countingAnalysisStore{Store: s.graph}
 	s.graph = counter
 	// The backend still supplies the same complete revision clock, so the
 	// retained rank needs neither NodeCount nor EdgeCount to establish liveness.

@@ -30,7 +30,7 @@ func (r *contractCoreEdges) NodesByKindInRepos(kind graph.NodeKind, prefixes []s
 		if prefixes != nil && len(prefixes) == 0 {
 			return
 		}
-		for n := range r.Reader.NodesByKind(kind) {
+		for n := range r.NodesByKind(kind) {
 			if r.ctx != nil && r.ctx.Err() != nil {
 				return
 			}
@@ -130,7 +130,7 @@ func (r *contractCoreEdges) IfaceImplementsRowsInRepos(prefixes []string) []grap
 		for _, edge := range batch {
 			ids = append(ids, edge.From, edge.To)
 		}
-		nodes := r.Reader.GetNodesByIDs(ids)
+		nodes := r.GetNodesByIDs(ids)
 		for _, edge := range batch {
 			typ, iface := nodes[edge.From], nodes[edge.To]
 			if prefixes != nil && (typ == nil || !deadCodePrefixAllowed(typ.RepoPrefix, prefixes)) {

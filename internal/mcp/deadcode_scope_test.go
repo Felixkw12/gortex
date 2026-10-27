@@ -22,7 +22,7 @@ func (r *deadCodeLookupCountingReader) GetNode(id string) *graph.Node {
 }
 func (r *deadCodeLookupCountingReader) BindReadContext(ctx context.Context) graph.Reader {
 	return &deadCodeLookupCountingReader{
-		outlineCountingReader: &outlineCountingReader{Store: r.Store.WithReadContext(ctx), source: r.counters()},
+		outlineCountingReader: &outlineCountingReader{Store: r.WithReadContext(ctx), source: r.counters()},
 		scalarLookups:         r.scalarLookups,
 	}
 }
