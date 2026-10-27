@@ -369,8 +369,18 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	defer retirementWorker.Stop()
 	// Assigned before Listen/Serve can admit a control shutdown.
 	var cancelJanitor, stopJanitor func()
-	stopBackground := func() {
+	var joinStartupOnce sync.Once
+	joinStartupReporter := func() {
+		joinStartupOnce.Do(func() {
+			started := time.Now()
+			logger.Info("daemon: shutdown phase start", zap.String("phase", "startup_runtime_writer"))
+			startupReporter.Stop()
+			logger.Info("daemon: shutdown phase complete", zap.String("phase", "startup_runtime_writer"), zap.Duration("elapsed", time.Since(started)))
+		})
+	}
+	cancelBackground := func() {
 		// Revoke every independent producer before the first ownership join.
+		startupReporter.Cancel()
 		warmupTask.cancel()
 		contractAnalysis.Cancel()
 		state.shared.BeginSemanticClose()
@@ -380,6 +390,10 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		if cancelJanitor != nil {
 			cancelJanitor()
 		}
+	}
+	stopBackground := func() {
+		cancelBackground()
+		joinStartupReporter()
 		// Revoke startup before any join. The completion boundary is also
 		// the watcher handoff barrier: startup cannot attach/publish another
 		// watcher after StopWatcher has finished.
@@ -392,6 +406,9 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		}
 		retirementWorker.Stop()
 	}
+	srv.CancelShutdownOwners = cancelBackground
+	srv.JoinRuntimeWriter = joinStartupReporter
+	srv.RuntimeStateFile = daemon.RuntimeStatePath()
 	runTeardown := installDaemonTeardown(controller, stopBackground, func() error {
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancelShutdown()
@@ -624,6 +641,11 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		startupReporter.Fail(err)
 		return err
 	}
+	defer func() {
+		if err := srv.Shutdown(); err != nil {
+			logger.Warn("daemon: runtime teardown failed", zap.Error(err))
+		}
+	}()
 	// The socket remains the authoritative readiness signal. The runtime
 	// record now transitions from pre-socket progress to serving only after
 	// Listen succeeds, and keeps the resolved backend path for out-of-band

@@ -166,15 +166,21 @@ func buildDaemonState(logger *zap.Logger, observers ...store_sqlite.MigrationObs
 const daemonStartupHeartbeatInterval = 2 * time.Second
 
 type daemonStartupReporter struct {
-	mu       sync.Mutex
-	state    daemon.RuntimeState
-	logger   *zap.Logger
-	stop     chan struct{}
-	done     chan struct{}
-	stopOnce sync.Once
+	mu         sync.Mutex
+	state      daemon.RuntimeState
+	logger     *zap.Logger
+	stop       chan struct{}
+	done       chan struct{}
+	stopOnce   sync.Once
+	closing    atomic.Bool
+	writeState func(daemon.RuntimeState) error
 }
 
 func newDaemonStartupReporter(logger *zap.Logger) *daemonStartupReporter {
+	return newDaemonStartupReporterWithWriter(logger, daemon.WriteRuntimeState)
+}
+
+func newDaemonStartupReporterWithWriter(logger *zap.Logger, write func(daemon.RuntimeState) error) *daemonStartupReporter {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -184,9 +190,10 @@ func newDaemonStartupReporter(logger *zap.Logger) *daemonStartupReporter {
 			StartupPhase:     daemon.StartupOpeningStore,
 			StartupStartedAt: now,
 		},
-		logger: logger,
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
+		logger:     logger,
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+		writeState: write,
 	}
 	r.publishLocked()
 	go r.heartbeat()
@@ -259,13 +266,27 @@ func (r *daemonStartupReporter) Serving(backendPath string) {
 	r.publishLocked()
 }
 
-func (r *daemonStartupReporter) Stop() {
+// Cancel closes publication admission without acquiring the publication mutex
+// or waiting for a filesystem write already in progress.
+func (r *daemonStartupReporter) Cancel() {
+	r.closing.Store(true)
 	r.stopOnce.Do(func() { close(r.stop) })
+}
+
+func (r *daemonStartupReporter) Stop() {
+	r.Cancel()
 	<-r.done
+	// Serving/Fail/migration publication may have been admitted independently
+	// of the heartbeat. Retain its actual completion before runtime removal.
+	r.mu.Lock()
+	r.mu.Unlock()
 }
 
 func (r *daemonStartupReporter) publishLocked() {
-	if err := daemon.WriteRuntimeState(r.state); err != nil && r.logger != nil {
+	if r.closing.Load() {
+		return
+	}
+	if err := r.writeState(r.state); err != nil && r.logger != nil {
 		r.logger.Warn("daemon: could not record startup state", zap.Error(err))
 	}
 }

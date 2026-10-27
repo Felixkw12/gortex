@@ -70,6 +70,17 @@ type Server struct {
 	HTTPHandler http.Handler
 	HTTPAddr    string
 
+	// Configure before Listen. CancelShutdownOwners must be nonjoining;
+	// JoinRuntimeWriter retains actual startup-state publication completion.
+	// RuntimeStateFile is explicit because control-only library servers do
+	// not own the process-global daemon state file.
+	CancelShutdownOwners func()
+	JoinRuntimeWriter    func()
+	RuntimeStateFile     string
+	// OnShutdownComplete observes the actual cached result outside sync.Once.
+	// It runs once, after owned descriptors/files have physically completed.
+	OnShutdownComplete func(error)
+
 	sessions     *SessionRegistry
 	listener     net.Listener
 	httpListener net.Listener
@@ -90,10 +101,19 @@ type Server struct {
 	binaryStatFn      func(path string) (int64, int64, error) // size, mtime unix seconds, err
 	binaryLoggedStale bool
 
-	shutdown chan struct{}
-	doneOnce sync.Once
-	conns    map[net.Conn]struct{}
-	connsMu  sync.Mutex
+	shutdown     chan struct{}
+	shutdownDone chan struct{}
+	doneOnce     sync.Once
+	shutdownErr  error
+	pidPath      string
+	statePath    string
+	ownedPID     ownedRuntimeFile
+	ownedSocket  ownedRuntimeFile
+	serveStarted bool // protected by connsMu with connection admission
+	serveDone    chan struct{}
+	connsClosing bool
+	conns        map[net.Conn]struct{}
+	connsMu      sync.Mutex
 }
 
 // MCPDispatcher is implemented by whichever layer runs the MCP tool
@@ -194,6 +214,8 @@ func New(socketPath, version string, logger *zap.Logger) *Server {
 		instanceID:   newSessionID(),
 		sessions:     NewSessionRegistry(),
 		shutdown:     make(chan struct{}),
+		shutdownDone: make(chan struct{}),
+		serveDone:    make(chan struct{}),
 		conns:        make(map[net.Conn]struct{}),
 		binaryStatFn: osStatIdentity,
 	}
@@ -273,22 +295,32 @@ func (s *Server) populateBinaryStatus(st *StatusResponse) {
 // machine should reach it; on Windows, %USERPROFILE% ACLs scope it to
 // the user instead.
 func (s *Server) Listen() error {
+	s.pidPath, s.statePath = PIDFilePath(), s.RuntimeStateFile
 	if err := EnsureParentDir(s.SocketPath); err != nil {
 		return fmt.Errorf("ensure socket dir: %w", err)
 	}
-	// Remove stale socket file from a crashed previous run. If the daemon
-	// is actually running, the PID check below will catch it and abort.
-	_ = os.Remove(s.SocketPath)
-
-	if err := s.writePIDFile(); err != nil {
+	// Check the PID before touching a potentially live existing endpoint.
+	if err := s.writePIDFileAt(s.pidPath); err != nil {
 		return fmt.Errorf("pid file: %w", err)
+	}
+	var err error
+	s.ownedPID, err = captureOwnedRuntimeFile(s.pidPath, true)
+	if err != nil {
+		return err
+	}
+	if err := removeStaleDaemonEndpoint(s.SocketPath); err != nil {
+		return errors.Join(err, s.ownedPID.remove())
 	}
 
 	lc := &net.ListenConfig{}
 	l, err := lc.Listen(context.Background(), "unix", s.SocketPath)
 	if err != nil {
-		_ = os.Remove(PIDFilePath())
-		return fmt.Errorf("listen: %w", err)
+		return errors.Join(fmt.Errorf("listen: %w", err), s.ownedPID.remove())
+	}
+	if listener, ok := l.(*net.UnixListener); ok {
+		// Automatic unlink ignores path replacement. Only the captured file
+		// identity may authorize removing this endpoint during Shutdown.
+		listener.SetUnlinkOnClose(false)
 	}
 	// chmod the socket to user-only on Unix. Windows has no POSIX mode
 	// bits — the socket inherits the ACLs of %USERPROFILE%, which is
@@ -298,6 +330,11 @@ func (s *Server) Listen() error {
 			_ = l.Close()
 			return fmt.Errorf("chmod socket: %w", err)
 		}
+	}
+	s.ownedSocket, err = captureOwnedRuntimeFile(s.SocketPath, false)
+	if err != nil {
+		_ = l.Close()
+		return errors.Join(err, s.ownedPID.remove())
 	}
 	s.listener = l
 	s.started = time.Now()
@@ -313,8 +350,7 @@ func (s *Server) Listen() error {
 		httpLn, herr := net.Listen("tcp", s.HTTPAddr)
 		if herr != nil {
 			_ = l.Close()
-			_ = os.Remove(PIDFilePath())
-			return fmt.Errorf("listen http: %w", herr)
+			return errors.Join(fmt.Errorf("listen http: %w", herr), s.ownedSocket.remove(), s.ownedPID.remove())
 		}
 		s.httpListener = httpLn
 		s.httpServer = &http.Server{
@@ -327,9 +363,13 @@ func (s *Server) Listen() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, platform.ShutdownSignals()...)
 	go func() {
-		<-sigCh
-		s.Logger.Info("daemon: received signal, shutting down")
-		_ = s.Shutdown()
+		defer signal.Stop(sigCh)
+		select {
+		case <-sigCh:
+			s.Logger.Info("daemon: received signal, shutting down")
+			_ = s.Shutdown()
+		case <-s.shutdown:
+		}
 	}()
 	return nil
 }
@@ -343,6 +383,14 @@ func (s *Server) Serve() error {
 	if s.listener == nil {
 		return errors.New("daemon: Listen must be called before Serve")
 	}
+	s.connsMu.Lock()
+	if s.connsClosing || s.serveStarted {
+		s.connsMu.Unlock()
+		return errors.New("daemon: serve lifetime is already started or closed")
+	}
+	s.serveStarted = true
+	s.connsMu.Unlock()
+	defer close(s.serveDone)
 	if s.httpListener != nil && s.httpServer != nil {
 		go func() {
 			if err := s.httpServer.Serve(s.httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -393,7 +441,9 @@ func (s *Server) Serve() error {
 			continue
 		}
 		emfileBackoff = 0
-		s.trackConn(conn)
+		if !s.trackConn(conn) {
+			continue
+		}
 		go s.handle(conn)
 	}
 }
@@ -977,44 +1027,82 @@ func (s *Server) handleControl(ctx context.Context, _ *Session, req ControlReque
 // Shutdown stops the accept loop, closes outstanding connections, and
 // removes the socket and PID files. Safe to call multiple times.
 func (s *Server) Shutdown() error {
-	var first error
+	started := time.Now()
+	select {
+	case <-s.shutdownDone:
+		return s.shutdownErr
+	default:
+	}
+	// No producer callback runs under the once/admission mutex. Repeated
+	// callers cancel and join the same immutable writer lifetime.
+	if s.CancelShutdownOwners != nil {
+		s.CancelShutdownOwners()
+	}
+	if s.JoinRuntimeWriter != nil {
+		s.JoinRuntimeWriter()
+	}
+	ran := false
 	s.doneOnce.Do(func() {
+		ran = true
+		var errs []error
+		s.connsMu.Lock()
+		s.connsClosing = true
+		serveStarted := s.serveStarted
+		conns := make([]net.Conn, 0, len(s.conns))
+		for conn := range s.conns {
+			conns = append(conns, conn)
+		}
+		s.connsMu.Unlock()
 		close(s.shutdown)
 		if s.listener != nil {
-			first = s.listener.Close()
+			if err := s.listener.Close(); err != nil && !runtimeAlreadyClosed(err) {
+				errs = append(errs, fmt.Errorf("close daemon listener: %w", err))
+			}
 		}
-		// Tear down the HTTP listener with a short grace window so
-		// in-flight Streamable responses can finish flushing. We
-		// don't propagate the http error unless the unix-socket
-		// listener succeeded — the operator already sees a
-		// unix-socket close error in the same path.
+		// Allow in-flight Streamable responses their existing short grace;
+		// retain every actual failure alongside other cleanup errors.
 		if s.httpServer != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			if herr := s.httpServer.Shutdown(ctx); herr != nil && first == nil {
-				first = herr
+			if err := s.httpServer.Shutdown(ctx); err != nil {
+				errs = append(errs, fmt.Errorf("shutdown daemon HTTP server: %w", err))
 			}
 			cancel()
 		}
-		// Close all live conns so per-conn goroutines exit their read loops.
-		s.connsMu.Lock()
-		for c := range s.conns {
-			_ = c.Close()
+		// HTTP may not have entered Serve yet; retain its physical listener
+		// too, rather than assuming http.Server already registered it.
+		if s.httpListener != nil {
+			if err := s.httpListener.Close(); err != nil && !runtimeAlreadyClosed(err) {
+				errs = append(errs, fmt.Errorf("close daemon HTTP listener: %w", err))
+			}
 		}
-		s.connsMu.Unlock()
-		_ = os.Remove(s.SocketPath)
-		_ = os.Remove(PIDFilePath())
-		// The runtime record describes THIS daemon's resolved choices, so it
-		// shares the PID file's lifetime — a survivor would point readers at
-		// a store no daemon has open.
-		RemoveRuntimeState()
+		for _, conn := range conns {
+			if err := conn.Close(); err != nil && !runtimeAlreadyClosed(err) {
+				errs = append(errs, fmt.Errorf("close daemon connection: %w", err))
+			}
+		}
+		if serveStarted {
+			<-s.serveDone // Joins an accepted-but-not-yet-tracked descriptor.
+		}
+		errs = append(errs, s.removeRuntimeFiles())
+		s.shutdownErr = errors.Join(errs...)
+		close(s.shutdownDone)
 	})
-	return first
+	if ran && s.OnShutdownComplete != nil {
+		s.OnShutdownComplete(s.shutdownErr)
+	}
+	if ran {
+		s.Logger.Info("daemon: runtime teardown complete", zap.Duration("elapsed", time.Since(started)), zap.Error(s.shutdownErr))
+	}
+	return s.shutdownErr
 }
 
 // writePIDFile fails if a live daemon is already running, so starting
 // twice is a loud "already running" error rather than a silent overwrite.
 func (s *Server) writePIDFile() error {
-	path := PIDFilePath()
+	return s.writePIDFileAt(PIDFilePath())
+}
+
+func (s *Server) writePIDFileAt(path string) error {
 	if err := EnsureParentDir(path); err != nil {
 		return err
 	}
@@ -1063,10 +1151,16 @@ func RunningPID() (int, bool) {
 	return pid, true
 }
 
-func (s *Server) trackConn(c net.Conn) {
+func (s *Server) trackConn(c net.Conn) bool {
 	s.connsMu.Lock()
+	if s.connsClosing {
+		s.connsMu.Unlock()
+		_ = c.Close()
+		return false
+	}
 	s.conns[c] = struct{}{}
 	s.connsMu.Unlock()
+	return true
 }
 
 func (s *Server) untrackConn(c net.Conn) {
