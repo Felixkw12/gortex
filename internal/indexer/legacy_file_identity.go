@@ -52,11 +52,33 @@ func (idx *Indexer) legacyFileCandidates(diskFiles map[string]bool) []string {
 	return paths
 }
 
-// filePriorWithLegacy admits only ordinary IDs rooted in this exact file.
-// A shared license/team/module can be anchored at the old scalar path, but
-// its identity is outside this prefix and must not enter endpoint eviction.
+// legacyNodesByPath shares the existing bounded chunk read shape. POSIX and
+// root files issue no lookup; Windows subdirectories use one indexed batch.
+func (idx *Indexer) legacyNodesByPath(graphPaths []string) map[string][]*graph.Node {
+	var nativePaths []string
+	for _, path := range graphPaths {
+		if native := idx.legacyFilePath(path); native != "" {
+			nativePaths = append(nativePaths, native)
+		}
+	}
+	if len(nativePaths) == 0 {
+		return nil
+	}
+	return idx.graph.GetFileNodesByPaths(nativePaths)
+}
+
 func (idx *Indexer) filePriorWithLegacy(graphPath string, prior []*graph.Node) ([]*graph.Node, []string, string) {
 	native := idx.legacyFilePath(graphPath)
+	if native == "" {
+		return prior, nil, ""
+	}
+	return mergeLegacyFilePrior(native, prior, idx.legacyNodesByPath([]string{graphPath})[native])
+}
+
+// mergeLegacyFilePrior admits only ordinary IDs rooted in this exact file.
+// A shared license/team/module can be anchored at the old scalar path, but
+// its identity is outside this prefix and must not enter endpoint eviction.
+func mergeLegacyFilePrior(native string, prior, legacyNodes []*graph.Node) ([]*graph.Node, []string, string) {
 	if native == "" {
 		return prior, nil, ""
 	}
@@ -70,7 +92,7 @@ func (idx *Indexer) filePriorWithLegacy(graphPath string, prior []*graph.Node) (
 			}
 		}
 	}
-	for _, node := range idx.graph.GetFileNodesByPaths([]string{native})[native] {
+	for _, node := range legacyNodes {
 		if node == nil || (node.ID != native && !strings.HasPrefix(node.ID, native+"::")) {
 			continue
 		}

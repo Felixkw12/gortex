@@ -197,3 +197,58 @@ func TestPOSIXReindexPreservesLiteralBackslashFile(t *testing.T) {
 		})
 	}
 }
+
+// This portable storage/frontier test exercises the mutation order only. The
+// Windows test above separately proves native discovery and reindex behavior.
+func TestLegacyIdentityRepairRebindsForeignCaller(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite", "delta"} {
+		t.Run(backend, func(t *testing.T) {
+			var store graph.Store = graph.New()
+			if backend == "sqlite" {
+				disk, err := store_sqlite.Open(filepath.Join(t.TempDir(), "graph.db"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, disk.Close()) })
+				store = disk
+			}
+			path, legacy, callerPath := "repo/sub/sample.py", `repo/sub\sample.py`, "repo/caller.py"
+			fresh := []*graph.Node{
+				{ID: path, Kind: graph.KindFile, Name: "sample.py", FilePath: path, RepoPrefix: "repo", Language: "python"},
+				{ID: path + "::Helper", Kind: graph.KindFunction, Name: "Helper", FilePath: path, RepoPrefix: "repo", Language: "python"},
+			}
+			old := []*graph.Node{
+				{ID: legacy, Kind: graph.KindFile, Name: "sample.py", FilePath: legacy, RepoPrefix: "repo", Language: "python"},
+				{ID: legacy + "::Helper", Kind: graph.KindFunction, Name: "Helper", FilePath: legacy, RepoPrefix: "repo", Language: "python"},
+			}
+			caller := &graph.Node{ID: callerPath + "::caller", Kind: graph.KindFunction, Name: "caller", FilePath: callerPath, RepoPrefix: "repo", Language: "python"}
+			store.AddBatch(append(append(append([]*graph.Node{}, fresh...), old...), caller), []*graph.Edge{
+				{From: caller.ID, To: old[1].ID, Kind: graph.EdgeCalls, FilePath: callerPath, Line: 3},
+				{From: caller.ID, To: legacy, Kind: graph.EdgeImports, FilePath: callerPath, Line: 1},
+			})
+			if backend == "delta" {
+				store = graph.NewDeltaWriter(store, nil)
+			}
+			prior, ids, native := mergeLegacyFilePrior(legacy, fresh, old)
+			stage := &incrementalBatchStage{graphPath: path, legacyPath: native, legacyIDs: ids, priorNodes: prior, result: &parser.ExtractionResult{Nodes: fresh}}
+			stages := []*incrementalBatchStage{stage}
+			carried, _ := restubIncomingRefsFromView(store, stages, loadIncrementalPriorView(store, stages))
+			idx := New(store, parser.NewRegistry(), config.Default().Index, zap.NewNop())
+			idx.SetRepoPrefix("repo")
+			idx.evictFileIdentities([]string{path}, ids, []string{native})
+			store.AddBatch(fresh, carried)
+			idx.resolver.ResolveFilesAndIncoming([]string{path})
+			require.Nil(t, store.GetNode(legacy))
+			require.Nil(t, store.GetNode(old[1].ID))
+			var calls, imports int
+			for _, edge := range store.GetOutEdges(caller.ID) {
+				if edge.Kind == graph.EdgeCalls && edge.To == fresh[1].ID {
+					calls++
+				}
+				if edge.Kind == graph.EdgeImports && edge.To == path {
+					imports++
+				}
+			}
+			require.Equal(t, 1, calls, "normal resolution must rescue the foreign caller")
+			require.Equal(t, 1, imports, "imports must follow the equivalent canonical file identity")
+		})
+	}
+}

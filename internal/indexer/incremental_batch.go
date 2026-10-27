@@ -260,6 +260,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 		graphPaths[i] = idx.prefixPath(idx.relKey(filePath))
 	}
 	priorByFile := idx.graph.GetFileNodesByPaths(graphPaths)
+	legacyByFile := idx.legacyNodesByPath(graphPaths)
 	priorTiming.complete(nil)
 	parseTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_parse",
 		zap.Int("candidate_files", len(files)), zap.Bool("includes_admission_wait", true))
@@ -285,7 +286,8 @@ func (idx *Indexer) reindexIncrementalChunk(
 	for i, filePath := range files {
 		graphPath := graphPaths[i]
 		priorNodes := priorByFile[graphPath]
-		priorNodes, legacyIDs, legacyPath := idx.filePriorWithLegacy(graphPath, priorNodes)
+		nativePath := idx.legacyFilePath(graphPath)
+		priorNodes, legacyIDs, legacyPath := mergeLegacyFilePrior(nativePath, priorNodes, legacyByFile[nativePath])
 		storedGraph := storedExtractionGraphFingerprints(priorNodes)
 		storedDerived := storedDerivedFingerprints(priorNodes)
 		// A prior row stamped before derived fingerprints existed is given
