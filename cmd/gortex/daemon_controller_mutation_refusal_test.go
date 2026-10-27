@@ -61,8 +61,8 @@ func TestFileCoveragePreRouteFailureIsNotAnObservedMutationRefusal(t *testing.T)
 	if !coverage.Covered || coverage.MutationState != "ready" || coverage.MutationReason != "" {
 		t.Fatalf("failure before observing a route cannot arm a refusal mark: %+v", coverage)
 	}
-	if primary := probe(f.primaryRoot); primary.MutationState != "" || primary.MutationReason != "" {
-		t.Fatalf("worktree refusal affected primary: %+v", primary)
+	if primary := probe(f.primaryRoot); !primary.Covered || primary.Symbols != 2 || primary.View == nil || !primary.View.Exact || primary.View.CheckoutID != probePrimaryID || primary.MutationState != "ready" || primary.MutationReason != "" {
+		t.Fatalf("worktree refusal affected primary coverage/identity/readiness: %+v", primary)
 	}
 	advance()
 	f.controller.lifecycle.RecordCheckoutMutationRefusal(t.Context(), refusal)
