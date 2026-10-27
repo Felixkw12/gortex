@@ -216,6 +216,9 @@ func resolveDaemonHTTPAddr(flag, env string, gc *config.GlobalConfig) string {
 // with GORTEX_DAEMON_CHILD=1 set, which the inner exec picks up and runs
 // the actual serve loop.
 func runDaemonStart(cmd *cobra.Command, _ []string) error {
+	// Cobra commands may be reused by an in-process caller. An earlier failed
+	// invocation must not suppress this invocation's ordinary detach accounting.
+	delete(cmd.Annotations, foregroundDaemonRecorded)
 	// An explicit start (user or supervisor) supersedes a prior `daemon stop` —
 	// clear the stay-down mark so autostart works again. The autostart-spawned
 	// child (GORTEX_DAEMON_CHILD=1) must NOT clear it: that would let an
@@ -240,6 +243,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	if daemonDetach && os.Getenv("GORTEX_DAEMON_CHILD") != "1" {
 		return spawnDetachedDaemon(detachedDaemonArgs(cmd.Flags(), daemonStartAcceptedFlags()))
 	}
+	recordForegroundDaemonInvocation(cmd)
 	gc, configErr := config.LoadGlobal()
 	var logPolicy config.DaemonConfig
 	if gc != nil {
