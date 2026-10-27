@@ -207,9 +207,10 @@ type Server struct {
 	communitiesToken communityCacheToken
 	// hotspots is the lazily-built default-threshold (mean + 2*stddev)
 	// ranking. FindHotspots' inner ComputeBetweenness pass is too expensive
-	// to put on every daemon cold-start path; RunAnalysis invalidates this
-	// cache and the first hotspot-consuming request rebuilds it once for that
-	// analysis epoch. Reads/cache state are guarded by analysisMu; the separate
+	// to repeat per request; a successful explicit RunAnalysis warms the same
+	// default ranking once for its published epoch. Legacy/lazy callers can
+	// still rebuild it on first demand. Reads/cache state are guarded by
+	// analysisMu; the separate
 	// build mutex coalesces concurrent first requests without blocking unrelated
 	// analysis snapshots while betweenness runs.
 	hotspots         []analysis.HotspotEntry
@@ -3013,6 +3014,7 @@ func (s *Server) runAnalysis(background bool) {
 	}()
 
 	analysisMetrics := s.populateAnalysis(true, background)
+	hotspotsWarmup := s.warmOutlineHotspots()
 
 	// The graph was just rebuilt, so the lazy-enrichment ledger — symbol
 	// IDs whose incoming refs were confirmed against the *previous* graph
@@ -3057,6 +3059,7 @@ func (s *Server) runAnalysis(background bool) {
 			zap.Duration("adjacency", analysisMetrics.adjacency),
 			zap.Duration("auto_concepts", analysisMetrics.autoConcepts),
 			zap.Duration("hits", analysisMetrics.hits),
+			zap.Duration("hotspots_warmup", hotspotsWarmup),
 			zap.Int("attempts", analysisMetrics.attempts),
 			zap.Int("superseded", analysisMetrics.superseded),
 			zap.String("superseded_at", analysisMetrics.supersededAt),

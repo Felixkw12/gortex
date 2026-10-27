@@ -258,7 +258,7 @@ func (s *Server) buildRepoOutline(ctx context.Context, reader graph.Reader, opts
 	// threshold to ensure we get the top N regardless of repo size.
 	// Post-filtered to the session's workspace.
 	hotspotsSection := []map[string]any{}
-	hs := s.getHotspots()
+	hs := s.outlineHotspots()
 	for i, h := range hs {
 		if len(hotspotsSection) >= topHotspotsN {
 			break
