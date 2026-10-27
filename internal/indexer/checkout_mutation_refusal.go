@@ -181,7 +181,7 @@ func (l *CheckoutLifecycle) currentMutationRefusalRoute(ctx context.Context, che
 	if err != nil || !found || again.Incarnation != checkout.Incarnation || !sameMutationRoot(again.RootPath, checkout.RootPath) || again.State != store_sqlite.CheckoutStateReady {
 		return noCheckout, noRoute, false
 	}
-	return checkout, route, true
+	return again, route, true
 }
 
 // RecordCheckoutMutationRefusal publishes only a final stale admission or

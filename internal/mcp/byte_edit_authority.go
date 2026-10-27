@@ -116,6 +116,8 @@ func (s *Server) prepareByteEditAuthority(ctx context.Context, req *mcp.CallTool
 	view := &requestView{kind: requestViewKindWorktree, rider: rider, viewRoot: root, sourceScope: "file", sourceRootInfo: info, sourceResolvedRoot: resolved, sourceCheckoutIncarnation: control.Checkout.Incarnation, sourceRepoPrefix: control.RepoPrefix, sourceGraphPending: true, declared: graphview.Completeness{graphview.CapSourceSnapshot: graphview.StateComplete}}
 	ctx = withRequestView(ctx, view)
 	ctx = withCheckoutMutation(ctx, mutation, root)
+	// byteEditRequest admits only top-level single-file edit/write shapes.
+	checkoutMutationFromContext(ctx).singleFile = true
 	ctx = withCheckoutControl(ctx, control)
 	if snapshot != nil {
 		ctx = withOverlayRequestSnapshot(ctx, snapshot)

@@ -112,7 +112,9 @@ func (s *Server) prepareRoutedViewMutation(
 		message = checkoutMutationRecoveryMessage(message, err, nativeAllowed)
 		return ctx, noop, mcp.NewToolResultError(message)
 	}
-	return withCheckoutMutation(ctx, mutation, view.viewRoot), func() {
+	ctx = withCheckoutMutation(ctx, mutation, view.viewRoot)
+	checkoutMutationFromContext(ctx).singleFile = legacy != "batch_edit"
+	return ctx, func() {
 		mutation.Close()
 		release()
 	}, nil
