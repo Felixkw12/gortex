@@ -47,6 +47,12 @@ func (r *outlineCountingReader) GetNodesByIDs(ids []string) map[string]*graph.No
 	r.counters().lookupBatches = append(r.counters().lookupBatches, append([]string(nil), ids...))
 	return r.Store.GetNodesByIDs(ids)
 }
+func (r *outlineCountingReader) OutlineNodeIDsInScope(scope graph.NodeScope, ids []string) ([]string, error) {
+	r.counters().lookedUp = append(r.counters().lookedUp, ids...)
+	r.counters().lookupBatches = append(r.counters().lookupBatches, append([]string(nil), ids...))
+	return r.Store.OutlineNodeIDsInScope(scope, ids)
+}
+
 func (r *outlineCountingReader) ScopedOutlineCounts(scope graph.NodeScope) (graph.OutlineCounts, error) {
 	r.counters().aggregates++
 	return r.Store.ScopedOutlineCounts(scope)

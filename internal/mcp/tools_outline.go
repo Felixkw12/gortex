@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"sort"
 
@@ -42,6 +43,9 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	// an overlay-active caller sees its own buffers. Hoisted once: the
 	// outline touches the reader from several sections.
 	reader := s.readerFor(ctx)
+	scope := graph.NodeScope{WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow}
+	scopedNodes, _ := graph.BindReadContext(contractCoreSelectedReader(reader), ctx).(graph.ScopedOutlineNodeReader)
+	var candidateErr error
 
 	var scoped []*graph.Node
 	var inScope map[string]bool
@@ -78,8 +82,16 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 				}
 			}
 			if len(missing) > 0 {
-				for id, n := range reader.GetNodesByIDs(missing) {
-					candidateScope[id] = n != nil && opts.ScopeAllows(n)
+				if scopedNodes != nil {
+					ids, err := scopedNodes.OutlineNodeIDsInScope(scope, missing)
+					candidateErr = errors.Join(candidateErr, err)
+					for _, id := range ids {
+						candidateScope[id] = true
+					}
+				} else {
+					for id, n := range reader.GetNodesByIDs(missing) {
+						candidateScope[id] = n != nil && opts.ScopeAllows(n)
+					}
 				}
 			}
 		}
@@ -254,20 +266,34 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 			counts[row.FilePath] = row.Count
 		}
 		imported = rankImportedFiles(counts, topMostImportedN)
-		mains := reader.FindNodesByName("main")
-		ids := make([]string, 0, len(mains))
-		for _, n := range mains {
-			if n != nil {
-				ids = append(ids, n.ID)
+		if scopedNodes != nil {
+			mains, err := scopedNodes.OutlineNodesByName(scope, "main")
+			if err != nil {
+				return nil, err
 			}
+			entries = entryPointsForNodes(mains, nil, topEntryPointsN)
+		} else {
+			mains := reader.FindNodesByName("main")
+			ids := make([]string, 0, len(mains))
+			for _, n := range mains {
+				if n != nil {
+					ids = append(ids, n.ID)
+				}
+			}
+			for id, n := range reader.GetNodesByIDs(ids) {
+				candidateScope[id] = opts.ScopeAllows(n)
+			}
+			entries = entryPointsForNodes(mains, candidateScope, topEntryPointsN)
 		}
-		for id, n := range reader.GetNodesByIDs(ids) {
-			candidateScope[id] = opts.ScopeAllows(n)
-		}
-		entries = entryPointsForNodes(mains, candidateScope, topEntryPointsN)
 	} else {
 		imported = mostImportedFiles(reader, inScope, topMostImportedN)
 		entries = entryPoints(reader, inScope, topEntryPointsN)
+	}
+	if candidateErr != nil {
+		return nil, candidateErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"summary":             summary,
