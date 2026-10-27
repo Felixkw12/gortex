@@ -15,7 +15,7 @@ import (
 
 // Drive real checked admission against changed bytes; merely constructing a
 // view_read_only message would not prove that the refusal has a valid witness.
-func staleMutationRefusal(t *testing.T, f *coordinatorFixture, c *CheckoutCoordinator, l *CheckoutLifecycle) (error, []byte) {
+func staleMutationRefusal(t *testing.T, f *coordinatorFixture, c *CheckoutCoordinator, l *CheckoutLifecycle) ([]byte, error) {
 	t.Helper()
 	original, err := os.ReadFile(filepath.Join(f.worktree, "helper.go"))
 	if err != nil {
@@ -39,14 +39,14 @@ func staleMutationRefusal(t *testing.T, f *coordinatorFixture, c *CheckoutCoordi
 	if !errors.As(err, &witness) || witness.witness.slot == nil {
 		t.Fatal("stale admission lost its guarded identity")
 	}
-	return err, original
+	return original, err
 }
 
 func TestCheckoutMutationRefusalOnlyFinalStaleAndSuccessClears(t *testing.T) {
 	f, c, l := newCheckoutMutationFixture(t)
 	at := time.Unix(1200, 0)
 	l.now = func() time.Time { return at }
-	err, original := staleMutationRefusal(t, f, c, l)
+	original, err := staleMutationRefusal(t, f, c, l)
 	if _, marked := l.CheckoutMutationRefusal(t.Context(), f.checkoutID, f.worktree); marked {
 		t.Fatal("intermediate admission retry published a refusal")
 	}
@@ -96,7 +96,7 @@ func TestCheckoutMutationRefusalOnlyFinalStaleAndSuccessClears(t *testing.T) {
 
 func TestCheckoutMutationRefusalFreshRouteAndRetirementRejectOldWitness(t *testing.T) {
 	f, c, l := newCheckoutMutationFixture(t)
-	err, _ := staleMutationRefusal(t, f, c, l)
+	_, err := staleMutationRefusal(t, f, c, l)
 	l.RecordCheckoutMutationRefusal(t.Context(), err)
 	before := f.route()
 	if cycle := c.reconcile(t.Context()); cycle.Err != nil {
@@ -125,7 +125,7 @@ func TestCheckoutMutationRefusalFreshRouteAndRetirementRejectOldWitness(t *testi
 
 func TestCheckoutMutationRefusalConcurrentOldPublishAndClear(t *testing.T) {
 	f, c, l := newCheckoutMutationFixture(t)
-	err, _ := staleMutationRefusal(t, f, c, l)
+	_, err := staleMutationRefusal(t, f, c, l)
 	var refused *checkoutMutationRefusalError
 	if !errors.As(err, &refused) {
 		t.Fatal(err)
@@ -148,7 +148,7 @@ func TestCheckoutMutationRefusalConcurrentOldPublishAndClear(t *testing.T) {
 
 func TestCheckoutMutationRefusalIncarnationAndFullRouteIdentity(t *testing.T) {
 	f, c, l := newCheckoutMutationFixture(t)
-	err, _ := staleMutationRefusal(t, f, c, l)
+	_, err := staleMutationRefusal(t, f, c, l)
 	l.RecordCheckoutMutationRefusal(t.Context(), err)
 	route := f.route()
 	// Catalog upsert can reuse an epoch. Even then a different state/route is
@@ -174,7 +174,7 @@ func TestCheckoutMutationRefusalIncarnationAndFullRouteIdentity(t *testing.T) {
 
 func TestCheckoutMutationRefusalByteHandoffSuccessClears(t *testing.T) {
 	f, c, l := newCheckoutMutationFixture(t)
-	err, original := staleMutationRefusal(t, f, c, l)
+	original, err := staleMutationRefusal(t, f, c, l)
 	l.RecordCheckoutMutationRefusal(t.Context(), err)
 	if writeErr := os.WriteFile(filepath.Join(f.worktree, "helper.go"), original, 0o644); writeErr != nil {
 		t.Fatal(writeErr)
@@ -262,7 +262,7 @@ func TestCheckoutMutationProbeHealthyAddsZeroCatalogReads(t *testing.T) {
 
 func TestCheckoutMutationProbeRevalidatesChangesDuringResolution(t *testing.T) {
 	f, c, l := newCheckoutMutationFixture(t)
-	old, original := staleMutationRefusal(t, f, c, l)
+	original, old := staleMutationRefusal(t, f, c, l)
 	beforeRefusal := l.CaptureCheckoutMutationProbe()
 	l.RecordCheckoutMutationRefusal(t.Context(), old)
 	if state, _ := l.CheckoutMutationStateForProbe(t.Context(), f.checkoutID, f.worktree, beforeRefusal, true); state != "read_only" {
@@ -282,7 +282,7 @@ func TestCheckoutMutationProbeRevalidatesChangesDuringResolution(t *testing.T) {
 	}
 	beforeReplacement := l.CaptureCheckoutMutationProbe()
 	l.forgetMutationRefusal(f.checkoutID)
-	newer, _ := staleMutationRefusal(t, f, c, l)
+	_, newer := staleMutationRefusal(t, f, c, l)
 	l.RecordCheckoutMutationRefusal(t.Context(), newer)
 	l.RecordCheckoutMutationRefusal(t.Context(), old)
 	if state, _ := l.CheckoutMutationStateForProbe(t.Context(), f.checkoutID, f.worktree, beforeReplacement, true); state != "read_only" {

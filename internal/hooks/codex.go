@@ -438,7 +438,7 @@ func runCodexBashRewrite(data []byte, port int) {
 		}
 		return observed
 	}
-	if updated, message, ok := rewrittenCodexBashInputWithProbe(input, probe); ok {
+	if updated, message, ok := rewrittenCodexBashInput(input, probe); ok {
 		emitted = true
 		emitPreToolUse(HookOutput{HookSpecificOutput: &HookSpecificOutput{
 			HookEventName:      "PreToolUse",
@@ -464,11 +464,7 @@ func runCodexBashRewrite(data []byte, port int) {
 // a file the daemon confirms is indexed. Head/tail, compound commands,
 // redirects, and search/list shapes retain advisory behavior because changing
 // their output contract could alter caller semantics.
-func rewrittenCodexBashInput(input HookInput) (map[string]any, string, bool) {
-	return rewrittenCodexBashInputWithProbe(input, sessionFileScopeProbe(input.SessionID))
-}
-
-func rewrittenCodexBashInputWithProbe(input HookInput, probe fileScopeProbe) (map[string]any, string, bool) {
+func rewrittenCodexBashInput(input HookInput, probe fileScopeProbe) (map[string]any, string, bool) {
 	command, _ := input.ToolInput["command"].(string)
 	classification := classifyBashCommand(command)
 	if classification.Action != BashActionReadSource || classification.Primary != "cat" || !simpleBashCommand(command) {
