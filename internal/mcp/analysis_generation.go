@@ -571,7 +571,14 @@ func (s *Server) DrainBackground() {
 	s.backgroundDrainOnce.Do(func() {
 		s.retireSymbolPages()
 		s.backgroundMaintenance.Wait()
+		started := time.Now()
+		if s.logger != nil {
+			s.logger.Info("mcp: shutdown phase start", zap.String("phase", "health_broadcaster"))
+		}
 		s.StopHealthBroadcaster()
+		if s.logger != nil {
+			s.logger.Info("mcp: shutdown phase complete", zap.String("phase", "health_broadcaster"), zap.Duration("elapsed", time.Since(started)))
+		}
 	})
 }
 

@@ -306,8 +306,8 @@ func (s *Server) AttachHealthSnapshot(fn HealthSnapshotFn) {
 }
 
 // StopHealthBroadcaster halts the internal ticker. Called from the
-// daemon shutdown path so a hung ticker goroutine doesn't outlive the
-// process. Idempotent.
+// daemon shutdown path and terminally refuses new starts/replays. All
+// admitted ticker and snapshot/delivery owners are joined. Idempotent.
 func (s *Server) StopHealthBroadcaster() {
 	if s == nil || s.healthBroadcaster == nil {
 		return

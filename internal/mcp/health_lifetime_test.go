@@ -33,9 +33,12 @@ func TestHealthTerminalCloseOwnsInitialReplayAndRefusesLateStart(t *testing.T) {
 	}
 	ctx, backgroundDone, admitted := s.admitBackground()
 	require.True(t, admitted)
+	var doneOnce sync.Once
+	finishBackground := func() { doneOnce.Do(backgroundDone) }
+	t.Cleanup(finishBackground)
 	s.BeginBackgroundClose() // Must cancel every owner without joining replay.
 	require.Error(t, ctx.Err())
-	backgroundDone()
+	finishBackground()
 	require.False(t, b.subscribe("late"))
 	b.start()
 	b.setInterval(time.Second)
@@ -57,8 +60,9 @@ func TestHealthTerminalCloseOwnsInitialReplayAndRefusesLateStart(t *testing.T) {
 	<-replayDone
 	require.Equal(t, int32(1), calls.Load())
 	b.mu.Lock()
-	require.Nil(t, b.stopTicker)
+	remaining := b.stopTicker
 	b.mu.Unlock()
+	require.Nil(t, remaining)
 }
 
 func TestHealthTerminalCloseJoinsDetachedTickerBeforeCompletion(t *testing.T) {
