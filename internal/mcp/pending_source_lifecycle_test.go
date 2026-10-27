@@ -2,9 +2,14 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/reconcile"
 )
 
 // Test-only accessor: read version counts under the same lock order as the
@@ -22,6 +27,62 @@ func pendingSourceVersionCount(s *Server, checkoutID string) int {
 		record.mu.RUnlock()
 	}
 	return count
+}
+
+func TestPendingSourceRegistryDropsDeadCheckoutIncarnation(t *testing.T) {
+	for _, scenario := range []string{"removed", "reincarnated", "grace", "catalog error"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := store_sqlite.Open(filepath.Join(root, "store.sqlite"))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = store.Close() })
+			catalog := store.Catalog()
+			ctx := context.Background()
+			require.NoError(t, catalog.UpsertRepositoryFamily(ctx, store_sqlite.RepositoryFamily{
+				FamilyID: "family", CommonDirIdentity: filepath.Join(root, ".git"), State: reconcile.FamilyStateReady,
+			}))
+			checkout := store_sqlite.Checkout{
+				CheckoutID: "checkout", Incarnation: "old", FamilyID: "family", RootPath: root,
+				GitDir: filepath.Join(root, ".git"), AdminName: "primary", State: store_sqlite.CheckoutStateReady,
+				DesiredMode: store_sqlite.CheckoutModeDedicated, EffectiveMode: store_sqlite.CheckoutModeDedicated,
+			}
+			require.NoError(t, catalog.UpsertCheckout(ctx, checkout))
+			s := &Server{graph: store}
+			for i := range 8 {
+				record := checkoutSourceVersion(s, "checkout", "old", filepath.Join(root, fmt.Sprintf("file%d.go", i)))
+				record.markCommitted("bytes", 5)
+				record.recordGraph(checkoutOutcome(record, mutationReindexOutcome{Err: context.DeadlineExceeded}))
+			}
+			require.Equal(t, 8, pendingSourceVersionCount(s, "checkout"))
+			switch scenario {
+			case "removed":
+				require.NoError(t, catalog.DeleteCheckout(ctx, "checkout"))
+			case "reincarnated":
+				checkout.Incarnation = "new"
+				require.NoError(t, catalog.UpsertCheckout(ctx, checkout))
+				current := checkoutSourceVersion(s, "checkout", "new", filepath.Join(root, "current.go"))
+				current.markCommitted("new bytes", 9)
+				current.recordGraph(checkoutOutcome(current, mutationReindexOutcome{Err: context.DeadlineExceeded}))
+			case "grace":
+				checkout.State = store_sqlite.CheckoutStateRemovalGrace
+				require.NoError(t, catalog.UpsertCheckout(ctx, checkout))
+			case "catalog error":
+				require.NoError(t, store.Close())
+			}
+			s.InvalidateSessionScopes()
+			switch scenario {
+			case "removed":
+				require.Zero(t, pendingSourceVersionCount(s, "checkout"), "lifecycle notification retires versions immediately")
+			case "reincarnated":
+				require.Equal(t, 1, pendingSourceVersionCount(s, "checkout"), "the new incarnation's failed version remains pending")
+				require.NoError(t, catalog.DeleteCheckout(ctx, "checkout"))
+				require.Empty(t, s.pendingSourcePaths("checkout", "new"), "source reads consume authoritative retirement too")
+				require.Zero(t, pendingSourceVersionCount(s, "checkout"))
+			default:
+				require.Equal(t, 8, pendingSourceVersionCount(s, "checkout"), "grace/errors are not evidence of death")
+			}
+		})
+	}
 }
 
 func TestPendingSourceRegistryCanonicalTerminalRetirement(t *testing.T) {

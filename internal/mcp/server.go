@@ -2491,6 +2491,7 @@ func (s *Server) InvalidateSessionScopes() {
 		ss.resetScopeLocked()
 		ss.mu.Unlock()
 	}
+	s.retireDeadPendingSourceIncarnations()
 }
 
 // sessionLocality returns the session's home repo prefix and project

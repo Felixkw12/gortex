@@ -41,6 +41,7 @@ func (p *pendingSourceRegistry) register(record *mutationCommitRecord) {
 // ledger evicted the commit. A failed publication remains pending: failure is
 // not evidence that the graph contains the committed bytes.
 func (s *Server) pendingSourcePaths(checkoutID, incarnation string) []string {
+	s.retireDeadPendingSourceIncarnations()
 	p := &s.pendingSourceFiles
 	// Refresh may update a commit and retire canonical versions. Never invoke
 	// that callback while holding the registry lock.
