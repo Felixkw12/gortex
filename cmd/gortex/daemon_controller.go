@@ -1763,6 +1763,9 @@ func storageStatusFor(g graph.Store) *daemon.StorageStatus {
 		CloseCheckpointEstimateMS: estimate.Milliseconds(),
 		WALReclaim:                walReclaimStatus(reporter.WALReclaimStats()),
 	}
+	if policy, ok := g.(interface{ CloseCheckpointPolicy() string }); ok {
+		out.CloseCheckpointPolicy = policy.CloseCheckpointPolicy()
+	}
 	if counters, ok := g.(storeRowCounterReporter); ok {
 		out.RowCounters = &daemon.RowCounterStatus{Ready: counters.RowCountersReady()}
 	}

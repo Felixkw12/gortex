@@ -512,11 +512,15 @@ type StorageStatus struct {
 	// WALPendingFrames is the backlog not yet copied into the database
 	// (mxFrame - nBackfill), -1 when the wal-index could not be read.
 	WALPendingFrames int64 `json:"wal_pending_frames"`
-	// CloseCheckpointEstimateMS is how long Close's final checkpoint should
-	// be given for that backlog. A stop path that force-kills sooner loses
-	// the whole checkpoint: an interrupted pass records no progress.
-	CloseCheckpointEstimateMS int64             `json:"close_checkpoint_estimate_ms"`
-	WALReclaim                *WALReclaimStatus `json:"wal_reclaim,omitempty"`
+	// CloseCheckpointEstimateMS sizes a scheduled full final checkpoint. It
+	// is zero when policy skips the final checkpoint; WALPendingFrames still
+	// reports the real backlog. An interrupted full copy can lose its progress.
+	CloseCheckpointEstimateMS int64 `json:"close_checkpoint_estimate_ms"`
+	// CloseCheckpointPolicy is skip/full for stores reporting their effective
+	// policy. Empty means an older or unknown backend; callers must not infer
+	// the daemon's choice from their own environment.
+	CloseCheckpointPolicy string            `json:"close_checkpoint_policy,omitempty"`
+	WALReclaim            *WALReclaimStatus `json:"wal_reclaim,omitempty"`
 	// RowCounters is the writer-maintained per-generation node/edge counts:
 	// whether NodeCount/EdgeCount read them, and — on an exact status only —
 	// the drift check against a recount.
