@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 )
 
 func main() {
@@ -14,6 +16,11 @@ func main() {
 }
 
 func command(args []string) error {
+	if len(args) > 0 && args[0] == "run" {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer cancel()
+		return runCommand(ctx, args[1:])
+	}
 	if len(args) == 1 && args[0] == "schema" {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
