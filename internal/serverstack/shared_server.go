@@ -205,6 +205,8 @@ func (s *SharedServer) addCleanup(name string, close func() error) {
 // so listing a store that stayed in memory costs nothing.
 func (s *SharedServer) Close() error {
 	s.closeOnce.Do(func() {
+		// Standalone entrypoints share the same cancel-before-join contract.
+		s.CheckoutLifecycle.Cancel()
 		var errs []error
 		run := func(name string, close func() error) {
 			started := time.Now()

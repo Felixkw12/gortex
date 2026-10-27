@@ -110,19 +110,28 @@ func contractAnalysisYield(shouldYield func() bool) func(context.Context) error 
 	return indexer.ContractAnalysisYield(shouldYield)
 }
 
+// Cancel revokes all contract producers before any owner is joined.
+func (r *daemonContractAnalysis) Cancel() {
+	if r == nil {
+		return
+	}
+	r.cancel()
+	r.repair.Cancel()
+	r.coordinator.Cancel()
+}
+
 // beginClose owns one drain for the lifetime of this runtime. Cancellation is
 // synchronous and precedes the admission fence; joins run outside that fence.
 func (r *daemonContractAnalysis) beginClose() {
 	r.closeOnce.Do(func() {
 		r.closeDone = make(chan struct{})
-		r.cancel()
+		r.Cancel()
 		go func() {
 			defer close(r.closeDone)
 			r.baselineAdmissionMu.Lock()
 			r.baselineAdmissionMu.Unlock()
-			// Repair still joins before coordinator cancellation. A stuck repair
-			// therefore remains visible as an unbounded contract drain; the
-			// diagnostic deadline must never certify that ownership is gone.
+			// All contract owners were canceled above; every physical handoff
+			// still has to finish before this barrier permits backend close.
 			r.repair.Close()
 			r.closeErr = r.coordinator.Close()
 			r.baselineJobs.Wait()

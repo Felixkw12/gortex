@@ -367,6 +367,10 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	}
 	defer retirementWorker.Stop()
 	stopBackground := func() {
+		// Revoke every independent producer before the first ownership join.
+		warmupTask.cancel()
+		contractAnalysis.Cancel()
+		state.lifecycle.Cancel()
 		// Revoke startup before any join. The completion boundary is also
 		// the watcher handoff barrier: startup cannot attach/publish another
 		// watcher after StopWatcher has finished.
