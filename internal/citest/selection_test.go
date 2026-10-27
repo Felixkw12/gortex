@@ -71,7 +71,12 @@ func (f *fixture) pkg(path, source, test string) {
 }
 func (f *fixture) git(args ...string) string {
 	f.t.Helper()
-	all := append([]string{"-c", "user.name=CI Fixture", "-c", "user.email=ci@example.org"}, args...)
+	// Waiting for Git does not wait for detached automatic maintenance. Keep
+	// these disposable repos quiescent regardless of host/local configuration.
+	all := append([]string{
+		"-c", "maintenance.auto=false", "-c", "gc.auto=0",
+		"-c", "user.name=CI Fixture", "-c", "user.email=ci@example.org",
+	}, args...)
 	cmd := exec.CommandContext(f.t.Context(), "git", all...)
 	cmd.Dir = f.root
 	out, err := cmd.CombinedOutput()
