@@ -2571,19 +2571,23 @@ func (s *Server) handleFindDeadCode(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	reader := s.readerFor(ctx)
-	// The whole-store candidate read is bound to the request, so an
-	// abandoned call stops within one page of its deadline.
-	entries := analysis.FindDeadCode(graph.BindReadContext(reader, ctx), s.getProcesses(), nil, opts)
+	opts.RepoPrefixes = s.deadCodeRepoPrefixes(ctx)
+	// Keep scope capabilities on the context-bound request reader. Unsupported
+	// composed readers retain their exact visibility-aware fallback.
+	entries := analysis.FindDeadCode(graph.BindReadContext(reader, ctx), s.deadCodeProcesses(ctx, reader), nil, opts)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
-	// dead_code reads the whole graph directly, bypassing the scoped-node
-	// accessors, so narrow its rows to the session workspace + optional
-	// repo allow-set here. This also closes the latent cross-workspace
-	// leak for this kind. Strict no-op for an unbound session with no
-	// RepoAllow. Counts below are computed after this filter.
+	// Ownership travels with each candidate. Preserve the original workspace
+	// and repo policy without fetching every surviving node again.
 	if s.scopeFiltersActive(ctx) {
 		kept := make([]analysis.DeadCodeEntry, 0, len(entries))
 		for _, e := range entries {
-			if s.analyzeNodeVisible(ctx, reader.GetNode(e.ID)) {
+			if s.analyzeNodeVisible(ctx, &graph.Node{
+				ID: e.ID, RepoPrefix: e.RepoPrefix, WorkspaceID: e.WorkspaceID,
+				ProjectID: e.ProjectID, FilePath: e.FilePath,
+			}) {
 				kept = append(kept, e)
 			}
 		}
