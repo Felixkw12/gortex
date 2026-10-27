@@ -141,6 +141,7 @@ func (s *Server) populateAnalysisContext(ctx context.Context, takeLock, backgrou
 		}
 	}
 	generationWriter, generationQuery := s.analysisGenerationBackends()
+	generationWriter = bindAnalysisWriteContext(generationWriter, ctx)
 	generationBacked := generationWriter != nil && generationQuery != nil
 	var lastMetrics analysisRunMetrics
 	attempts, superseded, supersededAt, yields, paceParks := 0, 0, "", 0, 0

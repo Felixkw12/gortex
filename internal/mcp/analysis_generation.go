@@ -283,6 +283,7 @@ func persistAnalysisGenerationContext(
 	if err := ctx.Err(); err != nil {
 		return header, false, err
 	}
+	writer = bindAnalysisWriteContext(writer, ctx)
 	input, err := prepareAnalysisGeneration(candidate, expectedRevision)
 	if err != nil {
 		return graph.AnalysisGenerationHeader{}, false, err
@@ -297,7 +298,7 @@ func persistAnalysisGenerationContext(
 	activated := false
 	defer func() {
 		if !activated {
-			if abortErr := writer.AbortAnalysisGeneration(generationID); abortErr != nil {
+			if abortErr := abortAnalysisGeneration(ctx, writer, generationID); abortErr != nil {
 				err = errors.Join(err, fmt.Errorf("abort analysis generation: %w", abortErr))
 			}
 		}

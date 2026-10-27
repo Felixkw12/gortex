@@ -317,13 +317,12 @@ func (s *Store) beginWriteOnWithLifetimeContext(ctx, lifetime context.Context, b
 	}
 	writeTransactionsBegun.Add(1)
 	if err := ctx.Err(); err != nil {
-		_ = tx.Rollback()
-		return nil, err
+		return nil, errors.Join(err, tx.Rollback())
 	}
 	if s.managedPayloadGeneration {
 		if err := checkManagedPayloadWriteTx(ctx, tx, s.viewGen); err != nil {
 			if tx != nil {
-				_ = tx.Rollback()
+				err = errors.Join(err, tx.Rollback())
 			}
 			return nil, err
 		}

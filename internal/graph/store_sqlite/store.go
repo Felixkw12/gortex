@@ -600,6 +600,9 @@ type Store struct {
 	// analysisPaged enables bounded snapshots only for revision-validated analysis.
 	// Resolver and ordinary light sequences retain their single-statement reads.
 	analysisPaged bool
+	// analysisWriteCtx belongs only to a non-owning bound handle, never the
+	// shared core or another caller's ordinary store handle.
+	analysisWriteCtx context.Context
 }
 
 // WithReadContext returns a handle over the same generation whose paged

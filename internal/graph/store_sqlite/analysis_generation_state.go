@@ -100,9 +100,12 @@ func (s *Store) CommitAnalysisSnapshot(expectedRevision uint64, install func()) 
 	if install == nil {
 		return false
 	}
-	s.writeMu.Lock()
+	ctx := s.analysisWriteContext()
+	if err := s.writeMu.LockContext(ctx); err != nil {
+		return false
+	}
 	defer s.writeMu.Unlock()
-	if s.analysisRevision() != expectedRevision {
+	if ctx.Err() != nil || s.analysisRevision() != expectedRevision {
 		return false
 	}
 	install()
