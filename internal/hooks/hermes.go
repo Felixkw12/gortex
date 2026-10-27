@@ -203,7 +203,9 @@ func hermesEnrich(input hermesPreToolInput, port int) enrichResult {
 	default:
 		return enrichResult{}
 	}
-	return enrich(normalized, port)
+	// Preserve this adapter's existing raw coverage contract. Its hard-only
+	// pre-tool hook has no legacy mutation-response observer of its own.
+	return enrichWithProbe(normalized, port, queryFileIndexScope)
 }
 
 // hermesNormalizeReadInput returns a tool-input map enrichRead
