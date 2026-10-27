@@ -52,6 +52,7 @@ type pairedSample struct {
 	Commit      string    `json:"commit"`
 	RequestHash string    `json:"request_sha256"`
 	Started     time.Time `json:"started"`
+	Ended       time.Time `json:"ended"`
 	Latency     Metric    `json:"logical_latency_ms"`
 	Outcome     string    `json:"outcome"`
 	Code        int       `json:"code"`

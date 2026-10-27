@@ -254,6 +254,7 @@ func (c *pairedCoordinator) callAcrossWithEnds(ctx context.Context, r request, r
 		if err != nil && sample.Error == "" {
 			sample.Error = err.Error()
 		}
+		sample.Ended = time.Now()
 		record.Samples[label] = sample
 		results[label] = pairedCallResult{data: data, err: err, sample: sample}
 		c.mu.Lock()
@@ -361,16 +362,8 @@ func (c *pairedCoordinator) edit(ctx context.Context, repoIndex, agent, step int
 			if observation.Outcome == "edit_error" {
 				continue
 			}
-			if observation.VisibilityMS.Value == nil {
-				row := results[label]
-				if row.err == nil {
-					if payload, err := textPayload(row.data, "content"); err == nil && containsIdentity(payload, marker) {
-						observation.Outcome = "visible"
-						observation.VisibilityMS = measured(float64(time.Since(observation.Started))/float64(time.Millisecond), "ms")
-						observations[label] = observation
-					}
-				}
-			}
+			observation = observePairedVisibility(observation, results[label], marker)
+			observations[label] = observation
 			if observation.VisibilityMS.Value == nil && time.Now().Before(ends[label]) {
 				allDone = false
 			}
@@ -412,4 +405,17 @@ func finishEditMetrics(phase *Phase) {
 		}
 	}
 	phase.EditLatency, phase.Visibility = distribution(writes, "ms"), distribution(visible, "ms")
+}
+
+// Probes remain matched across builds even after one build is visible. Those
+// later probe receipts are evidence only: they cannot replace its first success.
+func observePairedVisibility(observation EditObservation, result pairedCallResult, marker string) EditObservation {
+	if observation.Outcome == "edit_error" || observation.VisibilityMS.Value != nil || result.err != nil {
+		return observation
+	}
+	if payload, err := textPayload(result.data, "content"); err == nil && containsIdentity(payload, marker) {
+		observation.Outcome = "visible"
+		observation.VisibilityMS = measured(float64(result.sample.Ended.Sub(observation.Started))/float64(time.Millisecond), "ms")
+	}
+	return observation
 }

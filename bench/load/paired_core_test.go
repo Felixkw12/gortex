@@ -172,3 +172,26 @@ func TestPairedPreBarrierFailureAndCancellationCleanOwnedDaemon(t *testing.T) {
 		})
 	}
 }
+
+func TestPairedVisibilityUsesEachProbeCompletionNotGroupCompletion(t *testing.T) {
+	start := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
+	// Model the second build completing nine seconds after the first, without
+	// sleeping or relying on scheduler timing. Each result carries its own end.
+	results := map[string]pairedCallResult{
+		"first":  {data: []byte(`{"content":[{"type":"text","text":"{\"symbols\":[{\"name\":\"Marker\",\"id\":\"sample.go::Marker\"}]}"}]}`), sample: pairedSample{Ended: start.Add(time.Second)}},
+		"second": {data: []byte(`{"content":[{"type":"text","text":"{\"symbols\":[{\"name\":\"Marker\",\"id\":\"sample.go::Marker\"}]}"}]}`), sample: pairedSample{Ended: start.Add(10 * time.Second)}},
+	}
+	for label, want := range map[string]float64{"first": 1000, "second": 10000} {
+		observation := EditObservation{Started: start, Outcome: "never_visible", VisibilityMS: unavailable("ms", "not observed")}
+		got := observePairedVisibility(observation, results[label], "Marker")
+		if got.Outcome != "visible" || got.VisibilityMS.Value == nil || *got.VisibilityMS.Value != want {
+			t.Fatalf("%s endpoint not preserved: %+v", label, got)
+		}
+		// A later paired probe failure is still retained as a probe, but cannot
+		// turn an already-visible edit into a failure or inflate its latency.
+		later := observePairedVisibility(got, pairedCallResult{err: context.DeadlineExceeded, sample: pairedSample{Ended: start.Add(time.Minute)}}, "Marker")
+		if !reflect.DeepEqual(got, later) {
+			t.Fatalf("later probe changed completed observation: %+v", later)
+		}
+	}
+}
