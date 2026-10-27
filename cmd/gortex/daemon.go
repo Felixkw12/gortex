@@ -1316,6 +1316,7 @@ var (
 // drain and how long it should be given.
 type daemonStopPreflight struct {
 	uptime        time.Duration
+	closePolicy   string
 	closeEstimate time.Duration
 	pendingFrames int64
 	// estimateKnown is false when the status call failed, timed out, or came
@@ -1447,7 +1448,10 @@ func waitForDaemonExitWithin(w io.Writer, pid int, grace time.Duration, draining
 // the exit wait when the shutdown ack does not arrive (daemonStopExitGrace). A
 // status that times out leaves it unknown and the wait on its old schedule.
 func daemonStatusBeforeStop() daemonStopPreflight {
-	var pre daemonStopPreflight
+	pre := daemonProbeBeforeStop()
+	if pre.closePolicy == "skip" {
+		return pre
+	}
 	c, err := daemonControlClient()
 	if err != nil {
 		return pre
@@ -1463,9 +1467,36 @@ func daemonStatusBeforeStop() daemonStopPreflight {
 	}
 	pre.uptime = time.Duration(st.UptimeSeconds) * time.Second
 	if st.Storage != nil {
+		pre.closePolicy = st.Storage.CloseCheckpointPolicy
 		pre.closeEstimate = time.Duration(st.Storage.CloseCheckpointEstimateMS) * time.Millisecond
 		pre.pendingFrames = st.Storage.WALPendingFrames
-		pre.estimateKnown = true
+		pre.estimateKnown = pre.closePolicy != "skip"
+	}
+	return pre
+}
+
+// A query-free daemon probe avoids putting decorative Status aggregation on
+// the default stop path. The policy comes from the daemon, never the CLI's
+// inherited environment. Older/full-policy daemons retain their Status-based
+// estimate. A timed-out probe connection is discarded before that fallback.
+func daemonProbeBeforeStop() daemonStopPreflight {
+	var pre daemonStopPreflight
+	c, err := daemonControlClient()
+	if err != nil {
+		return pre
+	}
+	defer func() { _ = c.Close() }()
+	resp, err := c.ControlWithTimeout(daemon.ControlProbe, nil, 200*time.Millisecond)
+	if err != nil || !resp.OK {
+		return pre
+	}
+	var probe daemon.ProbeResponse
+	if err := json.Unmarshal(resp.Result, &probe); err != nil {
+		return pre
+	}
+	pre.uptime = time.Duration(probe.UptimeSeconds) * time.Second
+	if probe.CloseCheckpointPolicy == "skip" || probe.CloseCheckpointPolicy == "full" {
+		pre.closePolicy = probe.CloseCheckpointPolicy
 	}
 	return pre
 }

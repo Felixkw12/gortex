@@ -895,6 +895,9 @@ func (c *realController) Probe(ctx context.Context) (daemon.ProbeResponse, error
 		Ready:    c.ready.Load(),
 		Enriched: c.enriched.Load(),
 	}
+	if policy, ok := c.graph.(interface{ CloseCheckpointPolicy() string }); ok {
+		resp.CloseCheckpointPolicy = policy.CloseCheckpointPolicy()
+	}
 	if c.multiIndexer != nil {
 		roots := make([]string, 0)
 		for _, meta := range c.multiIndexer.AllMetadata() {

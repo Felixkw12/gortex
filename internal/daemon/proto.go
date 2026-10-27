@@ -281,6 +281,9 @@ type ProbeResponse struct {
 	Version       string `json:"version"`
 	PID           int    `json:"pid"`
 	UptimeSeconds int64  `json:"uptime_seconds"`
+	// CloseCheckpointPolicy is the daemon's query-free skip/full policy. An
+	// absent value retains the older Status-based close-estimate path.
+	CloseCheckpointPolicy string `json:"close_checkpoint_policy,omitempty"`
 	// Ready reports resolved references and a queryable graph; Enriched
 	// reports the slow semantic passes finished on top of that. A caller
 	// deciding whether to trust a graph answer wants Ready.

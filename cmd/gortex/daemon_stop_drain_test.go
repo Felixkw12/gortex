@@ -26,13 +26,50 @@ import (
 // otherwise (an older daemon, or one whose store is not SQLite).
 type drainingController struct {
 	*realController
-	closeFor time.Duration
-	storage  *daemon.StorageStatus
-	exited   atomic.Bool
+	closeFor    time.Duration
+	storage     *daemon.StorageStatus
+	exited      atomic.Bool
+	probePolicy string
+	statusCalls atomic.Int32
 }
 
 func (c *drainingController) Status(context.Context) (daemon.StatusResponse, error) {
+	c.statusCalls.Add(1)
 	return daemon.StatusResponse{UptimeSeconds: 42, Storage: c.storage}, nil
+}
+
+func (c *drainingController) Probe(context.Context) (daemon.ProbeResponse, error) {
+	return daemon.ProbeResponse{CloseCheckpointPolicy: c.probePolicy, UptimeSeconds: 42}, nil
+}
+
+func TestDaemonStopSkipPolicyUsesDaemonProbeWithoutStatus(t *testing.T) {
+	controller := &drainingController{realController: &realController{}, probePolicy: "skip"}
+	newStopFixture(t, controller)
+	// Deliberately contradictory CLI environment must not replace the actual
+	// remote daemon policy with a local full-drain assumption.
+	t.Setenv("GORTEX_SQLITE_CLOSE_CHECKPOINT", "full")
+	pre := daemonStatusBeforeStop()
+	require.Equal(t, "skip", pre.closePolicy)
+	require.Equal(t, 42*time.Second, pre.uptime)
+	require.False(t, pre.estimateKnown)
+	require.Zero(t, controller.statusCalls.Load())
+}
+
+func TestDaemonStopFullAndLegacyPoliciesRetainStatusEstimate(t *testing.T) {
+	for _, policy := range []string{"full", "", "unrecognized"} {
+		t.Run(policy, func(t *testing.T) {
+			controller := &drainingController{
+				realController: &realController{}, probePolicy: policy,
+				storage: &daemon.StorageStatus{CloseCheckpointEstimateMS: 1200, WALPendingFrames: 42},
+			}
+			newStopFixture(t, controller)
+			pre := daemonStatusBeforeStop()
+			require.True(t, pre.estimateKnown)
+			require.Equal(t, 1200*time.Millisecond, pre.closeEstimate)
+			require.Equal(t, int64(42), pre.pendingFrames)
+			require.Equal(t, int32(1), controller.statusCalls.Load())
+		})
+	}
 }
 
 func (c *drainingController) Shutdown(context.Context) error {
