@@ -51,7 +51,7 @@ func TestOutsideConfigRecoveryCodexRewriteReusesUnderlyingObservation(t *testing
 				return status
 			})
 			data := mustJSON(t, HookInput{HookEventName: "PreToolUse", ToolName: "Bash", SessionID: "outside-codex", CWD: f.target, ToolInput: map[string]any{"command": "cat a.go"}})
-			output := captureHookStdout(t, func() { RunCodex(data, 0, CodexModeRewrite) })
+			output := captureHookStdout(t, func() { runCodex(data, 0, CodexModeRewrite) })
 			require.Equal(t, 1, calls, "rewrite and scope-recovery must share one real query")
 			if name == "unreached" {
 				require.Empty(t, output, "outside-config failure retains its previous silence")
@@ -82,7 +82,7 @@ func TestOutsideConfigRecoveryCodexEnrichAndDenyKeepNativeRead(t *testing.T) {
 				return fileIndexStatus{Indexed: true, Count: 2, Tracked: true, ProbeOK: true, MutationKnown: true, ReadOnly: true}
 			})
 			data := mustJSON(t, HookInput{HookEventName: "PreToolUse", ToolName: "Bash", SessionID: "outside-codex-mode", CWD: f.target, ToolInput: map[string]any{"command": "cat a.go"}})
-			output := captureHookStdout(t, func() { RunCodex(data, 0, mode) })
+			output := captureHookStdout(t, func() { runCodex(data, 0, mode) })
 			var got HookOutput
 			require.NoError(t, json.Unmarshal([]byte(output), &got))
 			require.NotNil(t, got.HookSpecificOutput)
@@ -179,7 +179,7 @@ func TestOutsideConfigRecoveryCannotBypassLocalizationTerminal(t *testing.T) {
 			pre := preToolPayload(t, tool, "", identity, args)
 			output := captureHookStdout(t, func() {
 				if host == "Codex" {
-					RunCodex(pre, 0, CodexModeRewrite)
+					runCodex(pre, 0, CodexModeRewrite)
 				} else {
 					runPreToolUse(pre, 0, ModeDeny)
 				}
