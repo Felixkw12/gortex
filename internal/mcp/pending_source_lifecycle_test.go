@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -28,6 +30,43 @@ func pendingSourceVersionCount(s *Server, checkoutID string) int {
 		record.mu.RUnlock()
 	}
 	return count
+}
+
+func TestPendingSourceRegistryExpiryRacesRebindingAndRefresh(t *testing.T) {
+	for range 25 {
+		s := &Server{}
+		record, old := unobservedFailedSource(s, "checkout", "incarnation", "/fixture/file.go", 1)
+		newer := pendingFreshnessReceipt(s, "new", "fixture", "/fixture/file.go", 2)
+		newer.checkoutID, newer.checkoutIncarnation, newer.checkoutScoped = "checkout", "incarnation", true
+		start := make(chan struct{})
+		done := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			s.expireMutationReceipt(old)
+			s.pendingSourcePaths("checkout", "incarnation")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			record.recordGraph(checkoutOutcome(record, mutationReindexOutcome{Pending: true, Receipt: "new"}))
+			s.refreshPendingSourceRecord(record)
+		}()
+		close(start)
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("receipt expiry/rebinding deadlocked the registry")
+		}
+		snap := record.snapshot()
+		require.Equal(t, "new", snap.ReindexReceipt)
+		require.Equal(t, mutationGraphPending, snap.GraphStatus)
+		require.Empty(t, snap.Reason, "the old ticket cannot terminalize the live new binding")
+		require.Equal(t, 1, pendingSourceVersionCount(s, "checkout"))
+	}
 }
 
 // Leave the commit pending while its ticket has already failed. Recovery must

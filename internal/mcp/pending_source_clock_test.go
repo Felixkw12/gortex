@@ -93,7 +93,11 @@ func TestPendingSourceRegistryDrainsCanonical(t *testing.T) {
 	require.Less(t, growth, int64(1<<20), "live heap grew by %d bytes above the ten-edit baseline", growth)
 	require.Zero(t, pendingSourceVersionCount(s, ""))
 	require.Empty(t, clock.timers)
-	require.LessOrEqual(t, len(s.mutationCommits.recent(maxMutationCommits)), maxMutationCommits)
+	s.mutationCommits.mu.Lock()
+	held, ordered := len(s.mutationCommits.byID), len(s.mutationCommits.ordered)
+	s.mutationCommits.mu.Unlock()
+	require.LessOrEqual(t, held, maxMutationCommits)
+	require.LessOrEqual(t, ordered, maxMutationCommits)
 	t.Logf("canonical edits=%d; baseline edits=10; heap growth=%d bytes; registry versions=0", edits, growth)
 }
 

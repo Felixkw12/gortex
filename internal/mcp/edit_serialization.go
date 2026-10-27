@@ -339,9 +339,9 @@ func (s *Server) resolveCheckoutRecoveryReceipts(recovery *mutationReceipt, elig
 // cannot heal, because a terminal error never completes differently.
 //
 // The failed receipt is resolved in place rather than deleted: the
-// mutation-commit ledger refreshes its graph half through
-// mutationReceiptState, and a deleted receipt would leave that record
-// reading "pending" forever. Stamping the superseding apply mirrors how
+// mutation-commit ledger refreshes its graph half from that evidence. Losing
+// the receipt would instead settle an unobserved outcome as receipt_lost.
+// Stamping the superseding apply mirrors how
 // completeMutationWaiters resolves earlier waiters with the later apply's
 // result. Pending receipts and failures at or above the succeeded
 // generation are left untouched. The succeeded result is passed by value so
