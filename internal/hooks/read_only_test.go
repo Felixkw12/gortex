@@ -12,7 +12,7 @@ func TestFileIndexStatusReadOnlyPrecedesIndexed(t *testing.T) {
 		Covered: true, Symbols: 7, Answered: true, Tracked: true,
 		MutationState: "read_only", MutationReason: "checkout route changed",
 	})
-	if !st.ReadOnly || st.Indexed || !st.ProbeOK || !st.noGraphAnswer() || st.MutationReason != "checkout route changed" {
+	if !st.ReadOnly || !st.Indexed || !st.ProbeOK || !st.noGraphAnswer() || st.MutationReason != "checkout route changed" {
 		t.Fatalf("refusal must take precedence over retained coverage: %+v", st)
 	}
 	ready := fileIndexStatusFromCoverage(daemon.FileCoverageResult{Covered: true, Symbols: 7, Answered: true, Tracked: true})
