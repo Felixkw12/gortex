@@ -80,10 +80,10 @@ func DialTo(socketPath string, h Handshake) (*Client, error) {
 	}
 	if !ack.OK {
 		_ = conn.Close()
-		// A protocol-version rejection is recoverable: wrap the sentinel so the
-		// proxy's startup policy can decide whether embedded mode is allowed.
+		// Preserve mismatch identity for direction-aware startup handoff. It is
+		// never evidence that the daemon is absent or embedded mode is safe.
 		if ack.ErrorCode == ErrProtocolMismatch {
-			return nil, fmt.Errorf("%w: %s", ErrProtocolVersionMismatch, ack.ErrorMsg)
+			return nil, protocolMismatch(ack, h.Version)
 		}
 		return nil, fmt.Errorf("daemon rejected handshake [%s]: %s", ack.ErrorCode, ack.ErrorMsg)
 	}
@@ -204,8 +204,7 @@ var ErrDaemonUnavailable = errors.New("daemon unavailable")
 // ErrProtocolVersionMismatch is returned by Dial when the daemon answers the
 // handshake with a protocol_mismatch rejection — the running daemon speaks a
 // different wire version than this binary (a stale daemon after an upgrade).
-// Like ErrDaemonUnavailable it is recoverable for startup selection: the
-// caller may use an explicitly allowed embedded server or report the mismatch.
+// It never permits embedded fallback: the live daemon still owns its store.
 var ErrProtocolVersionMismatch = errors.New("daemon protocol version mismatch")
 
 // ErrDaemonUnresponsive is returned when the daemon accepted the connection
@@ -227,11 +226,11 @@ func isTimeoutErr(err error) bool {
 
 // ShouldFallBackToEmbedded reports whether a Dial error permits the MCP
 // startup policy to consider an embedded in-process server: the daemon isn't
-// running, or it is running a mismatched protocol version. Any other error
+// running. A mismatch still means a live daemon owns its store. Any other error
 // (permissions, a genuinely broken socket) is a real failure the caller must
 // surface.
 func ShouldFallBackToEmbedded(err error) bool {
-	return errors.Is(err, ErrDaemonUnavailable) || errors.Is(err, ErrProtocolVersionMismatch)
+	return errors.Is(err, ErrDaemonUnavailable)
 }
 
 // isNoDaemonErr returns true for the subset of dial errors that mean

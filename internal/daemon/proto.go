@@ -75,6 +75,9 @@ type HandshakeAck struct {
 	// For clients that want to compare before trusting the connection.
 	DaemonVersion  string `json:"daemon_version,omitempty"`
 	DaemonInstance string `json:"daemon_instance,omitempty"` // changes on every daemon process start
+	// Also populated on protocol rejection. A pointer preserves protocol zero
+	// while allowing old daemons to omit the field entirely.
+	DaemonProtocol *int `json:"daemon_protocol,omitempty"`
 
 	// Warming is true when the handshake completed but the daemon has not
 	// finished its warmup pipeline — the graph is still filling, so tool
