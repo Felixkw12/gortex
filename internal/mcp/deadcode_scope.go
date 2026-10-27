@@ -88,7 +88,7 @@ func (s *Server) deadCodeProcesses(ctx context.Context, reader graph.Reader) (*a
 // steps of a foreign-entry process. No scalar endpoint lookups or full-process
 // compatibility map is needed by the dead-code consumer.
 func (s *Server) readDeadCodeProcesses(ctx context.Context, reader graph.Reader, query graph.AnalysisQueryStore, header graph.AnalysisGenerationHeader) (*analysis.ProcessResult, error) {
-	result := &analysis.ProcessResult{NodeToProcs: make(map[string][]string), Truncated: header.ProcessesTruncated, TruncationReason: header.ProcessesTruncationReason}
+	result := &analysis.ProcessResult{Truncated: header.ProcessesTruncated, TruncationReason: header.ProcessesTruncationReason}
 	cursor := ""
 	for {
 		if err := ctx.Err(); err != nil {
@@ -135,7 +135,6 @@ func (s *Server) readDeadCodeProcesses(ctx context.Context, reader graph.Reader,
 				}
 				for _, step := range steps {
 					process.Steps = append(process.Steps, analysis.Step{ID: step.NodeID, Depth: step.Depth})
-					result.NodeToProcs[step.NodeID] = append(result.NodeToProcs[step.NodeID], row.ID)
 				}
 				if len(steps) == 0 || nextOrdinal <= ordinal {
 					break

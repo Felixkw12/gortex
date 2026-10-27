@@ -80,6 +80,7 @@ func TestDeadCodeGenerationProcessesReadOnlyAdmittedSteps(t *testing.T) {
 		query.rows = append(query.rows, graph.AnalysisProcessSummary{ID: id, Name: id, EntryPoint: entry, StepCount: 2, Score: .5, Files: []string{"file.go"}})
 		query.steps[id] = []graph.AnalysisProcessStep{{NodeID: entry, Ordinal: 0}, {NodeID: "foreign-step", Ordinal: 1, Depth: 1}}
 	}
+	g.AddNode(&graph.Node{ID: "foreign-step", Name: "foreignStep", Kind: graph.KindFunction, RepoPrefix: "b", FilePath: "b/f.go", Language: "go"})
 	s := &Server{graph: g, session: newSessionState()}
 	ctx := withRepoAllow(t.Context(), map[string]bool{"a": true})
 	spy := &deadCodeProcessNodeSpy{Reader: g, t: t}
@@ -87,7 +88,9 @@ func TestDeadCodeGenerationProcessesReadOnlyAdmittedSteps(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Processes, 1)
 	require.Equal(t, analysis.Process{ID: "process0000", Name: "process0000", EntryPoint: "entry0000", StepCount: 2, Score: .5, Files: []string{"file.go"}, Steps: []analysis.Step{{ID: "entry0000"}, {ID: "foreign-step", Depth: 1}}}, result.Processes[0])
-	require.Equal(t, []string{"process0000"}, result.NodeToProcs["foreign-step"], "foreign steps of an admitted process remain reachability evidence")
+	withoutProcess := analysis.FindDeadCode(g, nil, nil)
+	require.Contains(t, withoutProcess[0].ID, "foreign-step", "fixture: the foreign node needs process reachability evidence")
+	require.Empty(t, analysis.FindDeadCode(g, result, nil), "foreign steps of an admitted process remain reachable")
 	require.Len(t, query.stepReads, 1, "foreign entry points must never cause step reads")
 	require.Equal(t, 3, spy.batches)
 	require.Zero(t, spy.scalar)
