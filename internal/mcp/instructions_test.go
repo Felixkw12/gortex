@@ -190,6 +190,7 @@ func TestStateAwareInstructionsVariants(t *testing.T) {
 }
 
 func TestInitializeSharedTransientGuidanceAcrossStates(t *testing.T) {
+	require.True(t, strings.HasPrefix(codingAgentInstructions, "When Gortex can serve the step: "), "compact workflow must not negate the degraded exception")
 	loading, _, repo := newLoadingServer(t)
 	main := filepath.Join(t.TempDir(), "main")
 	gitInitWorktreeRepo(t, main)
