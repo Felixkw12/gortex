@@ -56,7 +56,7 @@ func TestDaemonHandoffProcessHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close() //nolint:errcheck // explicit successful close below
-	s.AddNode(&graph.Node{ID: "handoff:sentinel", Name: "BeforeHandoff", Kind: graph.KindFunction, File: "fixture.go"})
+	s.AddNode(&graph.Node{ID: "handoff:sentinel", Name: "BeforeHandoff", Kind: graph.KindFunction, FilePath: "fixture.go"})
 	if err := os.WriteFile(daemon.PIDFilePath(), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestDaemonHandoffProcessHelper(t *testing.T) {
 	if os.Getenv("GORTEX_HANDOFF_TEST_SLOW") == "1" {
 		time.Sleep(3500 * time.Millisecond)
 	}
-	s.AddNode(&graph.Node{ID: "handoff:closed", Name: "CloseCompleted", Kind: graph.KindFunction, File: "fixture.go"})
+	s.AddNode(&graph.Node{ID: "handoff:closed", Name: "CloseCompleted", Kind: graph.KindFunction, FilePath: "fixture.go"})
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
