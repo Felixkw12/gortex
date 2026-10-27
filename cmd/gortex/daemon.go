@@ -367,6 +367,8 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		})
 	}
 	defer retirementWorker.Stop()
+	// Assigned before Listen/Serve can admit a control shutdown.
+	var cancelJanitor, stopJanitor func()
 	stopBackground := func() {
 		// Revoke every independent producer before the first ownership join.
 		warmupTask.cancel()
@@ -374,10 +376,20 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		state.shared.BeginSemanticClose()
 		state.shared.BeginBackgroundClose()
 		state.lifecycle.Cancel()
+		retirementWorker.Cancel()
+		if cancelJanitor != nil {
+			cancelJanitor()
+		}
 		// Revoke startup before any join. The completion boundary is also
 		// the watcher handoff barrier: startup cannot attach/publish another
 		// watcher after StopWatcher has finished.
 		stopDaemonWarmup(warmupTask, controller, logger)
+		if stopJanitor != nil {
+			started := time.Now()
+			logger.Info("daemon: shutdown phase start", zap.String("phase", "reconcile_janitor"))
+			stopJanitor()
+			logger.Info("daemon: shutdown phase complete", zap.String("phase", "reconcile_janitor"), zap.Duration("elapsed", time.Since(started)))
+		}
 		retirementWorker.Stop()
 	}
 	runTeardown := installDaemonTeardown(controller, stopBackground, func() error {
@@ -581,11 +593,6 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			return buildDaemonHealthSnapshot(daemonStart, controllerCapture, stateCapture, srvCapture)
 		})
 	}
-	defer func() {
-		if state.mcpServer != nil {
-			state.mcpServer.StopHealthBroadcaster()
-		}
-	}()
 
 	// First workspace_readiness phase — the store is open and the daemon
 	// state is built, but warmup hasn't started yet. The phase name is
@@ -599,9 +606,8 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	// event-queue overflow). Default interval 1 h; override via
 	// GORTEX_RECONCILE_INTERVAL (a Go duration string, e.g. "15m").
 	// Set to "0" to disable.
-	stopJanitor := startReconcileJanitor(
+	cancelJanitor, stopJanitor = startReconcileJanitor(
 		state.multiIndexer, state.lifecycle, reconcileInterval(), logger)
-	defer stopJanitor()
 
 	// Physical cleanup left by Seed runs only after the ready phase is
 	// published. Install and own the worker before enabling deferral so every
@@ -888,12 +894,12 @@ func startReconcileJanitor(
 	lifecycle *indexer.CheckoutLifecycle,
 	interval time.Duration,
 	logger *zap.Logger,
-) func() {
+) (cancel func(), stop func()) {
 	if mi == nil || interval <= 0 {
 		logger.Info("daemon: reconcile janitor disabled")
-		return func() {}
+		return func() {}, func() {}
 	}
-	janitorCtx, janitorDone, stop := newReconcileJanitorLifetime()
+	janitorCtx, janitorDone, cancel, stop := newCancelableReconcileJanitorLifetime()
 	go func() {
 		defer close(janitorDone)
 		t := time.NewTicker(interval)
@@ -922,7 +928,7 @@ func startReconcileJanitor(
 					if janitorCtx.Err() != nil {
 						return swept, 0
 					}
-					results := mi.ReconcileAll()
+					results := mi.ReconcileAllCtx(janitorCtx)
 					reconciled := 0
 					for _, r := range results {
 						if r != nil {
@@ -941,7 +947,7 @@ func startReconcileJanitor(
 			}
 		}
 	}()
-	return stop
+	return cancel, stop
 }
 
 // daemonStartAcceptedFlags returns every flag the re-exec'd `daemon start`

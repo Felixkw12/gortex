@@ -172,11 +172,12 @@ type SharedServer struct {
 	ResolverLSPRegistry *lsp.ResolverHelperRegistry
 	LSPRouter           *lsp.Router
 
-	cleanup       []sharedCleanup // run LIFO by Close (backend close, savings flush).
-	closeOnce     sync.Once
-	closeErr      error
-	logger        *zap.Logger
-	semanticOwner *semantic.Manager // constructed once, immutable after publication
+	cleanup        []sharedCleanup // run LIFO by Close (backend close, savings flush).
+	closeOnce      sync.Once
+	closeErr       error
+	logger         *zap.Logger
+	semanticOwner  *semantic.Manager     // constructed once, immutable after publication
+	telemetryOwner *telemetrySenderOwner // construction-owned, joined before file-store teardown
 	// sidecarPaths are the sidecar databases this stack caused to be
 	// opened — the side stores and the savings ledger. They are released
 	// after the teardown chain, not inside it.
@@ -206,9 +207,13 @@ func (s *SharedServer) BeginSemanticClose() {
 // BeginBackgroundClose cancels the MCP notifier before lifecycle's analysis
 // lane is joined. Its actual completion remains the mcp_background step.
 func (s *SharedServer) BeginBackgroundClose() {
-	if s != nil && s.MCP != nil {
+	if s == nil {
+		return
+	}
+	if s.MCP != nil {
 		s.MCP.BeginBackgroundClose()
 	}
+	s.telemetryOwner.Cancel()
 }
 
 // Close runs the teardown chain LIFO, then releases every sidecar database
@@ -272,18 +277,49 @@ const telemetryConsentTTL = 5 * time.Second
 // and returns a stop function for the cleanup chain. It re-resolves consent
 // each tick so `gortex telemetry off` stops transmission within one interval,
 // and is a complete no-op while GORTEX_TELEMETRY_ENDPOINT is unset.
-func startTelemetrySender(srv *gortexmcp.Server, store *telemetry.Store, dir, version string) func() {
+type telemetrySenderOwner struct {
+	cancel context.CancelFunc
+	done   <-chan struct{}
+}
+
+func (o *telemetrySenderOwner) Cancel() {
+	if o != nil {
+		o.cancel()
+	}
+}
+func (o *telemetrySenderOwner) Close() {
+	if o != nil {
+		o.Cancel()
+		<-o.done
+	}
+}
+
+func startTelemetrySender(srv *gortexmcp.Server, store *telemetry.Store, dir, version string) *telemetrySenderOwner {
+	return startTelemetrySenderWithInterval(srv, store, dir, version, telemetrySendInterval)
+}
+
+func startTelemetrySenderWithInterval(srv *gortexmcp.Server, store *telemetry.Store, dir, version string, interval time.Duration) *telemetrySenderOwner {
 	sender := telemetry.NewSender(store, dir, version, os.Getenv)
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	go func() {
-		t := time.NewTicker(telemetrySendInterval)
+		defer close(done)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		flushAndSend := func() {
+			if ctx.Err() != nil {
+				return
+			}
 			srv.FlushTelemetry()
+			// A contextless file flush is still an actual owner. Cancellation
+			// prevents another send, but Close waits for the flush to return.
+			if ctx.Err() != nil {
+				return
+			}
 			consent := telemetry.ResolveConsent(telemetry.LoadConsentConfig(dir), os.Getenv)
 			sender.MaybeSend(ctx, consent)
 		}
-		flushAndSend() // opportunistic send on startup
+		flushAndSend()
 		for {
 			select {
 			case <-ctx.Done():
@@ -293,7 +329,15 @@ func startTelemetrySender(srv *gortexmcp.Server, store *telemetry.Store, dir, ve
 			}
 		}
 	}()
-	return cancel
+	return &telemetrySenderOwner{cancel: cancel, done: done}
+}
+
+// Construction only: install the actual producer and its named completion
+// together before publishing the stack. Shutdown never attaches a replacement.
+func (s *SharedServer) installTelemetrySender(srv *gortexmcp.Server, store *telemetry.Store, dir, version string) {
+	owner := startTelemetrySender(srv, store, dir, version)
+	s.telemetryOwner = owner
+	s.addCleanup("telemetry_sender", func() error { owner.Close(); return nil })
 }
 
 // NewSharedServer builds the whole server stack — graph.Store ->
@@ -905,11 +949,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		// so the event shape survives a future second store.
 		// Opt-in + fail-silent: a disabled recorder drops it.
 		telemetry.RecordDaemonSession(teleRec, "sqlite")
-		stopTelemetry := startTelemetrySender(srv, teleStore, teleDir, cfg.Version)
-		s.addCleanup("telemetry_sender", func() error {
-			stopTelemetry()
-			return nil
-		})
+		s.installTelemetrySender(srv, teleStore, teleDir, cfg.Version)
 	}
 
 	// Side-stores. The HTTP path previously wired NONE of these; routing it
