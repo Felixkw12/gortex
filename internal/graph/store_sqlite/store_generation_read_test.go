@@ -1288,6 +1288,52 @@ func generationReadProbes() []genProbe {
 			return crossRepoTokens(s.CrossRepoCandidatesForMutation([]graph.EdgeKind{graph.EdgeCalls}, []string{genReadFileA}, []string{genReadFileA}))
 		}},
 
+		{name: "ScopedDeadCodeReads", run: func(t *testing.T, s *Store) []string {
+			repos := []string{genReadRepo}
+			out := nodeTokens(s.DeadCodeCandidatesInRepos([]graph.NodeKind{graph.KindFunction}, map[graph.NodeKind][]graph.EdgeKind{graph.KindFunction: {graph.EdgeCalls}}, repos))
+			for n := range s.NodesByKindInRepos(graph.KindFile, repos) {
+				out = append(out, nodeTokens([]*graph.Node{n})...)
+			}
+			for _, row := range s.IfaceImplementsRowsInRepos(repos) {
+				out = append(out, fmt.Sprintf("scoped impl %s->%s methods=%v", row.TypeID, row.IfaceID, row.IfaceMeta["methods"]))
+			}
+			return out
+		}},
+		{name: "FilteredScopedDeadCodeReads", run: func(t *testing.T, s *Store) []string {
+			filter := graph.OutlineEdgeFilter{ExcludeKinds: []graph.EdgeKind{graph.EdgeMatches}, ExcludeVia: "spring.Bean"}
+			nodes, err := s.DeadCodeCandidatesInReposFiltered([]graph.NodeKind{graph.KindFunction}, map[graph.NodeKind][]graph.EdgeKind{graph.KindFunction: {graph.EdgeCalls}}, []string{genReadRepo}, filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := nodeTokens(nodes)
+			rows, err := s.IfaceImplementsRowsInReposFiltered([]string{genReadRepo}, filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range rows {
+				out = append(out, fmt.Sprintf("filtered impl %s->%s methods=%v", row.TypeID, row.IfaceID, row.IfaceMeta["methods"]))
+			}
+			return out
+		}},
+		{name: "ScopedOutlineNodes", run: func(t *testing.T, s *Store) []string {
+			scope := graph.NodeScope{RepoAllow: map[string]bool{genReadRepo: true}}
+			ids, err := s.OutlineNodeIDsInScope(scope, genReadProbeIDs())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out []string
+			for _, id := range ids {
+				out = append(out, "outline id "+id)
+			}
+			for _, name := range genReadProbeNames() {
+				nodes, err := s.OutlineNodesByName(scope, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out = append(out, nodeTokens(nodes)...)
+			}
+			return out
+		}},
 		{name: "DeadCodeCandidates", run: func(t *testing.T, s *Store) []string {
 			return nodeTokens(s.DeadCodeCandidates(
 				[]graph.NodeKind{graph.KindFunction},
@@ -2103,6 +2149,9 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.FileBatchEvicter)(nil), skip: skipWrite, writeFence: "TestGenerationScopedFileEvict"},
 		{iface: (*graph.FileEditingContext)(nil), probe: "FileEditingContext"},
 		{iface: (*graph.FileImportAggregator)(nil), probe: "FileImportCounts"},
+		{iface: (*graph.ScopedDeadCodeReader)(nil), probe: "ScopedDeadCodeReads"},
+		{iface: (*graph.FilteredScopedDeadCodeReader)(nil), probe: "FilteredScopedDeadCodeReads"},
+		{iface: (*graph.ScopedOutlineNodeReader)(nil), probe: "ScopedOutlineNodes"},
 		{iface: (*graph.ScopedOutlineAggregator)(nil), probe: "ScopedOutlineCounts"},
 		{iface: (*graph.FilteredScopedOutlineAggregator)(nil), probe: "ScopedOutlineCountsFiltered"},
 		{iface: (*graph.FileImporters)(nil), probe: "FileImporters"},
