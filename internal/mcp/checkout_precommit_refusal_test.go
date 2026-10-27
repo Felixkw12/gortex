@@ -128,6 +128,21 @@ func TestCheckoutPrecommitRefusalExcludesMultiFileAndAppliedScopes(t *testing.T)
 	}
 }
 
+func TestCheckoutPrecommitTopLevelScopeRequiresKnownSingleFileTool(t *testing.T) {
+	for _, tool := range []string{"edit_file", "write_file", "edit_symbol"} {
+		require.True(t, singleFileCheckoutMutationTool(tool), tool)
+	}
+	for _, tool := range []string{"", "unknown_source_tool", "batch_edit", "rename_symbol", "scaffold", "safe_delete_symbol"} {
+		t.Run(tool, func(t *testing.T) {
+			ctx := withCheckoutMutation(t.Context(), &primitiveCheckoutMutation{}, t.TempDir())
+			checkoutMutationFromContext(ctx).singleFile = singleFileCheckoutMutationTool(tool)
+			// Even reusing a single-file primitive cannot widen an unknown or
+			// multi-file top-level operation into a no-bytes permission proof.
+			require.False(t, singleFilePrecommitRefusal(ctx, "edit_file"))
+		})
+	}
+}
+
 func TestCheckoutPrecommitRefusalRejectsUnprovenErrors(t *testing.T) {
 	f := heldPrecommitFixture(t)
 	for _, cause := range []error{

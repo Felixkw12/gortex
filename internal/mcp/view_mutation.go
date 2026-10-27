@@ -113,11 +113,20 @@ func (s *Server) prepareRoutedViewMutation(
 		return ctx, noop, mcp.NewToolResultError(message)
 	}
 	ctx = withCheckoutMutation(ctx, mutation, view.viewRoot)
-	checkoutMutationFromContext(ctx).singleFile = legacy != "batch_edit"
+	checkoutMutationFromContext(ctx).singleFile = singleFileCheckoutMutationTool(legacy)
 	return ctx, func() {
 		mutation.Close()
 		release()
 	}, nil
+}
+
+func singleFileCheckoutMutationTool(tool string) bool {
+	switch tool {
+	case "edit_file", "write_file", "edit_symbol":
+		return true
+	default:
+		return false
+	}
 }
 
 // routeRecompositionWait bounds how long an edit waits for its checkout's
