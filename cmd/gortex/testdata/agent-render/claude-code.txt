@@ -29,7 +29,7 @@
             "type": "command"
           }
         ],
-        "matcher": "mcp__gortex__explore|mcp__gortex__search|mcp__gortex__read|mcp__gortex__relations|mcp__gortex__trace|mcp__gortex__analyze|mcp__plugin_gortex_gortex__explore|mcp__plugin_gortex_gortex__search|mcp__plugin_gortex_gortex__read|mcp__plugin_gortex_gortex__relations|mcp__plugin_gortex_gortex__trace|mcp__plugin_gortex_gortex__analyze"
+        "matcher": "mcp__gortex__explore|mcp__gortex__search|mcp__gortex__read|mcp__gortex__relations|mcp__gortex__trace|mcp__gortex__analyze|mcp__plugin_gortex_gortex__explore|mcp__plugin_gortex_gortex__search|mcp__plugin_gortex_gortex__read|mcp__plugin_gortex_gortex__relations|mcp__plugin_gortex_gortex__trace|mcp__plugin_gortex_gortex__analyze|mcp__gortex__edit|mcp__gortex__edit_file|mcp__gortex__write_file|mcp__gortex__edit_symbol|mcp__gortex__batch_edit|mcp__plugin_gortex_gortex__edit|mcp__plugin_gortex_gortex__edit_file|mcp__plugin_gortex_gortex__write_file|mcp__plugin_gortex_gortex__edit_symbol|mcp__plugin_gortex_gortex__batch_edit"
       }
     ],
     "PreToolUse": [
@@ -722,7 +722,7 @@ In either mode, return `VERDICT: clean` or `VERDICT: findings` followed by actio
             "type": "command"
           }
         ],
-        "matcher": "mcp__gortex__explore|mcp__gortex__search|mcp__gortex__read|mcp__gortex__relations|mcp__gortex__trace|mcp__gortex__analyze|mcp__plugin_gortex_gortex__explore|mcp__plugin_gortex_gortex__search|mcp__plugin_gortex_gortex__read|mcp__plugin_gortex_gortex__relations|mcp__plugin_gortex_gortex__trace|mcp__plugin_gortex_gortex__analyze"
+        "matcher": "mcp__gortex__explore|mcp__gortex__search|mcp__gortex__read|mcp__gortex__relations|mcp__gortex__trace|mcp__gortex__analyze|mcp__plugin_gortex_gortex__explore|mcp__plugin_gortex_gortex__search|mcp__plugin_gortex_gortex__read|mcp__plugin_gortex_gortex__relations|mcp__plugin_gortex_gortex__trace|mcp__plugin_gortex_gortex__analyze|mcp__gortex__edit|mcp__gortex__edit_file|mcp__gortex__write_file|mcp__gortex__edit_symbol|mcp__gortex__batch_edit|mcp__plugin_gortex_gortex__edit|mcp__plugin_gortex_gortex__edit_file|mcp__plugin_gortex_gortex__write_file|mcp__plugin_gortex_gortex__edit_symbol|mcp__plugin_gortex_gortex__batch_edit"
       }
     ],
     "PreToolUse": [
