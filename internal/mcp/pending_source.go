@@ -43,7 +43,7 @@ func (p *pendingSourceRegistry) register(record *mutationCommitRecord) {
 func (s *Server) pendingSourcePaths(checkoutID, incarnation string) []string {
 	s.retireDeadPendingSourceIncarnations()
 	p := &s.pendingSourceFiles
-	// Refresh may update a commit and retire canonical versions. Never invoke
+	// Refresh may update a commit and retire settled versions. Never invoke
 	// that callback while holding the registry lock.
 	p.mu.Lock()
 	records := make([]*mutationCommitRecord, 0, len(p.versions))
@@ -119,7 +119,7 @@ func (p *pendingSourceRegistry) paths(checkoutID, incarnation string) []string {
 // Resolve a late ticket immediately when the commit binds its receipt. The
 // receipt can finish before the mutation handler records its pending outcome.
 func (s *Server) refreshPendingSourceRecord(record *mutationCommitRecord) {
-	defer s.retireCanonicalPendingSource(record)
+	defer s.retireSettledPendingSource(record)
 	snap := record.snapshot()
 	if snap.GraphStatus == mutationGraphFresh || snap.ReindexReceipt == "" {
 		return
@@ -152,10 +152,10 @@ func (s *Server) refreshPendingSourceRecord(record *mutationCommitRecord) {
 	}
 }
 
-func (s *Server) retireCanonicalPendingSource(record *mutationCommitRecord) {
+func (s *Server) retireSettledPendingSource(record *mutationCommitRecord) {
 	record.mu.RLock()
-	retire := record.checkoutID == "" && (record.disk == mutationDiskNotApplied || record.disk == mutationDiskFailed ||
-		(record.graphRecorded && (record.graph == mutationGraphFresh || record.graph == mutationGraphFailed)))
+	retire := record.disk == mutationDiskNotApplied || record.disk == mutationDiskFailed ||
+		(record.graphRecorded && (record.graph == mutationGraphFresh || (record.checkoutID == "" && record.graph == mutationGraphFailed)))
 	record.mu.RUnlock()
 	if retire {
 		// Reuse the commit-order watermark rules when retiring a fresh commit;

@@ -207,3 +207,15 @@ func TestPendingSourceRegistryCanonicalFreshRetainsCommitOrderEvidence(t *testin
 	old.recordGraph(mutationReindexOutcome{Err: context.DeadlineExceeded})
 	require.Zero(t, pendingSourceVersionCount(s, ""), "a late failure cannot resurrect a retired version")
 }
+
+func TestPendingSourceRegistryCheckoutFreshRetiresBeforeAnyRead(t *testing.T) {
+	s := &Server{}
+	old := checkoutSourceVersion(s, "checkout", "incarnation", "/fixture/file.go")
+	old.markCommitted("old", 3)
+	old.recordGraph(supersededOutcome(old))
+	newer := checkoutSourceVersion(s, "checkout", "incarnation", "/fixture/file.go")
+	newer.markCommitted("new", 3)
+	newer.recordGraph(freshOutcome(newer))
+	require.Zero(t, pendingSourceVersionCount(s, "checkout"), "handler-bound publication consumes its evidence immediately")
+	require.Equal(t, mutationGraphFailed, old.snapshot().GraphStatus, "supersession retires registry ownership, not historical failure")
+}

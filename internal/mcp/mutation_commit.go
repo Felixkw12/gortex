@@ -212,7 +212,7 @@ func (r *mutationCommitRecord) markNotApplied(err error) {
 	defer func() {
 		r.mu.Unlock()
 		if r.owner != nil {
-			r.owner.retireCanonicalPendingSource(r)
+			r.owner.retireSettledPendingSource(r)
 		}
 	}()
 	r.disk = mutationDiskNotApplied
@@ -228,7 +228,7 @@ func (r *mutationCommitRecord) markFailed(err error) {
 	defer func() {
 		r.mu.Unlock()
 		if r.owner != nil {
-			r.owner.retireCanonicalPendingSource(r)
+			r.owner.retireSettledPendingSource(r)
 		}
 	}()
 	r.disk = mutationDiskFailed
