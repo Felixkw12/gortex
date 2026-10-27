@@ -300,6 +300,12 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	// A mismatch observed earlier in this invocation is not erased if the
+	// daemon vanishes between ensure and the proxy dial. Handoff/proxy failure
+	// must not turn a live-daemon protocol refusal into embedded startup.
+	if errors.Is(availabilityErr, daemon.ErrProtocolVersionMismatch) {
+		return daemonMismatchError(daemonIdentityFromMismatch(availabilityErr))
+	}
 	if mcpForceProxy {
 		return fmt.Errorf("gortex daemon is unavailable and --proxy requires it; start the daemon with `gortex daemon start`")
 	}

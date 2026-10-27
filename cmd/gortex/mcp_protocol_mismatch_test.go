@@ -134,3 +134,61 @@ func TestRunMCPMismatchNeverCreatesEmbeddedStore(t *testing.T) {
 		}
 	}
 }
+
+func TestRunMCPObservedMismatchSurvivesReadyThenUnavailableProxy(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		name := "deny"
+		if allow {
+			name = "allow"
+		}
+		t.Run(name, func(t *testing.T) {
+			testenv.Sandbox(t)
+			tmp := redirectTempRoot(t)
+			t.Chdir(tmp)
+			stubUnavailableMCPDaemon(t)
+			t.Cleanup(restoreSeams)
+			zero := 0
+			socket := serveMismatchAck(t, daemon.HandshakeAck{
+				ErrorCode: daemon.ErrProtocolMismatch, ErrorMsg: "daemon expects protocol 0, client sent 1",
+				DaemonVersion: "v0.64.10", DaemonProtocol: &zero,
+			})
+			_, observed := daemon.DialTo(socket, daemon.Handshake{Mode: daemon.ModeControl})
+			if !errors.Is(observed, daemon.ErrProtocolVersionMismatch) {
+				t.Fatalf("initial wire refusal = %v", observed)
+			}
+			probeDaemonAvailability = func() error { return observed }
+			isDaemonRunning = func() bool { return true }
+			binaryVersion = func() string { return "v0.64.12" }
+			runningDaemonInfo = func() daemonIdentity {
+				return daemonIdentity{version: "v0.64.12", protocol: daemon.ProtocolVersion, protocolKnown: true}
+			}
+			withFastDialRetry(t, 5*time.Millisecond)
+			proxyCalls := 0
+			dialDaemon = func(daemon.Handshake) (*daemon.Client, error) {
+				proxyCalls++
+				return nil, daemon.ErrDaemonUnavailable
+			}
+			path := config.DefaultGlobalConfigPath()
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			value := "false"
+			if allow {
+				value = "true"
+			}
+			if err := os.WriteFile(path, []byte("mcp:\n  allow_embedded: "+value+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := &cobra.Command{}
+			cmd.SetContext(t.Context())
+			err := runMCP(cmd, nil)
+			if !errors.Is(err, daemon.ErrProtocolVersionMismatch) || proxyCalls == 0 {
+				t.Fatalf("ready then unavailable proxy = %v (dials %d)", err, proxyCalls)
+			}
+			matches, globErr := filepath.Glob(filepath.Join(tmp, embeddedStoreDirPattern))
+			if globErr != nil || len(matches) != 0 {
+				t.Fatalf("observed mismatch allocated embedded store: %v (%v)", matches, globErr)
+			}
+		})
+	}
+}
