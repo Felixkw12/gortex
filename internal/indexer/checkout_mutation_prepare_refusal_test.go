@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,13 +84,47 @@ func TestCheckoutMutationPrepareRefusalCarriesProofWithoutPublishing(t *testing.
 
 func TestCheckoutMutationPrepareRefusalRejectsJoinedCancellationAndTransient(t *testing.T) {
 	f, _, l, _, _, err := latePrepareRefusal(t)
-	for _, excluded := range []error{context.Canceled, context.DeadlineExceeded, ErrCheckoutMutationBusy, ErrCheckoutMutationPending} {
+	ioFailure := &checkoutMutationSampleFailure{err: fmt.Errorf("%w: sample checkout: %w", ErrCheckoutMutationStale, os.ErrPermission)}
+	for _, excluded := range []error{context.Canceled, context.DeadlineExceeded, ErrCheckoutMutationBusy, ErrCheckoutMutationPending, ErrCheckoutByteAnchorUnavailable, ioFailure} {
 		if l.RecordCheckoutMutationRefusal(t.Context(), errors.Join(err, excluded)) {
 			t.Fatalf("joined %v authorized fallback", excluded)
 		}
 	}
 	if _, marked := l.CheckoutMutationRefusal(t.Context(), f.checkoutID, f.worktree); marked {
 		t.Fatal("excluded errors left a refusal mark")
+	}
+}
+
+func TestCheckoutMutationPrepareSampleFailureHasNoRefusalProof(t *testing.T) {
+	f, _, l := newCheckoutMutationFixture(t)
+	m, err := l.BeginCheckoutMutation(t.Context(), f.checkoutID, f.worktree, f.route().RouteEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	gitFile := filepath.Join(f.worktree, ".git")
+	original, err := os.ReadFile(gitFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if restoreErr := os.WriteFile(gitFile, original, 0o644); restoreErr != nil {
+			t.Errorf("restore Git entry: %v", restoreErr)
+		}
+	}()
+	// The admitted physical root/catalog still match, but Git cannot sample
+	// this checkout. Unknown source state must not authorize native fallback.
+	if err := os.WriteFile(gitFile, []byte("gitdir: missing-git-admin-directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = m.Prepare(t.Context())
+	var failedSample *checkoutMutationSampleFailure
+	if !errors.Is(err, ErrCheckoutMutationStale) || !errors.As(err, &failedSample) {
+		t.Fatalf("sampling failure lost its existing Stale contract: %v", err)
+	}
+	var proof *checkoutMutationRefusalError
+	if errors.As(err, &proof) || l.RecordCheckoutMutationRefusal(t.Context(), err) {
+		t.Fatal("failed source sample manufactured native fallback proof")
 	}
 }
 

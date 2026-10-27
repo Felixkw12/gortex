@@ -267,7 +267,7 @@ func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, check
 	}
 	sample, err := sampleMutationAdmission(gitstate.WithUrgentSample(waitCtx), c.sampler, time.Time{})
 	if err != nil {
-		return nil, fmt.Errorf("%w: byte admission sample: %w", ErrCheckoutMutationStale, err)
+		return nil, &checkoutMutationSampleFailure{err: fmt.Errorf("%w: byte admission sample: %w", ErrCheckoutMutationStale, err)}
 	}
 	if err := m.checkByteAuthority(waitCtx, sample); err != nil {
 		return nil, err

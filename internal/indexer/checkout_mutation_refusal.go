@@ -12,8 +12,9 @@ import (
 )
 
 // These slots belong to the lifecycle, not an MCP session. Only a final stale
-// admission refusal publishes a mark; admission retries carry an uncommitted
-// witness. Success invalidates earlier witnesses before it returns its lease.
+// admission refusal or a proven no-bytes precommit refusal publishes a mark;
+// admission retries carry an uncommitted witness. Success invalidates earlier
+// witnesses before it returns its lease.
 // mutationRefusalMu protects all mutable fields; catalog I/O never holds it.
 type checkoutMutationRefusalSlot struct {
 	checkoutID, incarnation, root string
@@ -117,8 +118,10 @@ func (l *CheckoutLifecycle) clearMutationRefusalOnAdmission(w checkoutMutationRe
 }
 
 func eligibleCheckoutMutationRefusal(err error) bool {
+	var failedSample *checkoutMutationSampleFailure
 	return errors.Is(err, ErrCheckoutMutationStale) && !errors.Is(err, ErrCheckoutMutationBusy) &&
-		!errors.Is(err, ErrCheckoutMutationPending) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+		!errors.Is(err, ErrCheckoutMutationPending) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+		!errors.Is(err, ErrCheckoutByteAnchorUnavailable) && !errors.As(err, &failedSample)
 }
 
 // prepareRefusal carries proof but does NOT publish policy. Only an active
@@ -181,8 +184,9 @@ func (l *CheckoutLifecycle) currentMutationRefusalRoute(ctx context.Context, che
 	return checkout, route, true
 }
 
-// RecordCheckoutMutationRefusal publishes only the final stale admission
-// witness. Busy, Pending and unrelated view_read_only errors have no witness.
+// RecordCheckoutMutationRefusal publishes only a final stale admission or
+// caller-proven no-bytes precommit witness. Busy, Pending and unrelated
+// view_read_only errors have no witness.
 // Route publication invalidates the mark by identity, without adding another
 // callback to the coordinator's publication critical path. A later coverage
 // lookup retires the obsolete mark; it can never use it for the newer route.

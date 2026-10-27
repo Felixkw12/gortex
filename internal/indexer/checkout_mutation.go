@@ -607,6 +607,11 @@ func sameMutationRoot(a, b string) bool {
 	return pathkey.EqualPaths(a, b)
 }
 
+type checkoutMutationSampleFailure struct{ err error }
+
+func (e *checkoutMutationSampleFailure) Error() string { return e.err.Error() }
+func (e *checkoutMutationSampleFailure) Unwrap() error { return e.err }
+
 // An unchanged route epoch does not imply unchanged disk: external editors and
 // git can run before the watcher reconciles. Refuse their newer state instead
 // of applying symbol offsets from the previously materialized generation.
@@ -620,7 +625,9 @@ func (m *CheckoutMutation) validateSnapshot(ctx context.Context, since time.Time
 	ctx = gitstate.WithUrgentSample(ctx)
 	sample, err := sampleMutationAdmission(ctx, c.sampler, since)
 	if err != nil {
-		return fmt.Errorf("%w: sample checkout: %w", ErrCheckoutMutationStale, err)
+		// Preserve the existing typed refusal/receipt while distinguishing
+		// unknown sampling I/O from an observed stale working-copy snapshot.
+		return &checkoutMutationSampleFailure{err: fmt.Errorf("%w: sample checkout: %w", ErrCheckoutMutationStale, err)}
 	}
 	StampPublicationPhase(ctx, PublicationWriteSampled)
 	if m.byteAnchor != nil {
@@ -741,7 +748,7 @@ func (c *CheckoutCoordinator) refuseStaleAdmission(ctx context.Context, expected
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return checkoutMutationAdmissionError(ctx, "checkout snapshot pre-check", ctxErr)
 		}
-		return fmt.Errorf("%w: sample checkout: %w", ErrCheckoutMutationStale, err)
+		return &checkoutMutationSampleFailure{err: fmt.Errorf("%w: sample checkout: %w", ErrCheckoutMutationStale, err)}
 	}
 	return c.checkRoutedSnapshot(ctx, route, sample)
 }
