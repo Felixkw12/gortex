@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -172,8 +173,9 @@ func (s *SpawnTransport) Description() string { return s.Command }
 // already-running LSP server (e.g. one started by the user's IDE) and
 // uses the resulting net.Conn as the JSON-RPC carrier.
 type DialTransport struct {
-	Network string // "tcp" or "unix"
-	Address string // host:port (tcp) or socket path (unix)
+	ctx     context.Context // optional owner cancellation while dialing
+	Network string          // "tcp" or "unix"
+	Address string          // host:port (tcp) or socket path (unix)
 
 	conn net.Conn
 	// connWriter wraps conn so closing the write half does not also
@@ -188,7 +190,11 @@ type DialTransport struct {
 // Start dials the configured network/address and returns paired
 // read/write halves of the connection.
 func (d *DialTransport) Start() (io.WriteCloser, io.Reader, error) {
-	conn, err := net.Dial(d.Network, d.Address)
+	ctx := d.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conn, err := (&net.Dialer{}).DialContext(ctx, d.Network, d.Address)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dial %s %s: %w", d.Network, d.Address, err)
 	}

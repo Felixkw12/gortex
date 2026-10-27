@@ -57,6 +57,17 @@ func runShutdownHelper(t *testing.T, mode string) {
 		}
 		_, _ = fmt.Fprintln(trace, req.Method)
 		_ = trace.Sync()
+		if req.Method == "initialize" && mode == helperLSPInitBarrier {
+			if err := os.WriteFile(os.Getenv(helperInitEnteredEnv), []byte(fmt.Sprint(os.Getpid())), 0o600); err != nil {
+				os.Exit(2)
+			}
+			for {
+				if _, err := os.Stat(os.Getenv(helperInitReleaseEnv)); err == nil {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
 		if req.Method == "shutdown" && mode == helperLSPIgnore {
 			continue
 		}

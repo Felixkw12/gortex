@@ -27,13 +27,16 @@ const (
 	helperCat = "cat"
 	// helperStderrLines writes helperLinesEnv "err<N>" lines to stderr and
 	// then one line to stdout.
-	helperStderrLines   = "stderr-lines"
-	helperLSPGraceful   = "lsp-graceful"
-	helperLSPIgnore     = "lsp-ignore-shutdown"
-	helperLSPNoRead     = "lsp-no-read"
-	helperExitClean     = "exit-clean"
-	helperTranscriptEnv = "GORTEX_LSP_SUBPROCESS_TRANSCRIPT"
-	helperReadyEnv      = "GORTEX_LSP_SUBPROCESS_READY"
+	helperStderrLines    = "stderr-lines"
+	helperLSPInitBarrier = "lsp-initialize-barrier"
+	helperInitEnteredEnv = "GORTEX_LSP_HELPER_INITIALIZE_ENTERED"
+	helperInitReleaseEnv = "GORTEX_LSP_HELPER_INITIALIZE_RELEASE"
+	helperLSPGraceful    = "lsp-graceful"
+	helperLSPIgnore      = "lsp-ignore-shutdown"
+	helperLSPNoRead      = "lsp-no-read"
+	helperExitClean      = "exit-clean"
+	helperTranscriptEnv  = "GORTEX_LSP_SUBPROCESS_TRANSCRIPT"
+	helperReadyEnv       = "GORTEX_LSP_SUBPROCESS_READY"
 )
 
 // helperArgs is the argv that re-runs this binary as the helper process.
@@ -85,7 +88,7 @@ func TestSubprocessHelper(t *testing.T) {
 		return
 	}
 	switch mode {
-	case helperLSPGraceful, helperLSPIgnore, helperLSPNoRead:
+	case helperLSPGraceful, helperLSPIgnore, helperLSPNoRead, helperLSPInitBarrier:
 		runShutdownHelper(t, mode)
 	case helperExitClean:
 		// Immediate success exercises EOF before the caller begins shutdown.
