@@ -5,15 +5,16 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
-type analysisWriteContextBinder interface {
-	BindAnalysisWriteContext(context.Context) graph.AnalysisGenerationStore
-}
-
 func bindAnalysisWriteContext(writer graph.AnalysisGenerationStore, ctx context.Context) graph.AnalysisGenerationStore {
-	if binder, ok := writer.(analysisWriteContextBinder); ok {
-		return binder.BindAnalysisWriteContext(ctx)
+	// Bind only the concrete handle. An embedding wrapper may inherit the
+	// method while overriding publication or writes; its promoted method would
+	// return the raw Store and erase those semantics. Unknown/decorated writers
+	// retain their existing owned fallback, without an interruptibility claim.
+	if store, ok := writer.(*store_sqlite.Store); ok {
+		return store.BindAnalysisWriteContext(ctx)
 	}
 	return writer // Legacy writer remains actually owned, without a bound claim.
 }

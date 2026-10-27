@@ -69,3 +69,19 @@ func TestAnalysisAbortHeldGateRetainsCleanupDeadlineWithoutReleasingHolder(t *te
 	require.NoError(t, err)
 	require.False(t, found)
 }
+
+func TestAnalysisWriteContextBindingPreservesDecoratedWriter(t *testing.T) {
+	store, _ := buildAnalysisCacheTestGraph(t, 2)
+	t.Cleanup(func() { _ = store.Close() })
+	wrapped := &mutateBeforeAnalysisCommitStore{
+		countingAnalysisCacheStore: newCountingAnalysisCacheStore(store),
+		node:                       &graph.Node{ID: "binding-mutation", Kind: graph.KindFunction, Name: "Mutation"},
+	}
+	bound := bindAnalysisWriteContext(wrapped, context.Background())
+	require.Same(t, wrapped, bound, "promoted binding must not erase wrapper admission/publication semantics")
+	revision := store.AnalysisMutationRevision()
+	installed := false
+	require.False(t, bound.CommitAnalysisSnapshot(revision, func() { installed = true }))
+	require.False(t, installed)
+	require.NotNil(t, store.GetNode("binding-mutation"))
+}
