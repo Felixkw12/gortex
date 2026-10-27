@@ -2674,6 +2674,7 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 	}
 
 	start := time.Now()
+	writes := idx.writeCounterMark()
 	kind = w.reconcileKindWithDisk(path, kind)
 	// This is the identity duplicate gate for native watcher events. A Darwin
 	// startup replay already checked the persisted receipt, so it bypasses this
@@ -2827,7 +2828,9 @@ func (w *Watcher) patchGraphWithReceiptStateRawModern(
 			zap.String("file", path),
 			zap.String("kind", string(kind)),
 			zap.String("delta_class", classification),
-			zap.Int64("ms", ev.DurationMs))
+			zap.Int64("ms", ev.DurationMs),
+			zap.Int("incident_edges", priorEdges),
+			zap.Inline(patchWriteLog{split: idx.writeCounterMark().Since(writes)}))
 	}
 	if superseded {
 		// Every core write of the patch landed before the newer generation

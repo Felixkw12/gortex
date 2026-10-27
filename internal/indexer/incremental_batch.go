@@ -155,7 +155,7 @@ func (idx *Indexer) reindexIncrementalFilesBatched(
 		}
 		defer func() { idx.deletionReparsePaths = nil }()
 	}
-	deleteTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "graph_delete",
+	deleteTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "graph_delete",
 		zap.Int("deleted_files", len(deletedFiles)))
 	defer deleteTiming.abort()
 	idx.evictDeletedFilesBatched(deletedFiles, &invalidation)
@@ -253,7 +253,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 	}
 
 	graphPaths := make([]string, len(files))
-	priorTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_prior_graph",
+	priorTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_prior_graph",
 		zap.Int("candidate_files", len(files)))
 	defer priorTiming.abort()
 	for i, filePath := range files {
@@ -262,7 +262,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 	priorByFile := idx.graph.GetFileNodesByPaths(graphPaths)
 	legacyByFile := idx.legacyNodesByPath(graphPaths)
 	priorTiming.complete(nil)
-	parseTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_parse",
+	parseTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_parse",
 		zap.Int("candidate_files", len(files)), zap.Bool("includes_admission_wait", true))
 	defer parseTiming.abort()
 
@@ -450,7 +450,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 			stage.releasePrepared()
 		}
 	}
-	receiptTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_receipts",
+	receiptTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_receipts",
 		zap.Int("receipts", len(receipts)))
 	defer receiptTiming.abort()
 	freshPaths, stalePaths := idx.recordFileReadVersionsBatched(receipts)
@@ -472,7 +472,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 	if len(fallbacks) > 0 {
 		// Legacy fallback combines extraction and graph mutation; do not label
 		// this interval as parse-only or silently charge it to graph apply.
-		fallbackTiming = startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_fallback_parse_apply",
+		fallbackTiming = idx.startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_fallback_parse_apply",
 			zap.Int("files", len(fallbacks)))
 		defer fallbackTiming.abort()
 	}
@@ -631,7 +631,7 @@ func (idx *Indexer) commitIncrementalStages(
 	stages []*incrementalBatchStage,
 	markerBatch *reparsePendingEnrichmentBatch,
 ) DerivedInvalidationPlan {
-	timing := startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_graph_apply",
+	timing := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_graph_apply",
 		zap.Int("staged_files", len(stages)))
 	defer timing.abort()
 	var plan DerivedInvalidationPlan
@@ -1900,10 +1900,11 @@ func (idx *Indexer) materializeDataflowParamsForStages(stages []*incrementalBatc
 // switch does not retain 1,000 parse trees or issue one query per file.
 func (idx *Indexer) materializeDataflowParamsForFiles(graphPaths []string) {
 	graphPaths = appendUniqueSorted(nil, graphPaths...)
-	legs := newRefFactLegs()
+	legs := newRefFactLegs(idx.writeCounterMark)
+	writes := idx.writeCounterMark()
 	defer func() {
 		if idx.logger != nil && len(graphPaths) > 0 {
-			fields := legs.fields(len(graphPaths))
+			fields := append(legs.fields(len(graphPaths)), writeCounterFields("dataflow_", idx.writeCounterMark().Since(writes))...)
 			if p := idx.dataflowParams; p != nil {
 				fields = append(fields, zap.Int("param_hits", p.hits), zap.Int("param_misses", p.misses))
 			}

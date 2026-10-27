@@ -53,11 +53,11 @@ func (r *Resolver) ResolveFilesOutgoing(filePaths []string) *ResolveStats {
 		r.restoreIncrementalTerminalStampsLocked(frontier.paths)
 		return stats
 	}
-	finish := startIncrementalPhase(logger, "outgoing_build_indexes")
+	finish := r.startIncrementalPhase(logger, "outgoing_build_indexes")
 	clear := r.buildPassIndexesForPending(frontier.pending)
 	indexDuration = finish(zap.Int("pending", len(frontier.pending)))
 	defer clear()
-	finish = startIncrementalPhase(logger, "outgoing_warm_lookup")
+	finish = r.startIncrementalPhase(logger, "outgoing_warm_lookup")
 	if err := r.warmLookupCache(frontier.pending); err != nil {
 		r.clearLookupCache()
 		outcome = "metadata_error"
@@ -67,11 +67,11 @@ func (r *Resolver) ResolveFilesOutgoing(filePaths []string) *ResolveStats {
 	}
 	warmDuration = finish()
 	defer r.clearLookupCache()
-	finish = startIncrementalPhase(logger, "outgoing_resolve")
+	finish = r.startIncrementalPhase(logger, "outgoing_resolve")
 	r.resolvePreparedFileEdgesLocked(frontier.paths, frontier.nodesByFile, frontier.outByNode, stats, frontier.detached...)
 	outgoingDuration = finish(
 		zap.Int("resolved", stats.Resolved), zap.Int("unresolved", stats.Unresolved), zap.Int("external", stats.External))
-	finish = startIncrementalPhase(logger, "outgoing_attribution")
+	finish = r.startIncrementalPhase(logger, "outgoing_attribution")
 	r.prepareIncrementalAttributionCache(frontier)
 	r.runFileAttributionPassesForFilesLocked(frontier)
 	r.clearIncrementalAttributionCache()
