@@ -1280,8 +1280,14 @@ func wrapBulkRestoreError(pragma string, err error) error {
 // disk, and interrupting it fails the whole load for slow but healthy I/O.
 // busy_timeout and withSQLiteBusyRetry still bound reader contention.
 func (s *Store) checkpointBulkWAL() error {
+	return s.checkpointBulkWALContext(context.Background())
+}
+
+// The Close caller may supply its explicit legacy cap. Ordinary FlushBulk
+// retains its existing unlimited individual checkpoint and retry policy.
+func (s *Store) checkpointBulkWALContext(ctx context.Context) error {
 	started := time.Now()
-	result, err := s.checkpointWALWithContextResult(context.Background())
+	result, err := s.checkpointWALWithContextResult(ctx)
 	s.emitBulkFinalizeEvent(bulkFinalizeEvent{
 		Stage: "checkpoint", Name: "wal_truncate", Elapsed: time.Since(started),
 		Busy: result.Busy, WALFrames: result.WALFrames,

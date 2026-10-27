@@ -1805,17 +1805,29 @@ func (s *Store) stopCheckpointLoop() {
 }
 
 // Close closes every prepared statement and the underlying *sql.DB. It
-// first stops the WAL-checkpoint loop and issues one final TRUNCATE
-// checkpoint so the -wal file is drained and shrunk on graceful shutdown
-// rather than lingering at its high-water mark until the next open.
+// first stops the WAL-checkpoint loop and joins the actual store owners.
+// By default committed WAL frames remain for the next open; an explicit full
+// close-checkpoint policy retains the final TRUNCATE drain.
 //
 // Only the handle Open returned tears the core down. Closing a handle
 // derived by AtGeneration is a no-op that returns nil: the derived handle
 // borrows pools and statements it does not own, and closing them would break
 // every other handle over the same database.
-func (s *Store) Close() error {
+func (s *Store) Close() (closeErr error) {
 	if !s.ownsCore {
 		return nil
+	}
+	policy := resolveCloseCheckpointPolicy()
+	started := time.Now()
+	defer func() {
+		errText := ""
+		if closeErr != nil {
+			errText = closeErr.Error()
+		}
+		log.Printf("store_sqlite: close complete checkpoint_policy=%s duration=%s error=%q", policy.mode(), time.Since(started).Round(time.Millisecond), errText)
+	}()
+	if policy.warning != "" {
+		log.Printf("store_sqlite: close checkpoint policy warning: %s", policy.warning)
 	}
 	unwatchHolds(s.storeCore)
 	forgetFreshFTS(s.storeCore)
@@ -1853,18 +1865,31 @@ func (s *Store) Close() error {
 	s.releaseGenerationBulkCheckpointLease(generationLease)
 
 	var checkpointErr error
-	if s.checkpointDone != nil { // on-disk store: drain the WAL one last time
+	if s.checkpointDone != nil && policy.full { // explicit on-disk final drain
 		if hadBulk {
-			checkpointErr = s.checkpointBulkWAL()
+			ctx := context.Background()
+			pending := int64(-1)
+			if snap, ok := readWALIndexSnapshot(s.dbPath); ok {
+				pending = snap.PendingFrames()
+			}
+			if deadline := policy.deadline(pending); deadline > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, deadline)
+				defer cancel()
+			}
+			checkpointErr = s.checkpointBulkWALContext(ctx)
 		} else {
-			// Close is a durability boundary, not an interactive checkpoint.
+			// This is an explicit full drain, not an interactive checkpoint.
 			// A successful filesystem sync can exceed CheckpointWAL's deadline
 			// on a busy disk, and a large backlog needs far longer, so the
 			// deadline scales with the pending frames (closeCheckpointWAL);
 			// withSQLiteBusyRetry still bounds repeated lock contention, and
 			// checkpoint errors remain fatal.
-			checkpointErr = s.closeCheckpointWAL()
+			checkpointErr = s.closeCheckpointWAL(policy)
 		}
+	}
+	if s.checkpointDone != nil && !policy.full {
+		log.Printf("store_sqlite: close checkpoint skipped policy=skip wal_bytes=%d", walFileSize(s.dbPath+"-wal"))
 	}
 	stmts := []*sql.Stmt{
 		s.stmtInsertNode, s.stmtGetNode, s.stmtGetNodeByQual,

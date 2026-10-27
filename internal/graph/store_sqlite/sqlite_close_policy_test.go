@@ -186,6 +186,8 @@ func TestSQLiteNoCloseCheckpointLastConnectionPreservesWALAndReopens(t *testing.
 }
 
 func TestSQLiteNoCloseCheckpointKeepsExplicitCloseAndRealFailureDurability(t *testing.T) {
+	t.Setenv("GORTEX_SQLITE_CLOSE_CHECKPOINT", "full")
+	t.Setenv("GORTEX_SQLITE_CLOSE_CHECKPOINT_MAX_S", "")
 	for _, failCheckpoint := range []bool{false, true} {
 		t.Run(map[bool]string{false: "explicit-drain", true: "checkpoint-error"}[failCheckpoint], func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "close.sqlite")
