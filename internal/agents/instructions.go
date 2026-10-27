@@ -125,7 +125,7 @@ func InstructionsDir(env Env) string {
 // MCP-capable agent's working context.
 const InstructionsBody = `## MANDATORY: Use Gortex MCP tools instead of Read/Grep
 
-For every coding task:
+When Gortex can serve the step:
 
 1. Call ` + "`" + `explore` + "`" + ` first with the complete task. Work from the returned source and call paths; do not reopen them with file or shell tools.
 2. Inspect indexed code only with ` + "`" + `search` + "`" + `, ` + "`" + `read` + "`" + `, ` + "`" + `relations` + "`" + `, and ` + "`" + `trace` + "`" + `. Never use Read/Grep/Glob or shell equivalents for indexed source.

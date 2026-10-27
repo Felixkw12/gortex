@@ -48,7 +48,7 @@ var sectionExploreOpener = bt(`For an explicitly named file to read/review/summa
 // sectionCompactWorkflow is the ambient workflow for the default compact MCP
 // surface. It is deliberately directive and names only public tools an agent
 // can actually call; exact operation schemas remain on demand.
-var sectionCompactWorkflow = bt(`For every coding task:
+var sectionCompactWorkflow = bt(`When Gortex can serve the step:
 
 1. Named-file read/review/summarize: first new-task call §read(operation:"file", target:{file:"<path>"}, options:{new_user_task:true})§; do not localize. To discover a file, symbol, or evidence, call §explore(operation:"localize")§ and obey §completion.required_action§; after §answer_ready§, answer from §completion.final_response§ and stop. For diagnosis or modification, call §explore(operation:"task")§.
 2. In a diagnosis/change flow, make at most one follow-up on one unresolved symbol with §search§, §read§, §relations§, or §trace§; then step 3. Never reopen indexed source with Read/Grep/Glob or shell equivalents.
@@ -99,7 +99,9 @@ const WorktreeBranchRoutingPolicy = "- The session/CWD selects the view. A sessi
 const sectionWorktreeViews = "## Worktree and branch routing\n\n" + WorktreeBranchRoutingPolicy +
 	"Never restart the daemon, delete its store, or re-track merely to expose a worktree.\n\n"
 
-var sectionFullRuleTable = bt(`| Instead of...                       | Use...                                   |
+var sectionFullRuleTable = bt(`When Gortex can serve the step:
+
+| Instead of...                       | Use...                                   |
 |-------------------------------------|------------------------------------------|
 | Explicitly named file to read / review / summarize | First new-task read: §read(operation:"file", target:{file:"<path>"}, options:{new_user_task:true})§ |
 | Unknown file / symbol / evidence / "where is X" | §explore(operation:"localize")§; obey §completion§ |

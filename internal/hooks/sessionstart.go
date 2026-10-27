@@ -476,7 +476,7 @@ func hasPathPrefix(path, prefix string) bool {
 // — this is just enough that an agent in the very first turn knows
 // to reach for graph tools first.
 func rulePreamble() string {
-	return "**Rule:** For an explicitly named file that the user asks you to read, review, or summarize, on the first direct file read caused by a new user request call `read(operation:\"file\", target:{file:\"<path>\"}, options:{new_user_task:true})`; do not start localization. " +
+	return "**Rule:** When Gortex can serve the step: For an explicitly named file that the user asks you to read, review, or summarize, on the first direct file read caused by a new user request call `read(operation:\"file\", target:{file:\"<path>\"}, options:{new_user_task:true})`; do not start localization. " +
 		"Otherwise choose by requested output: when the requested output is files, symbols, or supporting evidence, call the mounted tool `mcp__gortex__explore` (never a bare `explore`) with `operation:\"localize\"`; it returns terminal evidence. " +
 		"Its localize task may be concise, but must faithfully preserve the issue title and every user-supplied technical identifier, path, literal, error, symptom, and stated hypothesis; never invent a causal hypothesis. " +
 		"A clearly framed problem section may be restored exactly at execution only for a clearly lossy model task, so evidence can reflect details beyond a concise tool argument. " +

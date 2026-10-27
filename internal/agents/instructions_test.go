@@ -130,3 +130,23 @@ func TestGlobalPointerBody_ShapeAndSentinel(t *testing.T) {
 		t.Errorf("pointer block is %d bytes, over the %d ceiling — the body belongs in the profile file", len(body), pointerByteCeiling)
 	}
 }
+
+func TestRenderedSharedCommandScopesNativeRestrictionsToAvailableSteps(t *testing.T) {
+	body, ok := SlashCommands["gortex-explore.md"]
+	if !ok || !strings.Contains(body, nativeMCPRules) {
+		t.Fatal("explore command did not render its shared policy")
+	}
+	for _, required := range []string{toolref.DegradedModeLine(), toolref.TransportClause(),
+		"When Gortex can serve the step, do not substitute shell reads",
+		"When Gortex can serve the step, use `change` before a mutation and again after it. Write only through"} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("rendered combined guidance lost %q", required)
+		}
+	}
+	if strings.Contains(body, "- Do not substitute shell reads, file search, or Git plumbing.") {
+		t.Fatal("unconditional native restriction negates the degraded exception")
+	}
+	if !strings.Contains(InstructionsBody, "When Gortex can serve the step:\n\n1.") {
+		t.Fatal("shared instruction workflow is not scoped to an available step")
+	}
+}

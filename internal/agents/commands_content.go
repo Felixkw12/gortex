@@ -25,9 +25,9 @@ const nativeMCPRules = `
 ## Required behavior
 
 - ` + toolref.TransportText + " " + toolref.DegradedModeText + `
-- Do not substitute shell reads, file search, or Git plumbing.
+- When Gortex can serve the step, do not substitute shell reads, file search, or Git plumbing.
 - Start task-shaped work with ` + "`explore`" + `. For one already-known symbol, start with ` + "`search`" + `.
-- Use ` + "`change`" + ` before a mutation and again after it. Write only through ` + "`edit`" + ` or ` + "`refactor`" + `.
+- When Gortex can serve the step, use ` + "`change`" + ` before a mutation and again after it. Write only through ` + "`edit`" + ` or ` + "`refactor`" + `.
 - Call ` + "`capabilities({domain: \"<tool>\", operation: \"<operation>\", detail: \"schema\"})`" + ` only when an operation's exact arguments are unclear.
 - Report graph-backed paths and symbol IDs. Never invent a result when an operation returns no match.
 ` + worktreeBranchRoutingRules
