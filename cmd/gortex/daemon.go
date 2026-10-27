@@ -1189,65 +1189,69 @@ func runDaemonStop(cmd *cobra.Command, _ []string) error {
 
 // stopRunningDaemon is the unsupervised stop: shut the daemon down over its
 // control socket (or by PID when the socket is gone or won't answer) and
-// block until the process has exited and released the store lock. It records
+// block until its captured store is free and its runtime files are gone. A
+// process still exiting (or awaiting parent reaping) need not be killed. It records
 // no stop intent, so callers that start a replacement right after — `daemon
 // restart`, and autostart replacing a daemon older than this binary — leave
 // autostart enabled.
 func stopRunningDaemon(w io.Writer) error {
-	if !daemon.IsRunning() {
-		// The socket is gone, but a process may still be alive and holding
-		// the store lock — a daemon mid-shutdown, or one whose socket wedged.
-		// killByPID terminates it AND blocks until it has actually exited,
-		// which is what `daemon restart` relies on to not race the lock.
-		if _, ok := daemon.RunningPID(); ok {
-			return killByPID()
+	if w == nil {
+		w = os.Stderr
+	}
+	pidBytes, err := readDaemonStopRecord(daemon.PIDFilePath())
+	if errors.Is(err, os.ErrNotExist) {
+		if daemon.IsRunning() {
+			return errors.New("daemon socket is reachable but its PID ownership record is missing")
 		}
 		emitDaemonStopAlreadyDown(w)
 		return nil
 	}
-
-	// Capture uptime + socket *before* shutdown so we can show them in the
-	// post-stop summary (the socket file vanishes on clean shutdown).
-	socket := daemon.SocketPath()
-	// The same advisory status call also carries the store's close-checkpoint
-	// estimate: the backlog Close's final TRUNCATE has to drain, sized before
-	// the shutdown starts it.
-	pre := daemonStatusBeforeStop()
-	uptime := pre.uptime
-	// Capture the PID too. ControlShutdown only *acks* — the daemon then
-	// flushes and closes the store (releasing its on-disk lock) and exits
-	// asynchronously (see server.go: the handler schedules Shutdown() in
-	// a goroutine). We must block until that process is gone, or a following
-	// `daemon start` races the still-held lock and dies with the opaque
-	// "failed to open database with status 1".
-	pid, havePID := daemon.RunningPID()
-	// Where the daemon's store reports its close (close progress): read now,
-	// while the runtime state still names the running daemon.
-	stopCloseProgress := installDaemonCloseProgress()
-	defer stopCloseProgress()
-
-	c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"})
 	if err != nil {
-		// Daemon said it was alive but won't talk — probably a stale PID file
-		// the daemon hasn't cleaned up. Fall back to killing by PID.
-		return killByPID()
+		return fmt.Errorf("capture daemon PID before stop: %w", err)
 	}
-	// Explicit budget: the daemon flushes and closes its store before acking,
-	// so the ack is unbounded by policy on the server side (abandoning a
-	// half-done flush is worse than a slow stop). The wait belongs here
-	// instead, where giving up is safe — the daemon is already on its way
-	// down and the exit wait below finishes the job.
-	resp, err := c.ControlWithTimeout(daemon.ControlShutdown, nil, daemonShutdownAckWait)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil || pid <= 0 {
+		return errors.New("daemon PID ownership record is invalid")
+	}
+	target, err := captureDaemonStopTarget(pid)
+	if err != nil {
+		return fmt.Errorf("capture daemon stop ownership: %w", err)
+	}
+	// Everything required to prove completion is captured before advisory or
+	// mutating RPCs. ReadRuntimeState deliberately stops exposing exited PIDs.
+	if complete, err := target.completeStop(w); complete {
+		emitDaemonStopSummary(w, daemon.SocketPath(), 0)
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if !daemon.IsRunning() {
+		result, err := terminateCapturedDaemon(w, target)
+		return reportCapturedDaemonStop(w, result, err, daemon.SocketPath(), 0)
+	}
+	pre := daemonStatusBeforeStop()
+	if pre.closePolicy != "skip" {
+		stopCloseProgress := installDaemonCloseProgressForTarget(target)
+		defer stopCloseProgress()
+	}
+
+	ackDeadline := time.Now().Add(daemonShutdownAckWait)
+	c, err := daemon.DialToWithDeadline(daemon.SocketPath(), daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"}, ackDeadline)
+	if err != nil {
+		result, err := terminateCapturedDaemon(w, target)
+		return reportCapturedDaemonStop(w, result, err, daemon.SocketPath(), pre.uptime)
+	}
+	if err := target.verifyBeforeControl(); err != nil {
+		_ = c.Close()
+		return err
+	}
+	var resp daemon.ControlResponse
+	if remaining := time.Until(ackDeadline); remaining > 0 {
+		resp, err = c.ControlWithTimeout(daemon.ControlShutdown, nil, remaining)
+	} else {
+		err = daemon.ErrDaemonUnresponsive
+	}
 	_ = c.Close()
-	// A daemon that accepted the request but hasn't acked is not a reason to
-	// abandon the stop. The ack is synchronous with the controller's
-	// flush-and-close, so on a large workspace — or behind a track / reload
-	// holding the controller — it can legitimately overrun the budget while
-	// the process is still on its way down. Returning an error here left the
-	// user with a daemon they could only `kill -9`. Fall through to the exit
-	// wait instead: it force-kills and cleans up if the daemon really is
-	// wedged, so `daemon stop` always terminates and always leaves the socket
-	// and PID file in a startable state.
 	acked := true
 	switch {
 	case errors.Is(err, daemon.ErrDaemonUnresponsive),
@@ -1263,12 +1267,21 @@ func stopRunningDaemon(w io.Writer) error {
 		fmt.Fprintf(w, "[gortex daemon] shutdown warning: %s\n", warning)
 	}
 	grace := daemonStopExitGrace(acked, pre)
-	if havePID {
-		if !acked && pre.estimateKnown {
-			fmt.Fprintf(w, "[gortex daemon] draining %s WAL frames, up to %s before force-killing\n",
-				formatPendingFrames(pre.pendingFrames), grace.Truncate(time.Second))
-		}
-		waitForDaemonExitWithin(w, pid, grace, !acked && pre.estimateKnown)
+	if !acked && pre.estimateKnown {
+		fmt.Fprintf(w, "[gortex daemon] draining %s WAL frames, up to %s before force-killing\n",
+			formatPendingFrames(pre.pendingFrames), grace.Truncate(time.Second))
+	}
+	result, err := waitForDaemonTarget(w, target, grace, !acked && pre.estimateKnown)
+	return reportCapturedDaemonStop(w, result, err, daemon.SocketPath(), pre.uptime)
+}
+
+func reportCapturedDaemonStop(w io.Writer, result daemonStopResult, err error, socket string, uptime time.Duration) error {
+	if err != nil {
+		return err
+	}
+	if result.forced {
+		fmt.Fprintln(w, "[gortex daemon] stopped (force-killed; store free and runtime removed)")
+		return nil
 	}
 	emitDaemonStopSummary(w, socket, uptime)
 	return nil
@@ -1306,8 +1319,6 @@ var (
 	daemonAckedExitGrace      = daemonExitGrace
 	daemonExitGraceCap        = daemonMaxExitGrace
 	daemonDrainProgressPeriod = daemonDrainProgressEvery
-	daemonProcessAlive        = platform.ProcessAlive
-	daemonKillProcess         = platform.KillProcess
 )
 
 // daemonStopPreflight is what the stop path learned from the daemon before
@@ -1377,60 +1388,13 @@ func formatPendingFrames(n int64) string {
 // draining marks a wait that is covering the store's final checkpoint; it
 // prints a progress line every daemonDrainProgressPeriod so a long stop is
 // visibly waiting on the WAL rather than hung.
-func waitForDaemonExitWithin(w io.Writer, pid int, grace time.Duration, draining bool) {
-	if w == nil {
-		w = os.Stderr
+func waitForDaemonExitWithin(w io.Writer, pid int, grace time.Duration, draining bool) error {
+	target, err := captureDaemonStopTarget(pid)
+	if err != nil {
+		return err
 	}
-	start := time.Now()
-	deadline := start.Add(grace)
-	nextProgress := start.Add(daemonDrainProgressPeriod)
-	extended := false
-	for {
-		if !daemonProcessAlive(pid) {
-			return
-		}
-		now := time.Now()
-		progress, reporting := daemonCloseProgressFor(pid)
-		if now.Before(deadline) {
-			if (draining || reporting) && daemonDrainProgressPeriod > 0 && !now.Before(nextProgress) {
-				fmt.Fprintf(w, "[gortex daemon] still draining the WAL: %s of up to %s%s\n",
-					now.Sub(start).Truncate(time.Second), grace.Truncate(time.Second), describeCloseProgress(progress, reporting, now))
-				nextProgress = now.Add(daemonDrainProgressPeriod)
-			}
-			time.Sleep(50 * time.Millisecond)
-			continue
-		}
-		// Past the grace. A close that is still copying loses its whole copy
-		// if killed (a checkpoint publishes its progress only when the pass
-		// ends), so the wait is bounded on the interval without progress, not
-		// on a fixed total.
-		if reporting {
-			since := progress.Since(now)
-			if since < daemonCloseNoProgressBound {
-				if !extended || !now.Before(nextProgress) {
-					fmt.Fprintf(w, "[gortex daemon] close still making progress after %s — waiting (last progress %s ago, giving up after %s without progress)%s\n",
-						now.Sub(start).Truncate(time.Second), since.Truncate(time.Second), daemonCloseNoProgressBound, describeCloseProgress(progress, reporting, now))
-					extended = true
-					nextProgress = now.Add(daemonDrainProgressPeriod)
-				}
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
-			fmt.Fprintf(w, "[gortex daemon] close made no progress for %s (bound %s) after %s — force-killing%s\n",
-				since.Truncate(time.Second), daemonCloseNoProgressBound, now.Sub(start).Truncate(time.Second), describeCloseProgress(progress, reporting, now))
-		}
-		break
-	}
-	// Graceful shutdown stalled (e.g. a wedged cgo call). Don't leave a
-	// half-exited daemon clutching the lock — force it, then clean up the
-	// socket/PID so the next start isn't tripped by stale files.
-	fmt.Fprintln(w, "[gortex daemon] graceful shutdown timed out — force-killing")
-	_ = daemonKillProcess(pid)
-	for i := 0; i < 60 && daemonProcessAlive(pid); i++ {
-		time.Sleep(50 * time.Millisecond)
-	}
-	_ = os.Remove(daemon.PIDFilePath())
-	_ = os.Remove(daemon.SocketPath())
+	_, err = waitForDaemonTarget(w, target, grace, draining)
+	return err
 }
 
 // daemonStatusBeforeStop best-effort-fetches the daemon's reported uptime via
@@ -1533,12 +1497,12 @@ func emitDaemonStopSummary(w io.Writer, socket string, uptime time.Duration) {
 	if !daemonRestartActive {
 		banner := tui.Banner{
 			Title:    "gortex daemon stop",
-			Subtitle: "Daemon shut down cleanly.",
+			Subtitle: "Daemon stop completed.",
 		}.Render()
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, banner)
 	}
-	stats := []string{progress.Stat("clean shutdown", "", progress.StatGood)}
+	stats := []string{progress.Stat("store released", "", progress.StatGood)}
 	if uptime > 0 {
 		stats = append(stats, progress.Stat(uptime.Truncate(time.Second).String(), "uptime", progress.StatNeutral))
 	}
@@ -2520,40 +2484,6 @@ func daemonControlClient() (*daemon.Client, error) {
 		return nil, fmt.Errorf("daemon not reachable (%v) — is it running? Try `gortex daemon start`", err)
 	}
 	return c, nil
-}
-
-// killByPID is the fallback stop path for stale daemons that have a PID
-// file but don't respond on the socket. Asks the process to terminate,
-// waits, then force-kills. Silently returns nil if the PID no longer
-// exists.
-func killByPID() error {
-	pidBytes, err := os.ReadFile(daemon.PIDFilePath())
-	if err != nil {
-		return nil
-	}
-	pid, _ := strconv.Atoi(string(pidBytes))
-	if pid <= 0 {
-		return nil
-	}
-	_ = platform.TerminateProcess(pid)
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if !platform.ProcessAlive(pid) {
-			// Process gone.
-			_ = os.Remove(daemon.PIDFilePath())
-			_ = os.Remove(daemon.SocketPath())
-			fmt.Fprintln(os.Stderr, "[gortex daemon] stopped")
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	// Last resort.
-	_ = platform.KillProcess(pid)
-	_ = os.Remove(daemon.PIDFilePath())
-	_ = os.Remove(daemon.SocketPath())
-	fmt.Fprintln(os.Stderr, "[gortex daemon] stopped (force-killed)")
-	return nil
 }
 
 // tailLines returns the last n lines of f. Used by `daemon logs`. Small

@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,14 +41,22 @@ func TestDaemonStopTargetChild(t *testing.T) {
 		os.Exit(5)
 	}
 	fmt.Fprintln(os.Stdout, "ready")
-	_, _ = io.Copy(io.Discard, os.Stdin)
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		if scanner.Text() == "unlock" {
+			if err := lock.Unlock(); err != nil {
+				os.Exit(6)
+			}
+			fmt.Fprintln(os.Stdout, "unlocked")
+		}
+	}
 	runtime.KeepAlive(lock)
 	// Intentionally leave runtime files and the lock descriptor: actual OS
 	// exit must release the lock; the parent tests safe stale-file cleanup.
 	os.Exit(0)
 }
 
-func ownedStopTarget(t *testing.T) (*daemonStopTarget, func() error, func() error) {
+func ownedStopTarget(t *testing.T) (*daemonStopTarget, func() error, func() error, func() error) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("GORTEX_DAEMON_PIDFILE", filepath.Join(dir, "daemon.pid"))
@@ -68,16 +75,30 @@ func ownedStopTarget(t *testing.T) (*daemonStopTarget, func() error, func() erro
 	var waitErr error
 	wait := func() error { once.Do(func() { waitErr = cmd.Wait() }); return waitErr }
 	t.Cleanup(func() { _ = stdin.Close(); _ = cmd.Process.Kill(); _ = wait() })
-	line, err := bufio.NewReader(stdout).ReadString('\n')
+	reader := bufio.NewReader(stdout)
+	line, err := reader.ReadString('\n')
 	require.NoError(t, err)
 	require.Equal(t, "ready\n", line)
 	target, err := captureDaemonStopTarget(cmd.Process.Pid)
 	require.NoError(t, err)
-	return target, stdin.Close, wait
+	unlock := func() error {
+		if _, err := fmt.Fprintln(stdin, "unlock"); err != nil {
+			return err
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		if line != "unlocked\n" {
+			return fmt.Errorf("unexpected child unlock receipt: %q", line)
+		}
+		return nil
+	}
+	return target, stdin.Close, wait, unlock
 }
 
 func TestDaemonStopTargetRetainsDeclaredStoreAfterRuntimeRemoval(t *testing.T) {
-	target, exit, wait := ownedStopTarget(t)
+	target, exit, wait, _ := ownedStopTarget(t)
 	free, err := target.storeFree()
 	require.NoError(t, err)
 	require.False(t, free)
@@ -101,7 +122,7 @@ func TestDaemonStopTargetRetainsDeclaredStoreAfterRuntimeRemoval(t *testing.T) {
 }
 
 func TestDaemonStopTargetDoesNotFallbackWhenExpectedLockIsMissing(t *testing.T) {
-	target, exit, wait := ownedStopTarget(t)
+	target, exit, wait, _ := ownedStopTarget(t)
 	path := target.store.path
 	require.NoError(t, exit())
 	require.NoError(t, wait())
@@ -114,7 +135,7 @@ func TestDaemonStopTargetDoesNotFallbackWhenExpectedLockIsMissing(t *testing.T) 
 }
 
 func TestDaemonStopTargetRefusesChangedRuntimeWithoutRemovingOtherFiles(t *testing.T) {
-	target, exit, wait := ownedStopTarget(t)
+	target, exit, wait, _ := ownedStopTarget(t)
 	require.NoError(t, exit())
 	require.NoError(t, wait())
 	// Rewrite in place: unchanged inode alone is not sufficient provenance.
@@ -130,7 +151,7 @@ func TestDaemonStopTargetRefusesChangedRuntimeWithoutRemovingOtherFiles(t *testi
 }
 
 func TestDaemonStopTargetLegacyNoStoreFallbackRequiresActualExit(t *testing.T) {
-	known, exit, wait := ownedStopTarget(t)
+	known, exit, wait, _ := ownedStopTarget(t)
 	require.NoError(t, os.Remove(daemon.RuntimeStatePath()))
 	legacy, err := captureDaemonStopTarget(known.process.PID())
 	require.NoError(t, err)
@@ -160,4 +181,6 @@ func TestDaemonStopRuntimeFileRefusesNewAndReplacedPaths(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("123"), 0o600))
 	_, err = captured.present()
 	require.ErrorContains(t, err, "changed identity", "identical content cannot certify a replacement inode")
+	_, err = captureDaemonStopFile(t.TempDir(), false)
+	require.ErrorContains(t, err, "unexpected daemon endpoint file type")
 }

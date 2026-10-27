@@ -179,12 +179,14 @@ func newStopFixture(t *testing.T, controller *drainingController) *stopFixture {
 	serviceActive = func() bool { return false }
 	prevAck, prevNoAck, prevAcked, prevCap, prevProgress := daemonShutdownAckWait,
 		daemonNoAckExitGrace, daemonAckedExitGrace, daemonExitGraceCap, daemonDrainProgressPeriod
-	prevAlive, prevKill := daemonProcessAlive, daemonKillProcess
+	prevRunning, prevKill := daemonCapturedProcessRunning, daemonKillCapturedProcess
+	prevTerminate := daemonTerminateCapturedProcess
 	t.Cleanup(func() {
 		restoreServiceSeams()
 		daemonShutdownAckWait, daemonNoAckExitGrace, daemonAckedExitGrace = prevAck, prevNoAck, prevAcked
 		daemonExitGraceCap, daemonDrainProgressPeriod = prevCap, prevProgress
-		daemonProcessAlive, daemonKillProcess = prevAlive, prevKill
+		daemonCapturedProcessRunning, daemonKillCapturedProcess = prevRunning, prevKill
+		daemonTerminateCapturedProcess = prevTerminate
 	})
 	// Scaled clocks: the ack is given up on at 100ms, a daemon with no
 	// reported backlog is force-killed 300ms later, and the normal exit
@@ -194,13 +196,14 @@ func newStopFixture(t *testing.T, controller *drainingController) *stopFixture {
 	daemonAckedExitGrace = 500 * time.Millisecond
 	daemonExitGraceCap = 10 * time.Second
 	daemonDrainProgressPeriod = 250 * time.Millisecond
-	daemonProcessAlive = func(pid int) bool {
-		if pid != os.Getpid() {
-			return platform.ProcessAlive(pid)
+	daemonCapturedProcessRunning = func(identity platform.ProcessIdentity) (bool, error) {
+		if identity.PID() != os.Getpid() {
+			return identity.Running()
 		}
-		return !controller.exited.Load() && f.kills.Load() == 0
+		return !controller.exited.Load() && f.kills.Load() == 0, nil
 	}
-	daemonKillProcess = func(int) error { f.kills.Add(1); return nil }
+	daemonKillCapturedProcess = func(platform.ProcessIdentity) error { f.kills.Add(1); return nil }
+	daemonTerminateCapturedProcess = func(platform.ProcessIdentity) error { f.kills.Add(1); return nil }
 
 	srv := daemon.New(socket, "test", zap.NewNop())
 	srv.Controller = controller

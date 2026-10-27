@@ -35,6 +35,9 @@ func captureDaemonStopFile(path string, regular bool) (captured daemonStopFile, 
 	if info.Mode()&os.ModeSymlink != 0 || regular && !info.Mode().IsRegular() {
 		return captured, fmt.Errorf("unexpected daemon runtime file type: %s", path)
 	}
+	if !regular && info.Mode()&os.ModeSocket == 0 && !info.Mode().IsRegular() {
+		return captured, fmt.Errorf("unexpected daemon endpoint file type: %s", path)
+	}
 	if !os.SameFile(info, info) {
 		return captured, fmt.Errorf("cannot capture daemon runtime file identity: %s", path)
 	}
@@ -153,6 +156,22 @@ func (t *daemonStopTarget) runtimeGone() (bool, error) {
 	return gone, errors.Join(errs...)
 }
 
+func (t *daemonStopTarget) verifyBeforeControl() error {
+	if same, err := t.process.Matches(); err != nil || !same {
+		return errors.Join(errors.New("daemon process changed before shutdown control"), err)
+	}
+	for _, file := range t.files {
+		present, err := file.present()
+		if err != nil {
+			return err
+		}
+		if file.info != nil && !present {
+			return fmt.Errorf("captured daemon runtime vanished before shutdown control: %s", file.path)
+		}
+	}
+	return nil
+}
+
 func (t *daemonStopTarget) storeFree() (bool, error) {
 	if t.storeErr != nil {
 		return false, t.storeErr
@@ -165,7 +184,7 @@ func (t *daemonStopTarget) storeFree() (bool, error) {
 	}
 	// Explicit older/no-store fallback needs actual native process exit.
 	// Permission/query failures cannot masquerade as a free store.
-	running, err := t.process.Running()
+	running, err := daemonCapturedProcessRunning(t.process)
 	if errors.Is(err, os.ErrProcessDone) {
 		return true, nil
 	}
@@ -173,7 +192,7 @@ func (t *daemonStopTarget) storeFree() (bool, error) {
 }
 
 func (t *daemonStopTarget) removeExitedRuntime() error {
-	running, err := t.process.Running()
+	running, err := daemonCapturedProcessRunning(t.process)
 	if err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return err
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // fakeClosingDaemon is a daemon process whose store close reports progress
@@ -25,10 +27,19 @@ type fakeClosingDaemon struct {
 
 func (f *fakeClosingDaemon) install(t *testing.T, pid int) {
 	t.Helper()
-	prevAlive, prevKill, prevProgress := daemonProcessAlive, daemonKillProcess, daemonCloseProgress
+	dir := t.TempDir()
+	t.Setenv("GORTEX_DAEMON_PIDFILE", filepath.Join(dir, "daemon.pid"))
+	t.Setenv("GORTEX_DAEMON_STATEFILE", filepath.Join(dir, "daemon.state"))
+	t.Setenv("GORTEX_DAEMON_SOCKET", filepath.Join(dir, "daemon.sock"))
+	if err := os.WriteFile(daemon.PIDFilePath(), []byte(strconv.Itoa(pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prevRunning, prevKill, prevProgress := daemonCapturedProcessRunning, daemonKillCapturedProcess, daemonCloseProgress
+	prevTerminate := daemonTerminateCapturedProcess
 	prevBound, prevPeriod := daemonCloseNoProgressBound, daemonDrainProgressPeriod
-	daemonProcessAlive = func(int) bool { return !f.exited.Load() && !f.killed.Load() }
-	daemonKillProcess = func(int) error { f.killed.Store(true); return nil }
+	daemonCapturedProcessRunning = func(platform.ProcessIdentity) (bool, error) { return !f.exited.Load() && !f.killed.Load(), nil }
+	daemonKillCapturedProcess = func(platform.ProcessIdentity) error { f.killed.Store(true); return nil }
+	daemonTerminateCapturedProcess = func(platform.ProcessIdentity) error { f.killed.Store(true); return nil }
 	daemonCloseProgress = func() (store_sqlite.CloseProgress, bool) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -36,7 +47,8 @@ func (f *fakeClosingDaemon) install(t *testing.T, pid int) {
 	}
 	daemonDrainProgressPeriod = 100 * time.Millisecond
 	t.Cleanup(func() {
-		daemonProcessAlive, daemonKillProcess, daemonCloseProgress = prevAlive, prevKill, prevProgress
+		daemonCapturedProcessRunning, daemonKillCapturedProcess, daemonCloseProgress = prevRunning, prevKill, prevProgress
+		daemonTerminateCapturedProcess = prevTerminate
 		daemonCloseNoProgressBound, daemonDrainProgressPeriod = prevBound, prevPeriod
 	})
 	f.progress = store_sqlite.CloseProgress{PID: pid, Phase: "draining", StartedUnixNano: time.Now().UnixNano(), PendingFrames: 5_000_000}
@@ -52,7 +64,7 @@ func (f *fakeClosingDaemon) advance() {
 // A close that keeps making progress, slowly, well past the stop's grace:
 // the stop waits for it to finish instead of killing it.
 func TestDaemonStopWaitsForACloseThatMakesProgress(t *testing.T) {
-	const pid = 4242
+	pid := os.Getpid()
 	f := &fakeClosingDaemon{}
 	f.install(t, pid)
 	daemonCloseNoProgressBound = 400 * time.Millisecond
@@ -72,7 +84,9 @@ func TestDaemonStopWaitsForACloseThatMakesProgress(t *testing.T) {
 	defer close(stop)
 	var out bytes.Buffer
 	started := time.Now()
-	waitForDaemonExitWithin(&out, pid, 200*time.Millisecond, true)
+	if err := waitForDaemonExitWithin(&out, pid, 200*time.Millisecond, true); err != nil {
+		t.Fatal(err)
+	}
 	t.Logf("waited %s:\n%s", time.Since(started).Round(time.Millisecond), out.String())
 	if f.killed.Load() {
 		t.Fatal("the stop killed a close that was making progress")
@@ -88,7 +102,7 @@ func TestDaemonStopWaitsForACloseThatMakesProgress(t *testing.T) {
 // A close that stops making progress is given up on after the no-progress
 // bound, not after an open-ended wait.
 func TestDaemonStopGivesUpOnAStalledCloseAfterTheNoProgressBound(t *testing.T) {
-	const pid = 4243
+	pid := os.Getpid()
 	f := &fakeClosingDaemon{}
 	f.install(t, pid)
 	daemonCloseNoProgressBound = 400 * time.Millisecond
@@ -96,9 +110,10 @@ func TestDaemonStopGivesUpOnAStalledCloseAfterTheNoProgressBound(t *testing.T) {
 	var out bytes.Buffer
 	started := time.Now()
 	returned := make(chan struct{})
+	var stopErr error
 	go func() {
 		defer close(returned)
-		waitForDaemonExitWithin(&out, pid, 200*time.Millisecond, true)
+		stopErr = waitForDaemonExitWithin(&out, pid, 200*time.Millisecond, true)
 	}()
 	select {
 	case <-returned:
@@ -106,6 +121,9 @@ func TestDaemonStopGivesUpOnAStalledCloseAfterTheNoProgressBound(t *testing.T) {
 		f.exited.Store(true) // release the wait so the test can end
 		<-returned
 		t.Fatalf("the stop was still waiting on a stalled close after 5 s (bound 400ms)")
+	}
+	if stopErr != nil {
+		t.Fatal(stopErr)
 	}
 	waited := time.Since(started)
 	t.Logf("waited %s:\n%s", waited.Round(time.Millisecond), out.String())
@@ -123,26 +141,28 @@ func TestDaemonStopGivesUpOnAStalledCloseAfterTheNoProgressBound(t *testing.T) {
 // A zombie has exited and released its store, even while its parent retains
 // the PID. The OS probe now reports it dead on the first poll.
 func TestDaemonStopReturnsImmediatelyForZombie(t *testing.T) {
-	const pid = 4244
+	pid := os.Getpid()
 	f := &fakeClosingDaemon{}
 	f.install(t, pid)
 	f.exited.Store(true)
 	polls := 0
-	daemonProcessAlive = func(got int) bool {
-		if got != pid {
-			t.Errorf("probed PID %d, want %d", got, pid)
+	daemonCapturedProcessRunning = func(identity platform.ProcessIdentity) (bool, error) {
+		if identity.PID() != pid {
+			t.Errorf("probed PID %d, want %d", identity.PID(), pid)
 		}
 		polls++
-		return false
+		return false, nil
 	}
 	var out bytes.Buffer
 	started := time.Now()
-	waitForDaemonExitWithin(&out, pid, daemonExitGrace, false)
+	if err := waitForDaemonExitWithin(&out, pid, daemonExitGrace, false); err != nil {
+		t.Fatal(err)
+	}
 	if waited := time.Since(started); waited > 100*time.Millisecond {
 		t.Errorf("stop waited %s for a zombie, want at most 100ms", waited)
 	}
-	if polls != 1 {
-		t.Errorf("stop probed a zombie %d times, want once", polls)
+	if polls == 0 {
+		t.Error("stop did not check native captured process state")
 	}
 	if f.killed.Load() {
 		t.Error("stop sent a kill to an exited zombie")
@@ -153,7 +173,7 @@ func TestDaemonStopReturnsImmediatelyForZombie(t *testing.T) {
 }
 
 func TestDaemonStopWedgedProcessStillKillsAndCleansRuntimeFiles(t *testing.T) {
-	const pid = 4245
+	pid := os.Getpid()
 	f := &fakeClosingDaemon{}
 	f.install(t, pid)
 	daemonCloseNoProgressBound = 100 * time.Millisecond
@@ -162,12 +182,14 @@ func TestDaemonStopWedgedProcessStillKillsAndCleansRuntimeFiles(t *testing.T) {
 	t.Setenv("GORTEX_DAEMON_PIDFILE", filepath.Join(dir, "daemon.pid"))
 	t.Setenv("GORTEX_DAEMON_SOCKET", filepath.Join(dir, "daemon.sock"))
 	for _, path := range []string{daemon.PIDFilePath(), daemon.SocketPath()} {
-		if err := os.WriteFile(path, []byte("stale runtime file"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(strconv.Itoa(pid)), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	var out bytes.Buffer
-	waitForDaemonExitWithin(&out, pid, 0, true)
+	if err := waitForDaemonExitWithin(&out, pid, 0, true); err != nil {
+		t.Fatal(err)
+	}
 	if !f.killed.Load() {
 		t.Fatal("stop did not force-kill a live daemon with a stalled close")
 	}

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -13,7 +14,7 @@ import (
 )
 
 func TestDaemonStopTargetOwnsFreeStoreAndRuntimeBeforeZombieIsReaped(t *testing.T) {
-	target, exit, wait := ownedStopTarget(t)
+	target, exit, wait, _ := ownedStopTarget(t)
 	require.NoError(t, exit())
 	// Independent native witness, before cmd.Wait: do not let the identity
 	// implementation under test define its own zombie oracle.
@@ -24,7 +25,12 @@ func TestDaemonStopTargetOwnsFreeStoreAndRuntimeBeforeZombieIsReaped(t *testing.
 	free, err := target.storeFree()
 	require.NoError(t, err)
 	require.True(t, free)
-	require.NoError(t, target.removeExitedRuntime())
+	var out bytes.Buffer
+	result, err := waitForDaemonTarget(&out, target, 0, false)
+	require.NoError(t, err)
+	require.False(t, result.forced)
+	require.Contains(t, out.String(), "not yet been reaped by its parent")
+	require.NotContains(t, out.String(), "timed out")
 	gone, err := target.runtimeGone()
 	require.NoError(t, err)
 	require.True(t, gone)
