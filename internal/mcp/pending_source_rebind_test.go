@@ -52,3 +52,26 @@ func TestPendingSourceLoadedReceiptCannotOverwriteRebinding(t *testing.T) {
 		})
 	}
 }
+
+func TestPendingSourceRebindingClearsPriorReceiptRecovery(t *testing.T) {
+	s := &Server{}
+	record, old := unobservedFailedSource(s, "checkout", "incarnation", "/fixture/file.go", 1)
+	old.mu.Lock()
+	old.barrierRecoveredGeneration = 2
+	old.mu.Unlock()
+	s.refreshPendingSourceRecord(record)
+	record.mu.RLock()
+	recovered := record.pendingSourceRecovered
+	record.mu.RUnlock()
+	require.True(t, recovered, "the old binding has actual recovery evidence")
+
+	newer := pendingFreshnessReceipt(s, "new", "fixture", "/fixture/file.go", 3)
+	newer.checkoutID, newer.checkoutIncarnation, newer.checkoutScoped = "checkout", "incarnation", true
+	record.recordGraph(checkoutOutcome(record, mutationReindexOutcome{Pending: true, Receipt: newer.id}))
+	record.mu.RLock()
+	recovered = record.pendingSourceRecovered
+	record.mu.RUnlock()
+	require.False(t, recovered, "recovery belongs to the old receipt binding")
+	require.NotEmpty(t, s.pendingSourcePaths("checkout", "incarnation"))
+	require.Equal(t, 1, pendingSourceVersionCount(s, "checkout"))
+}

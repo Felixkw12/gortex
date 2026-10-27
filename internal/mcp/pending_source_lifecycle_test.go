@@ -101,6 +101,10 @@ func TestPendingSourceRegistryRecoveryRetiresAtResolution(t *testing.T) {
 		s := &Server{}
 		old, _ := unobservedFailedSource(s, "", "", "/fixture/file.go", 4)
 		eligible := s.failedReceiptsBefore([]string{"file.go"}, "/fixture")
+		// A captured commit id denotes immutable disk bytes, even if its
+		// handler binds another refresh ticket while recovery is running.
+		rebound := pendingFreshnessReceipt(s, "rebound", "fixture", "/fixture/file.go", 5)
+		old.recordGraph(mutationReindexOutcome{Pending: true, Receipt: rebound.id})
 		newer := s.beginMutationCommit(context.Background(), "edit", "", "", "file.go", "/fixture/file.go")
 		newer.markCommitted("newer", 5)
 		s.resolveReindexedPathReceipts("/fixture/file.go", eligible)

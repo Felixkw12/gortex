@@ -294,6 +294,9 @@ func (r *mutationCommitRecord) recordGraphForReceipt(expectedReceipt string, out
 	r.graph = graphStatusFor(outcome)
 	r.graphRecorded = true
 	r.graphReason = ""
+	if r.reindexReceipt != outcome.Receipt {
+		r.pendingSourceRecovered = false
+	}
 	if ledger != nil {
 		ledger.unbindFreshnessLocked(r)
 		// A detached completion must not resurrect an evicted commit.
