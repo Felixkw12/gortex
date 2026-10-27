@@ -20,6 +20,18 @@ func sortedDeadCodeRepos(prefixes []string) []string {
 	return slices.Compact(out)
 }
 
+// nodes is WITHOUT ROWID: nodes_by_repo(repo_prefix, view_gen) also carries
+// the remaining primary-key id. Repo/generation equality makes id a keyset
+// seek and supplies ORDER BY without repeatedly sorting the ownership bucket.
+func deadCodeScopedVerdictPageSQL(allowed int) string {
+	return `SELECT n.id, ` + deadCodeIncomingProbeSQL(allowed) + `
+FROM nodes AS n INDEXED BY nodes_by_repo
+WHERE n.view_gen = ? AND n.repo_prefix = ? AND n.id > ? AND n.kind = ? ORDER BY n.id LIMIT ?`
+}
+
+const deadCodeScopedFilesPageSQL = `SELECT ` + lookupNodeCols + ` FROM nodes INDEXED BY nodes_by_repo
+WHERE view_gen = ? AND repo_prefix = ? AND id > ? AND kind = ? ORDER BY id LIMIT ?`
+
 func (s *Store) DeadCodeCandidatesInRepos(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string) []*graph.Node {
 	out, _ := s.DeadCodeCandidatesInReposContext(s.readContext(), kinds, incoming, prefixes)
 	return out
@@ -36,9 +48,7 @@ func (s *Store) DeadCodeCandidatesInReposContext(ctx context.Context, kinds []gr
 	for _, kind := range kinds {
 		var candidates []*graph.Node
 		allowed := anaDedupeEdgeKinds(incoming[kind])
-		q := `SELECT n.id, ` + deadCodeIncomingProbeSQL(len(allowed)) + `
-FROM nodes AS n INDEXED BY nodes_by_repo
-WHERE n.view_gen = ? AND n.repo_prefix = ? AND n.id > ? AND n.kind = ? ORDER BY n.id LIMIT ?`
+		q := deadCodeScopedVerdictPageSQL(len(allowed))
 		for _, prefix := range sortedDeadCodeRepos(prefixes) {
 			after := ""
 			for {
@@ -120,9 +130,7 @@ func (s *Store) NodesByKindInRepos(kind graph.NodeKind, prefixes []string) iter.
 		for _, prefix := range sortedDeadCodeRepos(prefixes) {
 			after := ""
 			for {
-				q := `SELECT ` + lookupNodeCols + ` FROM nodes INDEXED BY nodes_by_repo
-WHERE view_gen = ? AND repo_prefix = ? AND id > ? AND kind = ? ORDER BY id LIMIT ?`
-				page, scanned, lastID, err := s.scanNodePage(ctx, q, s.viewGen, prefix, after, string(kind), deadCodePageSize)
+				page, scanned, lastID, err := s.scanNodePage(ctx, deadCodeScopedFilesPageSQL, s.viewGen, prefix, after, string(kind), deadCodePageSize)
 				if err != nil {
 					return
 				}
