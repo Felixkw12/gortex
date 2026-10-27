@@ -34,11 +34,23 @@ type runOptions struct {
 	KeepState        bool
 	SweepRepetitions int
 	SweepBudget      time.Duration
+	pairedDriver     func(context.Context, *privateRun, []*socketClient, []*socketClient, *Phase) error
 }
 
 func parseRun(args []string) (runOptions, error) {
 	var o runOptions
 	f := flag.NewFlagSet("load run", flag.ContinueOnError)
+	bindRunFlags(f, &o)
+	if err := f.Parse(args); err != nil {
+		return o, err
+	}
+	if f.NArg() != 0 {
+		return o, errors.New("unexpected positional run arguments")
+	}
+	return o, validateRunOptions(o)
+}
+
+func bindRunFlags(f *flag.FlagSet, o *runOptions) {
 	f.StringVar(&o.Binary, "binary", "", "Gortex binary (never an existing daemon)")
 	f.StringVar(&o.Manifest, "manifest", "", "pinned JSON corpus manifest; source roots are read-only")
 	f.StringVar(&o.Scratch, "scratch", "", "artifact/private-clone parent outside all source roots")
@@ -59,23 +71,23 @@ func parseRun(args []string) (runOptions, error) {
 	f.BoolVar(&o.KeepState, "keep-state", false, "retain private corpus/store for native diagnostics only (default removes completed scenario state)")
 	f.IntVar(&o.SweepRepetitions, "sweep-repetitions", 15, "samples per benchmark operation (smoke may explicitly use 1)")
 	f.DurationVar(&o.SweepBudget, "sweep-duration", 10*time.Minute, "separate total budget for the repeated paced sweep")
-	if err := f.Parse(args); err != nil {
-		return o, err
-	}
-	if f.NArg() != 0 || o.Binary == "" || o.Manifest == "" || o.Scratch == "" || o.Agents < 1 || o.Editors < 1 || o.Worktrees < 0 || o.Duration <= 0 || o.Deadline <= 0 || o.WarmTimeout <= 0 || o.StopTimeout <= 0 || o.CPUProfile < 0 || o.CPUProfile > o.Duration {
-		return o, errors.New("run requires --binary, --manifest, --scratch and positive counts/budgets")
+}
+
+func validateRunOptions(o runOptions) error {
+	if o.Binary == "" || o.Manifest == "" || o.Scratch == "" || o.Agents < 1 || o.Editors < 1 || o.Worktrees < 0 || o.Duration <= 0 || o.Deadline <= 0 || o.WarmTimeout <= 0 || o.StopTimeout <= 0 || o.CPUProfile < 0 || o.CPUProfile > o.Duration {
+		return errors.New("run requires --binary, --manifest, --scratch and positive counts/budgets")
 	}
 	if _, err := parseProfile(o.Profile); err != nil {
-		return o, err
+		return err
 	}
 	if o.SweepRepetitions < 1 || o.SweepBudget <= 0 {
-		return o, errors.New("sweep repetitions and duration must be positive")
+		return errors.New("sweep repetitions and duration must be positive")
 	}
 	if o.KeepState && o.Host != "native" {
-		return o, errors.New("reference/floor runs clean completed scenario stores; --keep-state is native diagnostics only")
+		return errors.New("reference/floor runs clean completed scenario stores; --keep-state is native diagnostics only")
 	}
 	if o.CPUProfile%time.Second != 0 {
-		return o, errors.New("--cpu-profile requires a whole number of seconds")
+		return errors.New("--cpu-profile requires a whole number of seconds")
 	}
 	activeAgents := o.Agents
 	if o.Scenario == "edit" || o.Scenario == "many-edit" || o.Scenario == "all" {
@@ -86,12 +98,12 @@ func parseRun(args []string) (runOptions, error) {
 		activeWorktrees += o.Worktrees
 	}
 	if o.Host == "floor" && (activeAgents > 4 || activeWorktrees > 4) {
-		return o, errors.New("floor supports at most 4 total agents and 4 total worktrees (including primary); set counts explicitly")
+		return errors.New("floor supports at most 4 total agents and 4 total worktrees (including primary); set counts explicitly")
 	}
 	if _, err := selectedScenarios(o); err != nil {
-		return o, err
+		return err
 	}
-	return o, nil
+	return nil
 }
 
 func selectedScenarios(o runOptions) ([]string, error) {
@@ -148,23 +160,8 @@ func runCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, corpus := range corpora {
-		source, sourceErr := canonicalPath(corpus.Source)
-		if sourceErr != nil {
-			continue
-		}
-		for _, output := range []string{o.Scratch, o.Output} {
-			if output == "" {
-				continue
-			}
-			path, pathErr := canonicalPath(output)
-			if pathErr != nil {
-				return pathErr
-			}
-			if inside(source, path) {
-				return errors.New("scratch/report output must be outside every manifest source root")
-			}
-		}
+	if err := validateOutputRoots(corpora, o.Scratch, o.Output); err != nil {
+		return err
 	}
 	sha, err := binaryRevision(o.Binary, o.GitSHA)
 	if err != nil {
@@ -184,11 +181,41 @@ func runCommand(ctx context.Context, args []string) error {
 	if o.Output == "" {
 		o.Output = filepath.Join(outputRoot, "run.json")
 	}
+	report, err := newRunReport(o, corpora, sha, host, outputRoot)
+	if err != nil {
+		return err
+	}
+	scenarios, _ := selectedScenarios(o)
+	for _, scenario := range scenarios {
+		phase, sweep, artifacts, crashes, version, err := runPhase(ctx, o, scenario, corpora, group, outputRoot)
+		addPhase(&report, phase, sweep, artifacts, crashes, version, err)
+		if err := ctx.Err(); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+			break
+		}
+	}
+	if err := finishReport(&report, len(scenarios)); err != nil {
+		return err
+	}
+	if err := writeReport(o.Output, report); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "load report:", o.Output)
+	if !report.Complete {
+		return fmt.Errorf("incomplete run; all samples/errors retained in %s", o.Output)
+	}
+	return nil
+}
+
+func newRunReport(o runOptions, corpora []Corpus, sha string, host Host, outputRoot string) (Report, error) {
 	report := Report{SchemaVersion: reportVersion, RunID: filepath.Base(outputRoot), GitSHA: sha, Binary: o.Binary, Started: time.Now().UTC(), Profile: o.Profile, Seed: o.Seed, Host: host, Corpus: corpora, Metrics: make(map[string]Metric), Artifacts: map[string]string{"root": outputRoot}, Crashes: make(map[string]int)}
 	for _, corpus := range corpora {
 		ops, err := readingPlan(corpus)
+		if o.Scenario == "sweep" {
+			ops, err = benchmarkPlan(corpus)
+		}
 		if err != nil {
-			return err
+			return report, err
 		}
 		report.Workload.Operations = append(report.Workload.Operations, ops...)
 	}
@@ -203,51 +230,43 @@ func runCommand(ctx context.Context, args []string) error {
 	if o.Scenario == "all" {
 		report.Workload.SessionModel = "per_agent_load_and_per_operation_isolated_sweep"
 	}
+	var err error
 	report.RequestPlan, err = hashJSON(report.Workload)
+	return report, err
+}
+
+func addPhase(report *Report, phase Phase, sweep []SweepEntry, artifacts map[string]string, crashes map[string]int, version string, err error) {
+	scenario := phase.Name
+	if phase.DurationSec > 0 {
+		report.Phases = append(report.Phases, phase)
+	}
+	report.Sweep = append(report.Sweep, sweep...)
+	for name, path := range artifacts {
+		report.Artifacts[scenario+"."+name] = path
+	}
+	for name, count := range crashes {
+		report.Crashes[name] += count
+	}
+	report.DaemonVersion = version
 	if err != nil {
-		return err
+		report.Errors = append(report.Errors, scenario+": "+err.Error())
 	}
-	scenarios, _ := selectedScenarios(o)
-	for _, scenario := range scenarios {
-		phase, sweep, artifacts, crashes, version, err := runPhase(ctx, o, scenario, corpora, group, outputRoot)
-		if phase.DurationSec > 0 {
-			report.Phases = append(report.Phases, phase)
-		}
-		report.Sweep = append(report.Sweep, sweep...)
-		for name, path := range artifacts {
-			report.Artifacts[scenario+"."+name] = path
-		}
-		for name, count := range crashes {
-			report.Crashes[name] += count
-		}
-		report.DaemonVersion = version
-		if err != nil {
-			report.Errors = append(report.Errors, scenario+": "+err.Error())
-		}
-		if err := ctx.Err(); err != nil {
-			report.Errors = append(report.Errors, err.Error())
-			break
-		}
-	}
+}
+
+func finishReport(report *Report, expectedPhases int) error {
 	var actualOperations []request
 	for _, phase := range report.Phases {
 		actualOperations = append(actualOperations, phase.Operations...)
 	}
 	if len(actualOperations) > 0 {
 		report.Workload.Operations = actualOperations
+		var err error
 		report.RequestPlan, err = hashJSON(report.Workload)
 		if err != nil {
 			return err
 		}
 	}
-	report.Complete = len(report.Errors) == 0 && len(report.Phases) == len(scenarios)
-	if err := writeReport(o.Output, report); err != nil {
-		return err
-	}
-	fmt.Fprintln(os.Stderr, "load report:", o.Output)
-	if !report.Complete {
-		return fmt.Errorf("incomplete run; all samples/errors retained in %s", o.Output)
-	}
+	report.Complete = len(report.Errors) == 0 && len(report.Phases) == expectedPhases
 	return nil
 }
 

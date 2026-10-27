@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"syscall"
 )
 
 func main() {
@@ -16,9 +17,12 @@ func main() {
 }
 
 func command(args []string) error {
-	if len(args) > 0 && args[0] == "run" {
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	if len(args) > 0 && (args[0] == "run" || args[0] == "paired") {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
+		if args[0] == "paired" {
+			return pairedCommand(ctx, args[1:])
+		}
 		return runCommand(ctx, args[1:])
 	}
 	if (len(args) == 1 && args[0] == "schema") || (len(args) == 2 && args[0] == "schema" && args[1] == "paired") {

@@ -1530,6 +1530,9 @@
               "agent": {
                 "type": "integer"
               },
+              "category_ordinal": {
+                "type": "integer"
+              },
               "commit": {
                 "type": "string"
               },
@@ -1560,7 +1563,8 @@
               "agent",
               "step",
               "slot",
-              "request_sha256"
+              "request_sha256",
+              "category_ordinal"
             ],
             "type": "object"
           },

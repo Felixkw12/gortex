@@ -37,6 +37,7 @@ type requestTuple struct {
 	Step        int    `json:"step"`
 	Slot        int    `json:"slot"`
 	RequestHash string `json:"request_sha256"`
+	Ordinal     uint64 `json:"category_ordinal"`
 }
 
 type pairedRecord struct {

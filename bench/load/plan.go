@@ -97,7 +97,7 @@ func hashJSON(value any) (string, error) {
 }
 
 // These are logical, repo-relative targets. Expansion to a private clone's
-// absolute path happens only at dispatch; the plan hash is identical per build.
+// daemon repo prefix happens only at dispatch; the plan hash is identical per build.
 func benchmarkPlan(c Corpus) ([]request, error) {
 	if err := validateCorpus(c); err != nil {
 		return nil, err

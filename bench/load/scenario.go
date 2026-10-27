@@ -272,42 +272,17 @@ func runPhase(ctx context.Context, o runOptions, scenario string, corpora []Corp
 	}
 	phase.Metrics["mcp_sessions"] = measured(float64(len(clients)), "sessions")
 	captureReceipt(ctx, p, clients[0], &phase)
-	phase.Started = time.Now().UTC()
 	sampler := newProcessSampler()
-	monitor := startMonitor(p, sampler, group)
-	var profileDone chan error
-	if o.CPUProfile > 0 && ((scenario == "read" && o.Agents == 8) || (scenario == "worktrees" && o.Worktrees == 4)) {
-		profileDone = make(chan error, 1)
-		path := filepath.Join(p.Root, scenario+".cpu.pprof")
-		artifacts["cpu_profile"] = path
-		if len(phase.Status) == 0 {
-			profileDone <- errors.New("pprof requires a daemon status receipt")
-		} else {
-			status := phase.Status[len(phase.Status)-1]
-			go func() { profileDone <- captureCPUProfile(ctx, status, o.CPUProfile, path) }()
-		}
-	}
-	if scenario == "sweep" {
-		sweepCtx, cancelSweep := context.WithTimeout(ctx, o.SweepBudget)
-		defer cancelSweep()
-		if err == nil {
-			err = runSweep(sweepCtx, o, sweepClients, p.Repos[0], sweepRequests, sweep, &phase, waitContext)
-			for _, entry := range sweep {
-				if entry.Status != "measured" && entry.Status != "outside_scope" {
-					phase.Errors = append(phase.Errors, "tool sweep "+entry.Tool+"."+entry.Operation+": "+entry.Status+": "+entry.Reason)
-				}
-			}
-		}
-	} else if scenario != "cold" && scenario != "restart" {
-		err = runAgents(ctx, o, p, clients, editing, &phase)
-	}
-	phase.DurationSec = time.Since(phase.Started).Seconds()
-	monitor.finish(&phase)
-	if profileDone != nil {
-		resultErr = errors.Join(resultErr, <-profileDone)
+	if o.pairedDriver != nil {
+		err = o.pairedDriver(ctx, p, clients, sweepClients, &phase)
+	} else {
+		err = measureStandalone(ctx, o, p, clients, sweepClients, sweepRequests, sweep, &phase, artifacts, sampler, group)
 	}
 	if err != nil {
 		resultErr = errors.Join(resultErr, err)
+	}
+	if scenario == "sweep" {
+		finalizeSweepInventory(sweep, phase.Attempts, o.SweepRepetitions, &phase)
 	}
 	captureReceipt(ctx, p, clients[0], &phase)
 	for i, client := range clients {
@@ -326,6 +301,37 @@ func runPhase(ctx context.Context, o runOptions, scenario string, corpora []Corp
 		}
 	}
 	return phase, sweep, artifacts, crashes, version, resultErr
+}
+
+func measureStandalone(ctx context.Context, o runOptions, p *privateRun, clients, sweepClients []*socketClient, sweepRequests []request, sweep []SweepEntry, phase *Phase, artifacts map[string]string, sampler processSampler, group string) error {
+	phase.Started = time.Now()
+	monitor := startMonitor(p, sampler, group)
+	var profileDone chan error
+	if o.CPUProfile > 0 && ((phase.Name == "read" && o.Agents == 8) || (phase.Name == "worktrees" && o.Worktrees == 4)) {
+		profileDone = make(chan error, 1)
+		path := filepath.Join(p.Root, phase.Name+".cpu.pprof")
+		artifacts["cpu_profile"] = path
+		if len(phase.Status) == 0 {
+			profileDone <- errors.New("pprof requires a daemon status receipt")
+		} else {
+			status := phase.Status[len(phase.Status)-1]
+			go func() { profileDone <- captureCPUProfile(ctx, status, o.CPUProfile, path) }()
+		}
+	}
+	var err error
+	if phase.Name == "sweep" {
+		sweepCtx, cancelSweep := context.WithTimeout(ctx, o.SweepBudget)
+		defer cancelSweep()
+		err = runSweep(sweepCtx, o, sweepClients, p.Repos[0], sweepRequests, sweep, phase, waitContext)
+	} else if phase.Name != "cold" && phase.Name != "restart" {
+		err = runAgents(ctx, o, p, clients, phase.Name == "edit" || phase.Name == "many-edit", phase)
+	}
+	phase.DurationSec = time.Since(phase.Started).Seconds()
+	monitor.finish(phase)
+	if profileDone != nil {
+		err = errors.Join(err, <-profileDone)
+	}
+	return err
 }
 
 func dispatchArgs(r request, repo privateRepo) map[string]any {
@@ -405,22 +411,7 @@ func runAgents(parent context.Context, o runOptions, p *privateRun, clients []*s
 		})
 	}
 	workers.Wait()
-	var write, visible []float64
-	for _, edit := range phase.Edits {
-		if edit.Outcome != "edit_error" {
-			write = append(write, edit.WriteMS)
-		}
-		if edit.VisibilityMS.Value != nil {
-			visible = append(visible, *edit.VisibilityMS.Value)
-		}
-		if edit.Outcome == "never_visible" {
-			phase.NeverSeen++
-		}
-		if edit.Outcome == "phase_censored" {
-			phase.Censored++
-		}
-	}
-	phase.EditLatency, phase.Visibility = distribution(write, "ms"), distribution(visible, "ms")
+	finishEditMetrics(phase)
 	return parent.Err()
 }
 

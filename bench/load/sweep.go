@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -170,4 +171,30 @@ func runSweep(ctx context.Context, o runOptions, clients []*socketClient, repo p
 		}
 	}
 	return nil
+}
+
+func finalizeSweepInventory(inventory []SweepEntry, attempts []Attempt, repetitions int, phase *Phase) {
+	metrics := summarize(attempts, phase.DurationSec, "workload")
+	for i := range inventory {
+		entry := &inventory[i]
+		if entry.Status == "outside_scope" {
+			continue
+		}
+		name := entry.Tool
+		if entry.Operation != "" {
+			name += "." + entry.Operation
+		}
+		row := metrics[name]
+		if entry.Status != "missing" {
+			if row.Successes == repetitions && len(row.Errors) == 0 && row.ProductExpired == 0 && row.PhaseCensored == 0 {
+				entry.Status, entry.Reason = "measured", ""
+			} else {
+				entry.Status = "error"
+				entry.Reason = fmt.Sprintf("expected%d successes, observed%d; errors/censoring retained in tool metrics", repetitions, row.Successes)
+			}
+		}
+		if entry.Status != "measured" {
+			phase.Errors = append(phase.Errors, "tool sweep "+name+": "+entry.Status+": "+entry.Reason)
+		}
+	}
 }
