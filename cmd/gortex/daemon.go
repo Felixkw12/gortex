@@ -370,6 +370,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		// Revoke every independent producer before the first ownership join.
 		warmupTask.cancel()
 		contractAnalysis.Cancel()
+		state.shared.BeginSemanticClose()
 		state.lifecycle.Cancel()
 		// Revoke startup before any join. The completion boundary is also
 		// the watcher handoff barrier: startup cannot attach/publish another

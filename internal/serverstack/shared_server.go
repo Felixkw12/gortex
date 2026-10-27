@@ -172,10 +172,11 @@ type SharedServer struct {
 	ResolverLSPRegistry *lsp.ResolverHelperRegistry
 	LSPRouter           *lsp.Router
 
-	cleanup   []sharedCleanup // run LIFO by Close (backend close, savings flush).
-	closeOnce sync.Once
-	closeErr  error
-	logger    *zap.Logger
+	cleanup       []sharedCleanup // run LIFO by Close (backend close, savings flush).
+	closeOnce     sync.Once
+	closeErr      error
+	logger        *zap.Logger
+	semanticOwner *semantic.Manager // constructed once, immutable after publication
 	// sidecarPaths are the sidecar databases this stack caused to be
 	// opened — the side stores and the savings ledger. They are released
 	// after the teardown chain, not inside it.
@@ -193,6 +194,15 @@ func (s *SharedServer) addCleanup(name string, close func() error) {
 	s.cleanup = append(s.cleanup, sharedCleanup{name: name, close: close})
 }
 
+// BeginSemanticClose interrupts semantic passes and legacy provider calls
+// before warmup/lifecycle joins can wait on them. Actual completion and errors
+// remain the named semantic_manager cleanup step before the backend closes.
+func (s *SharedServer) BeginSemanticClose() {
+	if s != nil && s.semanticOwner != nil {
+		s.semanticOwner.BeginClose()
+	}
+}
+
 // Close runs the teardown chain LIFO, then releases every sidecar database
 // the stack opened.
 //
@@ -206,6 +216,7 @@ func (s *SharedServer) addCleanup(name string, close func() error) {
 func (s *SharedServer) Close() error {
 	s.closeOnce.Do(func() {
 		// Standalone entrypoints share the same cancel-before-join contract.
+		s.BeginSemanticClose()
 		s.CheckoutLifecycle.Cancel()
 		var errs []error
 		run := func(name string, close func() error) {
@@ -422,6 +433,10 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 			semCfg.Providers = append(semCfg.Providers, out)
 		}
 		semMgr = semantic.NewManager(semCfg, logger)
+		// Own it immediately, including constructor-error cleanup. The stack
+		// is still unpublished: boot registration below cannot race shutdown.
+		s.semanticOwner = semMgr
+		s.addCleanup("semantic_manager", semMgr.Close)
 
 		goMode := goanalysis.ModeTypeCheck
 		if cfg.SemanticMode == "callgraph" {
@@ -505,6 +520,9 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 
 		if !IsFalsyEnv("GORTEX_LSP_RESOLVER") {
 			s.ResolverLSPRegistry = lsp.NewResolverHelperRegistry()
+			// Its registration producers (warmup/lifecycle) join before this
+			// snapshot runs. Beginning semantic close must not snapshot it early.
+			s.addCleanup("resolver_helpers", s.ResolverLSPRegistry.Close)
 			s.LSPRouter = lspRouter
 			idx.SetResolverLSPHelper(s.ResolverLSPRegistry)
 			// Single-repo standalone mode: anchor a "" prefix helper at
