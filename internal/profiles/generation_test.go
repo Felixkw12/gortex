@@ -255,3 +255,28 @@ func TestLegacyProfileProvenanceAndCoreGrowth(t *testing.T) {
 		}
 	}
 }
+
+func TestExplicitSwitchCanRepairInvalidSelectionWithoutWeakeningAutomaticRefresh(t *testing.T) {
+	dir := t.TempDir()
+	if err := Generate(dir, "v-old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, stateFileName), []byte("broken selection"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotProfileFiles(t, dir)
+	if updated, err := RegenerateIfNeeded(dir, "v-next"); err == nil || updated {
+		t.Fatalf("automatic refresh guessed an invalid selection: %t %v", updated, err)
+	}
+	for name, value := range before {
+		if snapshotProfileFiles(t, dir)[name] != value {
+			t.Fatalf("automatic refresh modified %s", name)
+		}
+	}
+	if _, err := Switch(dir, "localization", "v-next"); err != nil {
+		t.Fatalf("explicit selection could not repair metadata: %v", err)
+	}
+	if name, err := storedActiveName(dir); err != nil || name != "localization" {
+		t.Fatalf("explicit selection not committed: %q %v", name, err)
+	}
+}
