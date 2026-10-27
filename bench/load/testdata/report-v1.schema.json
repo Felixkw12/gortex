@@ -25,6 +25,12 @@
           "commit": {
             "type": "string"
           },
+          "edit_anchor": {
+            "type": "string"
+          },
+          "edit_template": {
+            "type": "string"
+          },
           "file": {
             "type": "string"
           },
@@ -47,7 +53,9 @@
           "commit",
           "file",
           "symbol",
-          "query"
+          "query",
+          "edit_template",
+          "edit_anchor"
         ],
         "type": "object"
       },
@@ -398,6 +406,7 @@
             "items": {
               "additionalProperties": false,
               "properties": {
+                "acknowledgement": {},
                 "marker": {
                   "type": "string"
                 },
@@ -448,7 +457,8 @@
                 "write_ms",
                 "visibility_ms",
                 "outcome",
-                "started"
+                "started",
+                "acknowledgement"
               ],
               "type": "object"
             },
@@ -518,6 +528,38 @@
           },
           "never_visible": {
             "type": "integer"
+          },
+          "operations": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "arguments": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "tool": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool",
+                "operation",
+                "arguments"
+              ],
+              "type": "object"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "probes": {
             "additionalProperties": {
@@ -1038,6 +1080,7 @@
           }
         },
         "required": [
+          "operations",
           "name",
           "started",
           "duration_seconds",
@@ -1117,11 +1160,17 @@
         "agents": {
           "type": "integer"
         },
+        "cpu_profile_seconds": {
+          "type": "number"
+        },
         "duration_seconds": {
           "type": "number"
         },
         "edit_agents": {
           "type": "integer"
+        },
+        "keep_state": {
+          "type": "boolean"
         },
         "linked_worktrees": {
           "type": "integer"
@@ -1169,6 +1218,12 @@
         },
         "seed": {
           "type": "integer"
+        },
+        "stop_timeout_seconds": {
+          "type": "number"
+        },
+        "warm_timeout_seconds": {
+          "type": "number"
         }
       },
       "required": [
@@ -1180,7 +1235,11 @@
         "product_deadline_seconds",
         "seed",
         "profile",
-        "operations"
+        "operations",
+        "cpu_profile_seconds",
+        "warm_timeout_seconds",
+        "stop_timeout_seconds",
+        "keep_state"
       ],
       "type": "object"
     }

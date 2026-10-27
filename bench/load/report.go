@@ -48,12 +48,14 @@ func distribution(values []float64, unit string) Distribution {
 }
 
 type Corpus struct {
-	Label  string `json:"label"`
-	Source string `json:"source"`
-	Commit string `json:"commit"`
-	File   string `json:"file"`
-	Symbol string `json:"symbol"`
-	Query  string `json:"query"`
+	Label        string `json:"label"`
+	Source       string `json:"source"`
+	Commit       string `json:"commit"`
+	File         string `json:"file"`
+	Symbol       string `json:"symbol"`
+	Query        string `json:"query"`
+	EditTemplate string `json:"edit_template"`
+	EditAnchor   string `json:"edit_anchor"`
 }
 
 type Host struct {
@@ -103,15 +105,17 @@ type SweepEntry struct {
 }
 
 type EditObservation struct {
-	Repo         string    `json:"repo"`
-	Marker       string    `json:"marker"`
-	WriteMS      float64   `json:"write_ms"`
-	VisibilityMS Metric    `json:"visibility_ms"`
-	Outcome      string    `json:"outcome"`
-	Started      time.Time `json:"started"`
+	Repo            string          `json:"repo"`
+	Marker          string          `json:"marker"`
+	WriteMS         float64         `json:"write_ms"`
+	VisibilityMS    Metric          `json:"visibility_ms"`
+	Outcome         string          `json:"outcome"`
+	Started         time.Time       `json:"started"`
+	Acknowledgement json.RawMessage `json:"acknowledgement"`
 }
 
 type Phase struct {
+	Operations  []request                  `json:"operations"`
 	Name        string                     `json:"name"`
 	Started     time.Time                  `json:"started"`
 	DurationSec float64                    `json:"duration_seconds"`

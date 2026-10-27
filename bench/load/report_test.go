@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +26,7 @@ func sampleReport(t *testing.T) Report {
 		SchemaVersion: reportVersion, RunID: "sample-run", GitSHA: strings.Repeat("b", 40), Binary: "/private/gortex", DaemonVersion: "sample", Started: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		Profile: "agent", Seed: 42, Workload: w, Corpus: []Corpus{c}, RequestPlan: hash,
 		Host:    Host{Machine: "sample-host", OS: "linux", Arch: "amd64", Kernel: "sample", Profile: "native", Limits: map[string]Metric{"cpu": measured(8, "cores")}},
-		Phases:  []Phase{{Name: "read", Started: time.Date(2026, 1, 1, 0, 0, 1, 0, time.UTC), DurationSec: 60, EditLatency: distribution(nil, "ms"), Visibility: distribution(nil, "ms")}},
+		Phases:  []Phase{{Name: "read", Operations: operations, Gate: map[string]json.RawMessage{"readiness": json.RawMessage(`{"ready":true,"enriched":true}`)}, Status: []json.RawMessage{json.RawMessage(`{"views":{},"storage":{"wal_pending_frames":0}}`)}, Stats: []json.RawMessage{json.RawMessage(`{"total_nodes":2,"total_edges":1}`)}, Tools: summarize([]Attempt{{Tool: "search.symbols", Role: "workload", Outcome: "success", LogicalMS: 1}}, 60, "workload"), Started: time.Date(2026, 1, 1, 0, 0, 1, 0, time.UTC), DurationSec: 60, EditLatency: distribution(nil, "ms"), Visibility: distribution(nil, "ms")}},
 		Metrics: map[string]Metric{"stop_seconds": measured(1, "s"), "daemon_cpu_cores": measured(2, "cores"), "pss": unavailable("bytes", "not available on this OS")}, Complete: true,
 	}
 }
@@ -65,7 +64,9 @@ func TestReportRoundTripAndDelta(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := readReport(path)
-	if err != nil || !reflect.DeepEqual(before, got) {
+	beforeJSON, _ := json.Marshal(before)
+	gotJSON, _ := json.Marshal(got)
+	if err != nil || !bytes.Equal(beforeJSON, gotJSON) {
 		t.Fatalf("report round trip: %+v %v", got, err)
 	}
 	var output bytes.Buffer

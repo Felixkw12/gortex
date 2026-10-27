@@ -71,6 +71,10 @@ type Workload struct {
 	Seed            int64     `json:"seed"`
 	Profile         string    `json:"profile"`
 	Operations      []request `json:"operations"`
+	CPUProfileSec   float64   `json:"cpu_profile_seconds"`
+	WarmTimeoutSec  float64   `json:"warm_timeout_seconds"`
+	StopTimeoutSec  float64   `json:"stop_timeout_seconds"`
+	KeepState       bool      `json:"keep_state"`
 }
 
 func (r request) name() string {
@@ -97,13 +101,33 @@ func readingPlan(c Corpus) ([]request, error) {
 	}
 	file := map[string]any{"file": c.File}
 	symbol := map[string]any{"symbol": c.Symbol}
-	return []request{
+	requests := []request{
 		{Tool: "search", Operation: "symbols", Arguments: map[string]any{"operation": "symbols", "query": c.Query}},
+		{Tool: "search", Operation: "text", Arguments: map[string]any{"operation": "text", "query": c.Query}},
+		{Tool: "search", Operation: "files", Arguments: map[string]any{"operation": "files", "query": c.File}},
 		{Tool: "read", Operation: "source", Arguments: map[string]any{"operation": "source", "target": symbol}},
 		{Tool: "read", Operation: "file", Arguments: map[string]any{"operation": "file", "target": file}},
+		{Tool: "read", Operation: "editing_context", Arguments: map[string]any{"operation": "editing_context", "target": file}},
+		{Tool: "read", Operation: "summary", Arguments: map[string]any{"operation": "summary", "target": file}},
+		{Tool: "relations", Operation: "callers", Arguments: map[string]any{"operation": "callers", "target": symbol}},
+		{Tool: "relations", Operation: "usages", Arguments: map[string]any{"operation": "usages", "target": symbol}},
 		{Tool: "relations", Operation: "dependents", Arguments: map[string]any{"operation": "dependents", "target": file}},
+		{Tool: "relations", Operation: "implementations", Arguments: map[string]any{"operation": "implementations", "target": symbol}},
+		{Tool: "explore", Operation: "context", Arguments: map[string]any{"operation": "context", "task": c.Query}},
+		{Tool: "explore", Operation: "outline", Arguments: map[string]any{"operation": "outline"}},
+		{Tool: "explore", Operation: "localize", Arguments: map[string]any{"operation": "localize", "task": c.Query}},
+		{Tool: "change", Operation: "impact", Arguments: map[string]any{"operation": "impact", "target": symbol}},
 		{Tool: "change", Operation: "verify", Arguments: map[string]any{"operation": "verify", "target": symbol}},
-	}, nil
+		{Tool: "change", Operation: "tests", Arguments: map[string]any{"operation": "tests", "target": map[string]any{"symbols": []string{c.Symbol}}}},
+		{Tool: "change", Operation: "detect", Arguments: map[string]any{"operation": "detect", "source": map[string]any{"scope": "unstaged"}}},
+		{Tool: "trace", Operation: "call_chain", Arguments: map[string]any{"operation": "call_chain", "target": symbol}},
+		{Tool: "analyze", Operation: "hotspots", Arguments: map[string]any{"kind": "hotspots"}},
+		{Tool: "analyze", Operation: "dead_code", Arguments: map[string]any{"kind": "dead_code"}},
+	}
+	for i := range requests {
+		requests[i].Arguments["output"] = map[string]any{"format": "json", "max_bytes": 0}
+	}
+	return requests, nil
 }
 
 var commitPattern = regexp.MustCompile(`^[a-fA-F0-9]{40}$`)

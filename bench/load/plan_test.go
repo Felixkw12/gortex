@@ -57,6 +57,16 @@ func TestSourceTargetsAndStablePlan(t *testing.T) {
 			}
 		}
 	}
+	if len(plan) != 21 {
+		t.Fatalf("benchmark operation census=%d, want21", len(plan))
+	}
+	seen := make(map[string]bool)
+	for _, r := range plan {
+		if seen[r.name()] {
+			t.Fatalf("duplicate operation %s", r.name())
+		}
+		seen[r.name()] = true
+	}
 	hash, err := hashJSON(plan)
 	if err != nil {
 		t.Fatal(err)

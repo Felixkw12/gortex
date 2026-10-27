@@ -84,12 +84,23 @@ func validateReport(data []byte, r Report) error {
 	if r.Complete && (len(r.Phases) == 0 || len(r.Errors) != 0) {
 		return errors.New("complete report has no phases or contains errors")
 	}
+	if r.Complete && r.DaemonVersion == "" {
+		return errors.New("complete report is missing daemon version")
+	}
 	seen := make(map[string]bool)
 	for _, phase := range r.Phases {
 		if phase.Name == "" || seen[phase.Name] || phase.Started.IsZero() || phase.DurationSec <= 0 || (r.Complete && len(phase.Errors) != 0) {
 			return errors.New("invalid, duplicate or incomplete phase")
 		}
 		seen[phase.Name] = true
+		if r.Complete {
+			if len(phase.Operations) == 0 || len(phase.Gate) == 0 || len(phase.Status) == 0 || len(phase.Stats) == 0 {
+				return errors.New("complete phase is missing plan/gate/status/stats observations")
+			}
+			if phase.Name != "cold" && phase.Name != "restart" && len(phase.Tools) == 0 {
+				return errors.New("complete workload phase has no tool observations")
+			}
+		}
 		if err := check(phase.Metrics); err != nil {
 			return err
 		}
