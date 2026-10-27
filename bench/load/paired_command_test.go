@@ -34,3 +34,16 @@ func TestPairedSummaryLabelsRatiosAsCoupled(t *testing.T) {
 		}
 	}
 }
+
+func TestPairedEditorOnlyCountsAreExplicit(t *testing.T) {
+	base := []string{"--build", "tag=/private/tag", "--build", "main=/private/main", "--manifest", "/private/manifest.json", "--scratch", t.TempDir(), "--agents", "0", "--edit-agents", "4"}
+	for _, scenario := range []string{"edit", "many-edit"} {
+		options, _, err := parsePaired(append(base, "--scenario", scenario))
+		if err != nil || options.Agents != 0 || options.Editors != 4 {
+			t.Fatalf("paired editor-only %s: %+v %v", scenario, options, err)
+		}
+	}
+	if _, _, err := parsePaired(append(base, "--scenario", "read")); err == nil {
+		t.Fatal("zero-reader read scenario accepted")
+	}
+}

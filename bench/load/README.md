@@ -71,11 +71,22 @@ checkouts. Only the primary is an indexed base corpus; each linked CWD must
 produce an exact automatic-worktree view receipt before measurement.
 
 The default `agent` profile waits 2–5 seconds before each step, then issues
-3–5 parallel reading calls. Edit agents are additional to `--agents` readers;
-each editing step records its public edit acknowledgement and polls indexed
-visibility separately. `saturation` is an explicit closed-loop opt-in.
-Both profiles back off on busy refusal `-32002`: 50, 100, 200, 400, 800 ms,
-then at most 1 second. Busy refusals never cause an immediate retry loop.
+3–5 parallel reading calls. `--agents` counts **pure readers**; `--edit-agents`
+counts combined agents that edit, observe indexed visibility, and then issue the
+reading burst. Both defaults are 4. For exactly N combined edit/readback agents,
+use `--scenario edit --agents 0 --edit-agents N` (also supported by `many-edit`
+and native paired edit scenarios). This adds no hidden reader population.
+`--agents 4 --edit-agents 4` is the separate four-pure-reader/four-editor tail
+workload. The counts remain explicit in the report and workload hash.
+
+Edit scenarios require at least one editor; zero total or negative counts are
+rejected. Zero pure readers are allowed only for `edit`/`many-edit`; `all` needs
+both populations, and other scenarios need at least one reader. Inactive editor
+counts may be zero outside edit scenarios. The floor still permits at most four
+total active agents (for example, zero readers plus four combined editors, or
+two plus two). `saturation` is an explicit closed-loop opt-in. Both profiles back
+off on busy refusal `-32002`: 50, 100, 200, 400, 800 ms, then at most 1 second.
+Busy refusals never cause an immediate retry loop.
 
 Sustained reading uses ten operations: search symbols/text; read source/file/
 editing_context/summary; relations callers/usages; explore context; change

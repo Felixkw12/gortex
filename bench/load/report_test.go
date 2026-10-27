@@ -172,3 +172,41 @@ func TestDistributionDoesNotModifyObservations(t *testing.T) {
 		t.Fatalf("distribution: %+v input=%v", d, values)
 	}
 }
+
+func TestReportValidationPreservesEditorOnlyPopulationAndHash(t *testing.T) {
+	for _, test := range []struct {
+		scenario         string
+		readers, editors int
+		floor, valid     bool
+	}{
+		{"edit", 0, 1, false, true}, {"edit", 0, 4, false, true}, {"edit", 0, 8, false, true},
+		{"many-edit", 0, 4, false, true}, {"edit", 4, 4, false, true},
+		{"edit", 0, 4, true, true}, {"edit", 0, 8, true, false}, {"edit", 1, 4, true, false},
+		{"edit", 0, 0, false, false}, {"edit", 4, 0, false, false}, {"many-edit", 0, 0, false, false},
+		{"read", 0, 4, false, false}, {"worktrees", 0, 4, false, false}, {"sweep", 0, 4, false, false},
+		{"all", 0, 4, false, false}, {"all", 4, 0, false, false}, {"edit", -1, 4, false, false},
+	} {
+		r := sampleReport(t)
+		r.Workload.Scenario, r.Workload.Agents, r.Workload.EditAgents = test.scenario, test.readers, test.editors
+		r.Phases[0].Name = test.scenario
+		if test.floor {
+			r.Host.Profile, r.Host.Validated = "floor", true
+		}
+		r.RequestPlan, _ = hashJSON(r.Workload)
+		data, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateReport(data, r); (err == nil) != test.valid {
+			t.Fatalf("%s readers%d editors%d floor%t valid%t: %v", test.scenario, test.readers, test.editors, test.floor, test.valid, err)
+		}
+		if test.valid {
+			pureReaderAdded := r.Workload
+			pureReaderAdded.Agents++
+			hash, _ := hashJSON(pureReaderAdded)
+			if hash == r.RequestPlan {
+				t.Fatal("adding a pure reader did not change explicit workload identity")
+			}
+		}
+	}
+}

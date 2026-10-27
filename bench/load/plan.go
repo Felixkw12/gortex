@@ -169,3 +169,29 @@ func validateCorpus(c Corpus) error {
 	}
 	return nil
 }
+
+// Editors already edit, observe indexed visibility, and then issue the reading
+// burst. A zero pure-reader count must not quietly add another population to
+// an editor-only workload. Other scenarios still require a reader population.
+func validateAgentCounts(scenario string, readers, editors int) error {
+	if readers < 0 || editors < 0 {
+		return errors.New("reader/editor counts must be nonnegative")
+	}
+	switch scenario {
+	case "edit", "many-edit":
+		if editors < 1 {
+			return errors.New("edit scenarios require at least one combined edit/readback agent")
+		}
+	case "all":
+		if readers < 1 || editors < 1 {
+			return errors.New("all scenarios require at least one pure reader and one combined edit/readback agent")
+		}
+	case "read", "many", "worktrees", "sweep", "cold", "restart":
+		if readers < 1 {
+			return errors.New("zero pure readers are supported only for edit/many-edit")
+		}
+	default:
+		return fmt.Errorf("unknown scenario %q", scenario)
+	}
+	return nil
+}

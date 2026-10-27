@@ -59,8 +59,8 @@ func bindRunFlags(f *flag.FlagSet, o *runOptions) {
 	f.StringVar(&o.Profile, "profile", "agent", "agent (default) or explicit saturation")
 	f.StringVar(&o.Host, "host", "native", "native, reference, or floor (validated, never provisioned)")
 	f.StringVar(&o.Scenario, "scenario", "read", "read, edit, many, many-edit, worktrees, cold, restart, sweep, all")
-	f.IntVar(&o.Agents, "agents", 4, "concurrent reading agents")
-	f.IntVar(&o.Editors, "edit-agents", 4, "concurrent editing agents in edit scenarios, in addition to readers")
+	f.IntVar(&o.Agents, "agents", 4, "pure reading agents (may be 0 only for edit/many-edit)")
+	f.IntVar(&o.Editors, "edit-agents", 4, "combined editing/readback/reading agents in edit scenarios, in addition to pure readers")
 	f.IntVar(&o.Worktrees, "worktrees", 4, "linked worktrees in addition to primary")
 	f.Int64Var(&o.Seed, "seed", 1, "reproducible per-agent request/think plan seed")
 	f.DurationVar(&o.Duration, "duration", time.Minute, "measured workload phase duration")
@@ -74,8 +74,11 @@ func bindRunFlags(f *flag.FlagSet, o *runOptions) {
 }
 
 func validateRunOptions(o runOptions) error {
-	if o.Binary == "" || o.Manifest == "" || o.Scratch == "" || o.Agents < 1 || o.Editors < 1 || o.Worktrees < 0 || o.Duration <= 0 || o.Deadline <= 0 || o.WarmTimeout <= 0 || o.StopTimeout <= 0 || o.CPUProfile < 0 || o.CPUProfile > o.Duration {
-		return errors.New("run requires --binary, --manifest, --scratch and positive counts/budgets")
+	if o.Binary == "" || o.Manifest == "" || o.Scratch == "" || o.Worktrees < 0 || o.Duration <= 0 || o.Deadline <= 0 || o.WarmTimeout <= 0 || o.StopTimeout <= 0 || o.CPUProfile < 0 || o.CPUProfile > o.Duration {
+		return errors.New("run requires --binary, --manifest, --scratch and nonnegative counts and positive budgets")
+	}
+	if err := validateAgentCounts(o.Scenario, o.Agents, o.Editors); err != nil {
+		return err
 	}
 	if _, err := parseProfile(o.Profile); err != nil {
 		return err

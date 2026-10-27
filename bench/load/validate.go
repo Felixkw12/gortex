@@ -52,8 +52,24 @@ func validateReport(data []byte, r Report) error {
 	if r.Workload.SessionModel == "" {
 		return errors.New("offered workload is missing its session model")
 	}
-	if r.Workload.Profile != r.Profile || r.Workload.Seed != r.Seed || r.Workload.Scenario == "" || r.Workload.Agents < 1 || r.Workload.EditAgents < 0 || r.Workload.LinkedWorktrees < 0 || r.Workload.DurationSec <= 0 || r.Workload.DeadlineSec <= 0 || len(r.Workload.Operations) == 0 {
+	if r.Workload.Profile != r.Profile || r.Workload.Seed != r.Seed || r.Workload.Scenario == "" || r.Workload.LinkedWorktrees < 0 || r.Workload.DurationSec <= 0 || r.Workload.DeadlineSec <= 0 || len(r.Workload.Operations) == 0 {
 		return errors.New("invalid or incomplete offered workload")
+	}
+	if err := validateAgentCounts(r.Workload.Scenario, r.Workload.Agents, r.Workload.EditAgents); err != nil {
+		return err
+	}
+	if r.Host.Profile == "floor" {
+		activeAgents := r.Workload.Agents
+		if r.Workload.Scenario == "edit" || r.Workload.Scenario == "many-edit" || r.Workload.Scenario == "all" {
+			activeAgents += r.Workload.EditAgents
+		}
+		checkouts := 1
+		if r.Workload.Scenario == "worktrees" || r.Workload.Scenario == "all" {
+			checkouts += r.Workload.LinkedWorktrees
+		}
+		if activeAgents > 4 || checkouts > 4 {
+			return errors.New("floor report exceeds four total agents/checkouts")
+		}
 	}
 	hash, err := hashJSON(r.Workload)
 	if err != nil || hash != r.RequestPlan {
