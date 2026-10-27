@@ -173,7 +173,7 @@ func (s *Store) BeginAnalysisGeneration(expectedRevision uint64, header graph.An
 // beginAnalysisGenerationWrite starts a short transaction for one bounded
 // append/seal operation. The caller holds writeMu. A stale revision or a
 // generation no longer in building state is a clean rejected write.
-func (s *Store) beginAnalysisGenerationWrite(ctx context.Context, expectedRevision uint64, generationID int64) (*analysisWriteTx, bool, error) {
+func (s *Store) beginAnalysisGenerationWrite(ctx context.Context, expectedRevision uint64, generationID int64) (*ownedWriteTx, bool, error) {
 	if generationID <= 0 {
 		return nil, false, fmt.Errorf("analysis generation: invalid generation id %d", generationID)
 	}
@@ -213,7 +213,7 @@ func (s *Store) beginAnalysisGenerationWrite(ctx context.Context, expectedRevisi
 	return owner, true, nil
 }
 
-func (s *Store) beginAnalysisComponentWrite(ctx context.Context, expectedRevision uint64, generationID int64, component graph.AnalysisComponent) (*analysisWriteTx, bool, error) {
+func (s *Store) beginAnalysisComponentWrite(ctx context.Context, expectedRevision uint64, generationID int64, component graph.AnalysisComponent) (*ownedWriteTx, bool, error) {
 	owner, accepted, err := s.beginAnalysisGenerationWrite(ctx, expectedRevision, generationID)
 	if err != nil || !accepted {
 		return owner, accepted, err
@@ -843,7 +843,7 @@ func (s *Store) AbortAnalysisGeneration(generationID int64) (err error) {
 	// owner needs: the analysis-abort-versus-build-drain deadlock. Every
 	// other analysis write already reuses the pinned connection through
 	// beginAnalysisWrite; the abort must do the same.
-	conn, release, err := s.acquireAnalysisWriteConn(ctx)
+	conn, release, err := s.acquireWriteConnContext(ctx)
 	if err != nil {
 		return err
 	}

@@ -2413,7 +2413,14 @@ func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 // failed deferred-index seal) without taking down the daemon, instead of the
 // void AddBatch path that panics through panicOnFatal.
 func (s *Store) AddBatchChecked(nodes []*graph.Node, edges []*graph.Edge) error {
-	_, err := s.addBatchSetOriented(nodes, edges)
+	return s.AddBatchCheckedContext(context.Background(), nodes, edges)
+}
+
+// AddBatchCheckedContext keeps the selected payload handle and ordinary batch
+// semantics while making admission and SQL observe ctx. An already committed
+// batch remains durable; deferred index sealing still completes synchronously.
+func (s *Store) AddBatchCheckedContext(ctx context.Context, nodes []*graph.Node, edges []*graph.Edge) error {
+	_, err := s.addBatchSetOrientedContext(ctx, nodes, edges)
 	return wrapStorageError(err)
 }
 

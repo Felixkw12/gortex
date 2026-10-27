@@ -28,10 +28,10 @@ func (s *Store) analysisWriteContext() context.Context {
 	return context.Background()
 }
 
-// analysisWriteTx retains its exact physical connection until the real
+// ownedWriteTx retains its exact physical connection until the real
 // transaction ends. A canceled database/sql lifetime would let a second
 // Rollback return ErrTxDone before its automatic rollback physically finished.
-type analysisWriteTx struct {
+type ownedWriteTx struct {
 	tx              *sql.Tx
 	release         func() error
 	committed       bool
@@ -42,20 +42,25 @@ type analysisWriteTx struct {
 // ordinary pool path; BEGIN uses a detached owned lifetime. Native immediate
 // BEGIN contention can still wait for busy_timeout after it starts. This is
 // not an assertion that a requested cleanup budget bounds the whole BEGIN.
-func (s *Store) beginOwnedAnalysisWrite(ctx context.Context) (*analysisWriteTx, error) {
-	conn, release, err := s.acquireAnalysisWriteConn(ctx)
+func (s *Store) beginOwnedAnalysisWrite(ctx context.Context) (*ownedWriteTx, error) {
+	return s.atBase().beginOwnedWrite(ctx)
+}
+
+// beginOwnedWrite uses the selected payload handle, including its managed
+// generation checks. The caller owns writeMu until finish has really returned.
+func (s *Store) beginOwnedWrite(ctx context.Context) (*ownedWriteTx, error) {
+	conn, release, err := s.acquireWriteConnContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	base := s.atBase()
-	tx, err := base.beginWriteOnWithLifetimeContext(ctx, context.WithoutCancel(ctx), conn)
+	tx, err := s.beginWriteOnWithLifetimeContext(ctx, context.WithoutCancel(ctx), conn)
 	if err != nil {
 		return nil, errors.Join(err, release())
 	}
-	return &analysisWriteTx{tx: tx, release: release}, nil
+	return &ownedWriteTx{tx: tx, release: release}, nil
 }
 
-func (s *Store) acquireAnalysisWriteConn(ctx context.Context) (*sql.Conn, func() error, error) {
+func (s *Store) acquireWriteConnContext(ctx context.Context) (*sql.Conn, func() error, error) {
 	conn := s.bulkConn
 	release := func() error { return nil }
 	if conn == nil {
@@ -69,7 +74,7 @@ func (s *Store) acquireAnalysisWriteConn(ctx context.Context) (*sql.Conn, func()
 	return conn, release, nil
 }
 
-func (o *analysisWriteTx) commit(ctx context.Context) error {
+func (o *ownedWriteTx) commit(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -79,7 +84,7 @@ func (o *analysisWriteTx) commit(ctx context.Context) error {
 	return err
 }
 
-func (o *analysisWriteTx) finish(err *error) {
+func (o *ownedWriteTx) finish(err *error) {
 	if !o.committed {
 		rollbackErr := o.tx.Rollback()
 		// Commit always marks sql.Tx done; modernc's Commit synchronously
