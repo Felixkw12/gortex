@@ -33,3 +33,39 @@ func TestExternalAgentHintKeepsUnregisteredConfiguredFamilyPending(t *testing.T)
 		t.Fatalf("unrelated directory lost explicit track guidance: %s", got)
 	}
 }
+
+func TestDirectUnloadedFamilyPrimaryHooksKeepDiscoveryGuidance(t *testing.T) {
+	primary := filepath.Join(t.TempDir(), "primary")
+	if err := os.Mkdir(primary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionGuidanceGit(t, primary, "init", "-q", "-b", "main")
+	oldStatus, oldRoots := sessionStartStatusFn, hookConfiguredRepoRoots
+	t.Cleanup(func() { sessionStartStatusFn, hookConfiguredRepoRoots = oldStatus, oldRoots })
+	hookConfiguredRepoRoots = func() []string { return []string{primary} }
+	status := &daemon.StatusResponse{Ready: true, TrackedRepos: []daemon.TrackedRepoStatus{{Path: primary, Name: "primary", Unloaded: true}}}
+	sessionStartStatusFn = func() (*daemon.StatusResponse, error) { return status, nil }
+	for name, text := range map[string]string{
+		"session-start": renderCwdCoverage(primary, status),
+		"lean-session-start": renderLeanReadiness(primary, status),
+		"external-agent": buildStaleIndexHint(primary),
+	} {
+		if !strings.Contains(text, "view_building") || !strings.Contains(text, "discovery is pending") || strings.Contains(text, "gortex track "+primary) || strings.Contains(strings.ReplaceAll(text, "no reconnect is needed", ""), "reconnect") {
+			t.Errorf("%s mislabeled direct configured/unloaded family: %s", name, text)
+		}
+	}
+}
+
+func TestSessionStartProbePreservesLoadingAndTerminalRegistrationState(t *testing.T) {
+	for _, state := range []string{daemon.RepoStateLoading, daemon.RepoStateFailed, daemon.RepoStateMissing, daemon.RepoStateReady, ""} {
+		status := sessionStartStatusFromProbe(daemon.ProbeResponse{TrackedRepos: []daemon.ProbeRepo{{Path: "/fixture", State: state}}})
+		row := status.TrackedRepos[0]
+		if row.Loading != (state == daemon.RepoStateLoading) || row.Unloaded != (state == daemon.RepoStateLoading || state == daemon.RepoStateFailed || state == daemon.RepoStateMissing) || row.Missing != (state == daemon.RepoStateMissing) {
+			t.Errorf("probe state %q lost terminal/loading distinction: %+v", state, row)
+		}
+		covered, _ := classifyCwd("/fixture", status.TrackedRepos)
+		if (covered == nil) != (row.Unloaded && !row.Loading) {
+			t.Errorf("probe state %q changed healthy/active-loading coverage or admitted terminal unloaded row", state)
+		}
+	}
+}

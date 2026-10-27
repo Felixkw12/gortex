@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,22 +98,29 @@ func TestNotTrackedErrorFamilyMemberDiscoveryPending(t *testing.T) {
 		registered bool
 		state      store_sqlite.CheckoutState
 		finished   bool
+		direct     bool
 	}{
-		{"unknown_catalog_family", true, "", false},
-		{"configured_primary_unregistered", false, "", true},
-		{"availability_grace", true, store_sqlite.CheckoutStateAvailabilityGrace, false},
-		{"reconciling", true, store_sqlite.CheckoutStateReconciling, false},
+		{"unknown_catalog_family", true, "", false, false},
+		{"configured_primary_unregistered_sibling", false, "", true, false},
+		{"direct_configured_primary_unregistered", false, "", false, true},
+		{"direct_primary_failed_registration", false, "", true, true},
+		{"availability_grace", true, store_sqlite.CheckoutStateAvailabilityGrace, false, false},
+		{"reconciling", true, store_sqlite.CheckoutStateReconciling, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFamilyGuidanceFixture(t, tc.registered, tc.state)
 			if tc.finished {
 				f.mi.ExpectRepos(f.config.ReposSnapshot())
-				f.mi.FinishRepoLoad(f.primary, nil)
+				f.mi.FinishRepoLoad(f.primary, errors.New("fixture registration failed"))
 			}
-			sess := &daemon.Session{ID: tc.name, CWD: f.linked}
+			cwd := f.linked
+			if tc.direct {
+				cwd = f.primary
+			}
+			sess := &daemon.Session{ID: tc.name, CWD: cwd}
 			initialize := dispatchJSON(t, f.dispatcher, sess, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`)
 			instructions := initialize["result"].(map[string]any)["instructions"].(string)
-			require.NotContains(t, instructions, "gortex track "+f.linked)
+			require.NotContains(t, instructions, "gortex track "+cwd)
 			require.Contains(t, instructions, "view_building")
 			call := dispatchJSON(t, f.dispatcher, sess, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read","arguments":{"operation":"file","target":{"file":"fixture.go"}}}}`)
 			data := errorData(t, call)
@@ -120,6 +128,11 @@ func TestNotTrackedErrorFamilyMemberDiscoveryPending(t *testing.T) {
 			require.Equal(t, "discovery_pending", data["state"])
 			require.Equal(t, "family_pending", data["reason"])
 			require.Equal(t, true, data["retryable"])
+			if tc.direct && tc.finished {
+				require.Equal(t, "failed", data["load_state"])
+				require.Contains(t, data["load_reason"], "fixture registration failed")
+				require.Contains(t, instructions, "fixture registration failed")
+			}
 			raw, err := json.Marshal(call)
 			require.NoError(t, err)
 			require.NotContains(t, string(raw), "gortex track")
@@ -127,6 +140,48 @@ func TestNotTrackedErrorFamilyMemberDiscoveryPending(t *testing.T) {
 			require.Equal(t, "repo_not_tracked", errorCode(dispatchJSON(t, f.dispatcher, outside, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read","arguments":{}}}`)))
 		})
 	}
+}
+
+func TestBootstrapGateRefusesDirectFailedFamilyPrimary(t *testing.T) {
+	f := newFamilyGuidanceFixture(t, false, "")
+	f.mi.ExpectRepos(f.config.ReposSnapshot())
+	f.mi.FinishRepoLoad(f.primary, errors.New("fixture registration failed"))
+	before, err := os.ReadFile(f.config.ConfigPath())
+	require.NoError(t, err)
+	sess := &daemon.Session{ID: "direct-failed-primary", CWD: f.primary}
+	for _, tool := range []string{"track_repository", "index_repository", "workspace_admin"} {
+		args := map[string]any{"path": f.primary}
+		if tool == "workspace_admin" {
+			args = map[string]any{"operation": "track", "arguments": args}
+		}
+		frame, err := buildToolCallFrame(9, tool, args)
+		require.NoError(t, err)
+		data := errorData(t, dispatchJSON(t, f.dispatcher, sess, string(frame)))
+		require.Equal(t, "view_building", data["error_code"])
+		require.Equal(t, "family_member", data["reason"])
+		require.Equal(t, "discovery_pending", data["state"])
+		require.Contains(t, data["load_reason"], "fixture registration failed")
+	}
+	after, err := os.ReadFile(f.config.ConfigPath())
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+	require.Empty(t, f.mi.AllMetadata())
+	unrelated := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(unrelated, "other.go"), []byte("package other\nfunc Other() {}\n"), 0o600))
+	frame, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": map[string]any{"name": "workspace_admin", "arguments": map[string]any{"operation": "track", "arguments": map[string]any{"path": unrelated}}}})
+	require.NoError(t, err)
+	reply := dispatchJSON(t, f.dispatcher, sess, string(frame))
+	require.Empty(t, errorCode(reply))
+	require.Len(t, f.mi.AllMetadata(), 1)
+	require.NotNil(t, f.config.FindRepoByPath(unrelated))
+}
+
+func TestDirectFamilyLoadingKeepsRepoLoadingPrecedence(t *testing.T) {
+	f := newFamilyGuidanceFixture(t, false, "")
+	f.mi.ExpectRepos(f.config.ReposSnapshot())
+	sess := &daemon.Session{ID: "direct-loading", CWD: f.primary}
+	call := dispatchJSON(t, f.dispatcher, sess, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read","arguments":{"operation":"file","target":{"file":"fixture.go"}}}}`)
+	require.Equal(t, "repo_loading", errorData(t, call)["error_code"])
 }
 
 func TestBootstrapGateRefusesFamilyMemberTrack(t *testing.T) {

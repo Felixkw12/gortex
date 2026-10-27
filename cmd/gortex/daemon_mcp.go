@@ -122,12 +122,17 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	if errors.As(admissionErr, &pending) {
 		admissionErr = nil
 	}
+	var terminalFamilyLoad []indexer.RepoLoad
+	if pending != nil && !pending.load.State.Loading() && agents.PendingAutomaticCheckout(sess.CWD, d.familyRoots()) {
+		terminalFamilyLoad = []indexer.RepoLoad{pending.load}
+		pending = nil // still unadmitted; only the guidance/refusal classification changes
+	}
 	untracked := sess.CWD != "" && !reachable && admissionErr == nil && pending == nil
 	if admissionErr != nil && !checkoutAdmissionMetadataMethod(peekFrameMethod(frame)) {
 		return checkoutAdmissionError(sess.CWD, frame, admissionErr), nil
 	}
 	if sess.CWD != "" && !reachable && admissionErr == nil && d.bootstrapTracksOwnFamilyRoot(sess.CWD, frame) {
-		return familyDiscoveryError(sess.CWD, frame, "family_member"), nil
+		return d.familyDiscoveryRefusal(sess.CWD, frame, "family_member"), nil
 	}
 	if pending != nil {
 		if refused := d.pendingRepoRefusal(sess, frame, pending.load); refused != nil {
@@ -225,7 +230,7 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	// its inactive variant: the agent gets the actionable "run gortex track"
 	// instructions. tools/list is left whole.
 	if untracked {
-		out = rewriteUntrackedResponse(peekFrameMethod(frame), out, sess.CWD, d.familyRoots())
+		out = rewriteUntrackedResponse(peekFrameMethod(frame), out, sess.CWD, d.familyRoots(), terminalFamilyLoad...)
 	}
 	if admissionErr != nil {
 		out = rewriteCheckoutAdmissionResponse(peekFrameMethod(frame), out, sess.CWD, admissionErr)
@@ -294,7 +299,7 @@ func untrackedBootstrapCall(frame []byte) bool {
 // untracked-cwd variant. tools/list is deliberately preserved so facade clients
 // can discover capabilities and workspace_admin.track without reconnecting;
 // every other tools/call remains blocked by Dispatch until tracking succeeds.
-func rewriteUntrackedResponse(method string, out []byte, cwd string, roots []string) []byte {
+func rewriteUntrackedResponse(method string, out []byte, cwd string, roots []string, terminalLoad ...indexer.RepoLoad) []byte {
 	if len(out) == 0 {
 		return out
 	}
@@ -310,7 +315,11 @@ func rewriteUntrackedResponse(method string, out []byte, cwd string, roots []str
 		return out
 	}
 	if agents.PendingAutomaticCheckout(cwd, roots) {
-		result["instructions"] = gortexmcp.ServerInstructionsPendingAutomaticCheckout(cwd, roots...)
+		if len(terminalLoad) > 0 {
+			result["instructions"] = gortexmcp.ServerInstructionsPendingFamilyLoad(cwd, terminalLoad[0], roots...)
+		} else {
+			result["instructions"] = gortexmcp.ServerInstructionsPendingAutomaticCheckout(cwd, roots...)
+		}
 	} else {
 		result["instructions"] = gortexmcp.ServerInstructionsUntracked(cwd, roots...)
 	}
@@ -581,21 +590,32 @@ func (d *mcpDispatcher) bootstrapTracksOwnFamilyRoot(cwd string, frame []byte) b
 	return pathkey.SamePathIdentity(pathkey.CanonicalExistingRoot(target), pathkey.CanonicalExistingRoot(root))
 }
 
-func familyDiscoveryError(cwd string, inbound []byte, reason string) []byte {
+func (d *mcpDispatcher) familyDiscoveryRefusal(cwd string, inbound []byte, reason string) []byte {
+	if load, pending := d.multiIndexer.PendingRepoForPath(cwd); pending && !load.State.Loading() {
+		return familyDiscoveryError(cwd, inbound, reason, load)
+	}
+	return familyDiscoveryError(cwd, inbound, reason)
+}
+
+func familyDiscoveryError(cwd string, inbound []byte, reason string, terminalLoad ...indexer.RepoLoad) []byte {
 	var request struct {
 		ID json.RawMessage `json:"id"`
 	}
 	_ = json.Unmarshal(inbound, &request)
+	data := map[string]any{
+		"error_code": "view_building", "retryable": true, "path": cwd,
+		"state": "discovery_pending", "reason": reason,
+		"suggestion": fmt.Sprintf("Retry graph calls; no reconnect is needed. Inspect `gortex repos explain-view %s` for discovery details.", cwd),
+	}
+	if len(terminalLoad) > 0 {
+		data["load_state"], data["load_reason"], data["repo_path"] = terminalLoad[0].State, terminalLoad[0].Reason, terminalLoad[0].Root
+	}
 	out, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": request.ID,
 		"error": map[string]any{
 			"code":    -32000,
 			"message": "Git family checkout discovery is pending; retry graph calls without changing tracking configuration.",
-			"data": map[string]any{
-				"error_code": "view_building", "retryable": true, "path": cwd,
-				"state": "discovery_pending", "reason": reason,
-				"suggestion": fmt.Sprintf("Retry graph calls; no reconnect is needed. Inspect `gortex repos explain-view %s` for discovery details.", cwd),
-			},
+			"data": data,
 		},
 	})
 	return out
@@ -759,7 +779,7 @@ func (d *mcpDispatcher) maybeSnoopInitialize(sess *daemon.Session, frame []byte)
 // "track this repo" button without regex-parsing the message string.
 func (d *mcpDispatcher) notTrackedError(sess *daemon.Session, inbound []byte) []byte {
 	if agents.PendingAutomaticCheckout(sess.CWD, d.familyRoots()) {
-		return familyDiscoveryError(sess.CWD, inbound, "family_pending")
+		return d.familyDiscoveryRefusal(sess.CWD, inbound, "family_pending")
 	}
 	// Pull the request id out of the inbound frame so the response
 	// pairs correctly. If parsing fails (malformed frame), send a

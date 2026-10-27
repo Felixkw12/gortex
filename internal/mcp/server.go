@@ -1574,6 +1574,14 @@ func ServerInstructionsPendingAutomaticCheckout(cwd string, roots ...string) str
 	return appendTrackedRootsDiagnostic(msg, roots)
 }
 
+// ServerInstructionsPendingFamilyLoad retains the terminal load failure as
+// context, without suggesting a second track operation for a declared family.
+func ServerInstructionsPendingFamilyLoad(cwd string, load indexer.RepoLoad, roots ...string) string {
+	return ServerInstructionsPendingAutomaticCheckout(cwd, roots...) + fmt.Sprintf(
+		"\n\nConfigured repository %q finished loading without registration (state=%s). Load diagnostic: %s",
+		load.Root, load.State, load.Reason)
+}
+
 func appendTrackedRootsDiagnostic(msg string, roots []string) string {
 	if len(roots) == 0 {
 		return msg
@@ -1659,6 +1667,10 @@ func (s *Server) stateAwareInstructionsContext(ctx context.Context, cwd, base st
 			// advice that made agents re-track or stop on every restart.
 			if rec, pending := s.multiIndexer.PendingRepoForPath(cwd); pending {
 				if !rec.State.Loading() {
+					roots := agents.FamilyRepoRoots(s.trackedRepoRoots(), s.multiIndexer.ConfiguredRepoRoots())
+					if agents.PendingAutomaticCheckout(cwd, roots) {
+						return ServerInstructionsPendingFamilyLoad(cwd, rec, roots...)
+					}
 					return ServerInstructionsUnavailable(rec.Root, rec.Reason)
 				}
 				// The ordinary instructions follow the loading preamble: the

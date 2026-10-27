@@ -163,6 +163,10 @@ func fetchDaemonProbeAsStatus() (*daemon.StatusResponse, error) {
 		return nil, err
 	}
 
+	return sessionStartStatusFromProbe(probe), nil
+}
+
+func sessionStartStatusFromProbe(probe daemon.ProbeResponse) *daemon.StatusResponse {
 	status := &daemon.StatusResponse{
 		Version:            probe.Version,
 		PID:                probe.PID,
@@ -179,9 +183,12 @@ func fetchDaemonProbeAsStatus() (*daemon.StatusResponse, error) {
 			Name:      r.Name,
 			Workspace: r.Workspace,
 			Project:   r.Project,
+			Loading:   r.State == daemon.RepoStateLoading,
+			Unloaded:  r.State == daemon.RepoStateLoading || r.State == daemon.RepoStateFailed || r.State == daemon.RepoStateMissing,
+			Missing:   r.State == daemon.RepoStateMissing,
 		})
 	}
-	return status, nil
+	return status
 }
 
 // sessionStartProbeBudget bounds the fallback. Probe touches no store, no
@@ -453,6 +460,9 @@ func classifyCwd(cwd string, repos []daemon.TrackedRepoStatus) (exact *daemon.Tr
 	var enclosing *daemon.TrackedRepoStatus
 	for i := range repos {
 		repo := repos[i]
+		if repo.Unloaded && !repo.Loading {
+			continue // a terminal configured declaration is not live graph coverage
+		}
 		repoPath := filepath.Clean(repo.Path)
 		if pathkey.EqualPaths(repoPath, cwd) {
 			exact = &repos[i]
