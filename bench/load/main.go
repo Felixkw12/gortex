@@ -21,10 +21,14 @@ func command(args []string) error {
 		defer cancel()
 		return runCommand(ctx, args[1:])
 	}
-	if len(args) == 1 && args[0] == "schema" {
+	if (len(args) == 1 && args[0] == "schema") || (len(args) == 2 && args[0] == "schema" && args[1] == "paired") {
+		schema := reportSchema()
+		if len(args) == 2 {
+			schema = pairedSchema()
+		}
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
-		return encoder.Encode(reportSchema())
+		return encoder.Encode(schema)
 	}
 	if len(args) == 3 && args[0] == "delta" {
 		before, err := readReport(args[1])

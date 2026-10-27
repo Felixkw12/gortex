@@ -18,6 +18,14 @@ func reportSchema() map[string]any {
 	return schema
 }
 
+func pairedSchema() map[string]any {
+	schema := schemaFor(reflect.TypeFor[pairedReport]())
+	schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+	schema["$id"] = "https://gortex.dev/bench/load/paired-v1.schema.json"
+	schema["title"] = "Gortex coupled native request comparison v1"
+	return schema
+}
+
 func schemaFor(t reflect.Type) map[string]any {
 	if t == reflect.TypeFor[json.RawMessage]() {
 		return map[string]any{}
