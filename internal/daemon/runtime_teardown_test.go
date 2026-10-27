@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -180,6 +181,80 @@ func TestRuntimeTeardownKeepsStartupPathsWhenAmbientOverridesChange(t *testing.T
 		require.NoError(t, err)
 	}
 	for _, path := range []string{s.pidPath, s.statePath, s.ownedSocket.path} {
+		_, err := os.Lstat(path)
+		require.ErrorIs(t, err, os.ErrNotExist)
+	}
+}
+
+type runtimeHeldAcceptListener struct {
+	net.Listener
+	entered chan struct{}
+	release <-chan struct{}
+	failure error
+}
+
+func (l *runtimeHeldAcceptListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	close(l.entered)
+	<-l.release // Descriptor is accepted and owned, but not tracked yet.
+	return &runtimeFaultConn{Conn: conn, failure: l.failure}, nil
+}
+
+func TestRuntimeTeardownRetainsAcceptedBeforeTrackingCloseFailure(t *testing.T) {
+	observed := make(chan error, 1)
+	s := runtimeCleanupServer(t, func(s *Server) { s.OnShutdownComplete = func(err error) { observed <- err } })
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unlock := func() { once.Do(func() { close(release) }) }
+	failure := errors.New("late accepted physical close fault")
+	s.listener = &runtimeHeldAcceptListener{Listener: s.listener, entered: entered, release: release, failure: failure}
+	served := make(chan error, 1)
+	t.Cleanup(func() { unlock(); _ = s.Shutdown(); <-served })
+	go func() { served <- s.Serve() }()
+	conn, err := net.DialTimeout("unix", s.SocketPath, time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("actual accept did not reach its pre-track barrier")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- s.Shutdown() }()
+	require.Eventually(t, func() bool { s.connsMu.Lock(); defer s.connsMu.Unlock(); return s.connsClosing }, 3*time.Second, time.Millisecond)
+	select {
+	case <-observed:
+		t.Fatal("runtime completion dropped its accepted descriptor owner")
+	default:
+	}
+	unlock()
+	select {
+	case err := <-closed:
+		require.ErrorIs(t, err, failure)
+	case <-time.After(3 * time.Second):
+		t.Fatal("actual late descriptor close did not join")
+	}
+	require.ErrorIs(t, <-observed, failure)
+	require.ErrorIs(t, s.Shutdown(), failure, "late close error was not cached")
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
+	_, err = conn.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF, "the injected error must still close its real descriptor")
+}
+
+func TestRuntimeListenHTTPFailureRemovesOwnedStartupFiles(t *testing.T) {
+	dir := testenv.ShortTempDir(t)
+	t.Setenv("GORTEX_DAEMON_PIDFILE", filepath.Join(dir, "pid"))
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = busy.Close() })
+	s := New(filepath.Join(dir, "sock"), "runtime-fixture", zap.NewNop())
+	s.HTTPHandler, s.HTTPAddr = http.NewServeMux(), busy.Addr().String()
+	t.Cleanup(func() { _ = s.Shutdown() })
+	require.ErrorContains(t, s.Listen(), "listen http")
+	for _, path := range []string{s.SocketPath, s.pidPath} {
 		_, err := os.Lstat(path)
 		require.ErrorIs(t, err, os.ErrNotExist)
 	}

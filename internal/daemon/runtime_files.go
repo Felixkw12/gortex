@@ -112,6 +112,22 @@ func removeStaleDaemonEndpoint(path string) error {
 	return file.remove()
 }
 
+// Listen has not published a serving runtime yet. Close every acquired
+// descriptor and remove only its captured startup files; preserve the failed
+// startup-state record for diagnostics and retain all actual cleanup errors.
+func (s *Server) failListen(cause error) error {
+	errs := []error{cause}
+	for _, listener := range []net.Listener{s.httpListener, s.listener} {
+		if listener != nil {
+			if err := listener.Close(); err != nil && !runtimeAlreadyClosed(err) {
+				errs = append(errs, err)
+			}
+		}
+	}
+	errs = append(errs, s.ownedSocket.remove(), s.ownedPID.remove())
+	return errors.Join(errs...)
+}
+
 func (s *Server) captureStoppedRuntimeState() (ownedRuntimeFile, error) {
 	file, err := captureOwnedRuntimeFile(s.statePath, true)
 	if err != nil || file.info == nil {

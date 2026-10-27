@@ -101,19 +101,21 @@ type Server struct {
 	binaryStatFn      func(path string) (int64, int64, error) // size, mtime unix seconds, err
 	binaryLoggedStale bool
 
-	shutdown     chan struct{}
-	shutdownDone chan struct{}
-	doneOnce     sync.Once
-	shutdownErr  error
-	pidPath      string
-	statePath    string
-	ownedPID     ownedRuntimeFile
-	ownedSocket  ownedRuntimeFile
-	serveStarted bool // protected by connsMu with connection admission
-	serveDone    chan struct{}
-	connsClosing bool
-	conns        map[net.Conn]struct{}
-	connsMu      sync.Mutex
+	shutdown          chan struct{}
+	shutdownDone      chan struct{}
+	doneOnce          sync.Once
+	shutdownErr       error
+	pidPath           string
+	statePath         string
+	ownedPID          ownedRuntimeFile
+	ownedSocket       ownedRuntimeFile
+	serveStarted      bool // protected by connsMu with connection admission
+	serveDone         chan struct{}
+	connsClosing      bool
+	lateConnCloseErrs []error // rejected accepted descriptors, joined by serveDone
+	socketChmod       func(string, os.FileMode) error
+	conns             map[net.Conn]struct{}
+	connsMu           sync.Mutex
 }
 
 // MCPDispatcher is implemented by whichever layer runs the MCP tool
@@ -218,6 +220,7 @@ func New(socketPath, version string, logger *zap.Logger) *Server {
 		serveDone:    make(chan struct{}),
 		conns:        make(map[net.Conn]struct{}),
 		binaryStatFn: osStatIdentity,
+		socketChmod:  os.Chmod,
 	}
 	// Capture the running image's identity so status requests can detect
 	// a later on-disk replace. Best-effort: a failure here leaves
@@ -322,21 +325,19 @@ func (s *Server) Listen() error {
 		// identity may authorize removing this endpoint during Shutdown.
 		listener.SetUnlinkOnClose(false)
 	}
+	s.listener = l
+	s.ownedSocket, err = captureOwnedRuntimeFile(s.SocketPath, false)
+	if err != nil {
+		return s.failListen(err)
+	}
 	// chmod the socket to user-only on Unix. Windows has no POSIX mode
 	// bits — the socket inherits the ACLs of %USERPROFILE%, which is
 	// already user-scoped — so skip it there.
 	if runtime.GOOS != "windows" {
-		if err := os.Chmod(s.SocketPath, 0o600); err != nil {
-			_ = l.Close()
-			return fmt.Errorf("chmod socket: %w", err)
+		if err := s.socketChmod(s.SocketPath, 0o600); err != nil {
+			return s.failListen(fmt.Errorf("chmod socket: %w", err))
 		}
 	}
-	s.ownedSocket, err = captureOwnedRuntimeFile(s.SocketPath, false)
-	if err != nil {
-		_ = l.Close()
-		return errors.Join(err, s.ownedPID.remove())
-	}
-	s.listener = l
 	s.started = time.Now()
 
 	// Optional HTTP listener for the MCP 2026 Streamable transport.
@@ -349,8 +350,7 @@ func (s *Server) Listen() error {
 	if s.HTTPHandler != nil && s.HTTPAddr != "" {
 		httpLn, herr := net.Listen("tcp", s.HTTPAddr)
 		if herr != nil {
-			_ = l.Close()
-			return errors.Join(fmt.Errorf("listen http: %w", herr), s.ownedSocket.remove(), s.ownedPID.remove())
+			return s.failListen(fmt.Errorf("listen http: %w", herr))
 		}
 		s.httpListener = httpLn
 		s.httpServer = &http.Server{
@@ -1083,6 +1083,9 @@ func (s *Server) Shutdown() error {
 		if serveStarted {
 			<-s.serveDone // Joins an accepted-but-not-yet-tracked descriptor.
 		}
+		s.connsMu.Lock()
+		errs = append(errs, s.lateConnCloseErrs...)
+		s.connsMu.Unlock()
 		errs = append(errs, s.removeRuntimeFiles())
 		s.shutdownErr = errors.Join(errs...)
 		close(s.shutdownDone)
@@ -1155,7 +1158,11 @@ func (s *Server) trackConn(c net.Conn) bool {
 	s.connsMu.Lock()
 	if s.connsClosing {
 		s.connsMu.Unlock()
-		_ = c.Close()
+		if err := c.Close(); err != nil && !runtimeAlreadyClosed(err) {
+			s.connsMu.Lock()
+			s.lateConnCloseErrs = append(s.lateConnCloseErrs, fmt.Errorf("close late accepted daemon connection: %w", err))
+			s.connsMu.Unlock()
+		}
 		return false
 	}
 	s.conns[c] = struct{}{}
