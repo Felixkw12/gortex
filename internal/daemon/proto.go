@@ -116,6 +116,9 @@ type ControlResponse struct {
 	ErrorCode string          `json:"error_code,omitempty"`
 	ErrorMsg  string          `json:"error_msg,omitempty"`
 	Result    json.RawMessage `json:"result,omitempty"`
+	// Warnings report cleanup errors after shutdown was accepted. OK does not
+	// certify store-close success or process exit; callers still wait for exit.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Control operation kinds. One constant per kind so callers can't typo.

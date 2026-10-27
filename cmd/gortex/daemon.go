@@ -376,24 +376,23 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	runTeardown := installDaemonTeardown(controller, stopBackground, func() error {
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancelShutdown()
-		if err := contractAnalysis.Close(shutdownCtx); err != nil {
-			return fmt.Errorf("contract analysis still owns selected-source handoffs: %w", err)
-		}
-		// Nothing has to be serialized here: per-file mtimes live in the
-		// FileMtime sidecar table, contract records ride on
-		// KindContract.Meta, and the vector index is persisted by the
-		// backend itself. Warm restart reads everything it needs straight
-		// from the on-disk store.
-		//
-		// The shared stack's teardown chain flushes the savings store and
-		// closes the backend handle, checkpointing the sqlite WAL.
-		if state.shared != nil {
-			return state.shared.Close()
-		}
-		if state.mcpServer != nil {
-			return state.mcpServer.FlushSavings()
-		}
-		return nil
+		return closeDaemonOwners(shutdownCtx, contractAnalysis, func() error {
+			// Nothing has to be serialized here: per-file mtimes live in the
+			// FileMtime sidecar table, contract records ride on
+			// KindContract.Meta, and the vector index is persisted by the
+			// backend itself. Warm restart reads everything it needs straight
+			// from the on-disk store.
+			//
+			// The shared stack's teardown chain flushes the savings store and
+			// closes the backend handle, checkpointing the sqlite WAL.
+			if state.shared != nil {
+				return state.shared.Close()
+			}
+			if state.mcpServer != nil {
+				return state.mcpServer.FlushSavings()
+			}
+			return nil
+		}, logger)
 	})
 	defer runTeardown()
 	srv.Controller = controller
@@ -1246,6 +1245,9 @@ func stopRunningDaemon(w io.Writer) error {
 		return err
 	case !resp.OK:
 		return fmt.Errorf("shutdown rejected: %s %s", resp.ErrorCode, resp.ErrorMsg)
+	}
+	for _, warning := range resp.Warnings {
+		fmt.Fprintf(w, "[gortex daemon] shutdown warning: %s\n", warning)
 	}
 	grace := daemonStopExitGrace(acked, pre)
 	if havePID {

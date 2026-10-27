@@ -22,6 +22,9 @@ type daemonContractAnalysis struct {
 	cancel              context.CancelFunc
 	baselineAdmissionMu sync.Mutex
 	baselineJobs        sync.WaitGroup
+	closeOnce           sync.Once
+	closeDone           chan struct{}
+	closeErr            error
 }
 
 // installDaemonContractAnalysis installs the production runtime before warmup.
@@ -107,27 +110,46 @@ func contractAnalysisYield(shouldYield func() bool) func(context.Context) error 
 	return indexer.ContractAnalysisYield(shouldYield)
 }
 
+// beginClose owns one drain for the lifetime of this runtime. Cancellation is
+// synchronous and precedes the admission fence; joins run outside that fence.
+func (r *daemonContractAnalysis) beginClose() {
+	r.closeOnce.Do(func() {
+		r.closeDone = make(chan struct{})
+		r.cancel()
+		go func() {
+			defer close(r.closeDone)
+			r.baselineAdmissionMu.Lock()
+			r.baselineAdmissionMu.Unlock()
+			// Repair still joins before coordinator cancellation. A stuck repair
+			// therefore remains visible as an unbounded contract drain; the
+			// diagnostic deadline must never certify that ownership is gone.
+			r.repair.Close()
+			r.closeErr = r.coordinator.Close()
+			r.baselineJobs.Wait()
+		}()
+	})
+}
+
 // Close refuses to declare drained ownership on timeout. The caller must leave
-// the store open in that case; committed pending state remains for restart.
+// the store open until this runtime's same completion barrier has been joined.
 func (r *daemonContractAnalysis) Close(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
-	r.baselineAdmissionMu.Lock()
-	r.cancel()
-	r.baselineAdmissionMu.Unlock()
-	// The repair holds repository lanes only while it repairs; it stops
-	// before the scheduler whose actors it serves.
-	r.repair.Close()
-	if err := r.coordinator.CloseContext(ctx); err != nil {
-		return err
-	}
-	drained := make(chan struct{})
-	go func() { r.baselineJobs.Wait(); close(drained) }()
+	r.beginClose()
 	select {
-	case <-drained:
-		return nil
+	case <-r.closeDone:
+		return r.closeErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (r *daemonContractAnalysis) waitClosed() error {
+	if r == nil {
+		return nil
+	}
+	r.beginClose()
+	<-r.closeDone
+	return r.closeErr
 }

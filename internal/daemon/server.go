@@ -665,13 +665,13 @@ func (s *Server) serveControl(conn net.Conn, reader *bufio.Reader, sess *Session
 		}
 		resp := s.handleControlBounded(sess, req)
 		writeErr := WriteJSONLine(conn, resp)
-		if req.Kind == ControlShutdown && resp.OK {
+		if req.Kind == ControlShutdown {
 			// Scheduled regardless of whether the ack reached the client. The
-			// controller flushes and closes the store before answering, so a
+			// controller attempts the teardown before answering, so a
 			// client that gave up waiting (or died) has already left by the
 			// time we get here — and skipping the teardown on a failed write
-			// would leave a daemon that flushed its store and then kept
-			// running, holding the on-disk lock the next start needs.
+			// would strand the listener/runtime after an accepted shutdown.
+			// Cleanup errors remain warnings, never proof of store-close success.
 			//
 			// The short delay gives a client that IS still listening a moment
 			// to read the ack before the listener goes away.
@@ -889,10 +889,11 @@ func (s *Server) handleControl(ctx context.Context, _ *Session, req ControlReque
 		return ControlResponse{OK: true, Result: buf}
 
 	case ControlShutdown:
+		resp := ControlResponse{OK: true}
 		if err := s.Controller.Shutdown(ctx); err != nil {
-			return controlErr(ErrInternal, err.Error())
+			resp.Warnings = []string{err.Error()}
 		}
-		return ControlResponse{OK: true}
+		return resp
 
 	case ControlEnrichChurn:
 		var p EnrichChurnParams

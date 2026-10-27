@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -171,11 +172,25 @@ type SharedServer struct {
 	ResolverLSPRegistry *lsp.ResolverHelperRegistry
 	LSPRouter           *lsp.Router
 
-	cleanup []func() // run LIFO by Close (backend close, savings flush).
+	cleanup   []sharedCleanup // run LIFO by Close (backend close, savings flush).
+	closeOnce sync.Once
+	closeErr  error
+	logger    *zap.Logger
 	// sidecarPaths are the sidecar databases this stack caused to be
 	// opened — the side stores and the savings ledger. They are released
 	// after the teardown chain, not inside it.
 	sidecarPaths []string
+	closeSidecar func(string) error // nil selects persistence.CloseSidecar
+}
+
+type sharedCleanup struct {
+	name  string
+	close func() error
+}
+
+// addCleanup is construction-only; Close begins after the stack is published.
+func (s *SharedServer) addCleanup(name string, close func() error) {
+	s.cleanup = append(s.cleanup, sharedCleanup{name: name, close: close})
 }
 
 // Close runs the teardown chain LIFO, then releases every sidecar database
@@ -189,14 +204,36 @@ type SharedServer struct {
 // teardown. persistence.CloseSidecar is a no-op for a path nothing opened,
 // so listing a store that stayed in memory costs nothing.
 func (s *SharedServer) Close() error {
-	for i := len(s.cleanup) - 1; i >= 0; i-- {
-		s.cleanup[i]()
-	}
-	for _, path := range s.sidecarPaths {
-		_ = persistence.CloseSidecar(path)
-	}
-	s.sidecarPaths = nil
-	return nil
+	s.closeOnce.Do(func() {
+		var errs []error
+		run := func(name string, close func() error) {
+			started := time.Now()
+			if s.logger != nil {
+				s.logger.Info("serverstack: shutdown phase start", zap.String("phase", name))
+			}
+			err := close()
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			}
+			if s.logger != nil {
+				s.logger.Info("serverstack: shutdown phase complete", zap.String("phase", name), zap.Duration("elapsed", time.Since(started)), zap.Error(err))
+			}
+		}
+		for i := len(s.cleanup) - 1; i >= 0; i-- {
+			step := s.cleanup[i]
+			run(step.name, step.close)
+		}
+		closeSidecar := s.closeSidecar
+		if closeSidecar == nil {
+			closeSidecar = persistence.CloseSidecar
+		}
+		for _, path := range s.sidecarPaths {
+			run("sidecar "+path, func() error { return closeSidecar(path) })
+		}
+		s.sidecarPaths = nil
+		s.closeErr = errors.Join(errs...)
+	})
+	return s.closeErr
 }
 
 // telemetrySendInterval bounds how often the daemon flushes the in-memory
@@ -287,7 +324,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		}
 	}
 
-	s := &SharedServer{}
+	s := &SharedServer{logger: logger}
 
 	// Resolve the store path once: the lock, the open, and the path published
 	// on SharedServer must all name the same file. The backend name was
@@ -317,7 +354,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 			}
 			return nil, fmt.Errorf("%s — stop it first (`gortex daemon stop`)", hint)
 		}
-		s.cleanup = append(s.cleanup, func() { _ = lock.Unlock() })
+		s.addCleanup("store_lock", lock.Unlock)
 		storeLockHeld = true
 	}
 
@@ -326,10 +363,9 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	g, backendCleanup, err := OpenBackend(cfg.Backend, storePath, logger, storeLockHeld, cfg.MigrationObserver)
 	if err != nil {
 		// Backend initialization can fail after the store lock was acquired.
-		_ = s.Close()
-		return nil, err
+		return nil, errors.Join(err, s.Close())
 	}
-	s.cleanup = append(s.cleanup, backendCleanup)
+	s.addCleanup("backend", backendCleanup)
 	s.Graph = g
 
 	reg := parser.NewRegistry()
@@ -710,29 +746,31 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		s.OutputGenerationAuthority = authority
 		// Admission stops with the stack. Outstanding receipts still settle:
 		// closing must refuse new work, not strand work already on a lane.
-		s.cleanup = append(s.cleanup, authority.Close)
+		s.addCleanup("output_authority", func() error {
+			authority.Close()
+			return nil
+		})
 	}
 	// Appended after backendCleanup but before MCP background drain. LIFO
 	// teardown therefore drains background work first, then closes per-repo
 	// parser workers, then the standalone Indexer, and only then the graph and
 	// store lock.
-	s.cleanup = append(s.cleanup, func() {
+	s.addCleanup("indexers", func() error {
+		var err error
 		if mi != nil {
-			if err := mi.Close(context.Background()); err != nil {
-				logger.Warn("serverstack: multi-indexer shutdown failed", zap.Error(err))
-			}
+			err = mi.Close(context.Background())
 		}
 		idx.Close()
+		return err
 	})
 	// LIFO: MCP detached work -> lifecycle admissions/producers/retry joins ->
 	// MI parser workers -> standalone Indexer -> backend and store lock.
 	// This must remain after MI cleanup registration and before MCP drain.
-	s.cleanup = append(s.cleanup, func() {
+	s.addCleanup("checkout_lifecycle", func() error {
 		if s.CheckoutLifecycle != nil {
-			if err := s.CheckoutLifecycle.Close(); err != nil {
-				logger.Warn("serverstack: checkout lifecycle shutdown failed", zap.Error(err))
-			}
+			return s.CheckoutLifecycle.Close()
 		}
+		return nil
 	})
 
 	toolPolicyCfg := gortexmcp.ToolPolicyConfig{
@@ -764,7 +802,10 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	// Appended after backendCleanup so LIFO teardown drains the server's
 	// detached store-writing goroutines (analysis-generation prune) before
 	// the backend store closes underneath them.
-	s.cleanup = append(s.cleanup, srv.DrainBackground)
+	s.addCleanup("mcp_background", func() error {
+		srv.DrainBackground()
+		return nil
+	})
 	// The server is the session/analysis fan-out, so it can only be bound
 	// after it exists. Every lifecycle side effect — including the ones the
 	// daemon controller drives — reaches sessions through it from here on.
@@ -802,7 +843,10 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	stopOverlayJanitor := overlays.StartJanitor(0, func(dropped int) {
 		logger.Info("overlay janitor: swept idle sessions", zap.Int("dropped", dropped))
 	})
-	s.cleanup = append(s.cleanup, stopOverlayJanitor)
+	s.addCleanup("overlay_janitor", func() error {
+		stopOverlayJanitor()
+		return nil
+	})
 
 	if semMgr := idx.SemanticManager(); semMgr != nil {
 		srv.SetSemanticManager(semMgr)
@@ -822,14 +866,21 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	teleRec := telemetry.NewRecorderFunc(
 		telemetry.CachedConsentResolver(teleDir, telemetryConsentTTL), teleStore)
 	srv.SetTelemetryRecorder(teleRec)
-	s.cleanup = append(s.cleanup, func() { srv.FlushTelemetry() })
+	s.addCleanup("telemetry_flush", func() error {
+		srv.FlushTelemetry()
+		return nil
+	})
 	if cfg.Lifecycle == LifecycleDaemon {
 		// One daemon-session event per process start, dimensioned by backend
 		// — a constant now that sqlite is the only one, kept as a dimension
 		// so the event shape survives a future second store.
 		// Opt-in + fail-silent: a disabled recorder drops it.
 		telemetry.RecordDaemonSession(teleRec, "sqlite")
-		s.cleanup = append(s.cleanup, startTelemetrySender(srv, teleStore, teleDir, cfg.Version))
+		stopTelemetry := startTelemetrySender(srv, teleStore, teleDir, cfg.Version)
+		s.addCleanup("telemetry_sender", func() error {
+			stopTelemetry()
+			return nil
+		})
 	}
 
 	// Side-stores. The HTTP path previously wired NONE of these; routing it
@@ -883,7 +934,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		}
 		srv.InitSavings(savingsStore, cfg.SavingsRepo)
 		s.sidecarPaths = append(s.sidecarPaths, savingsPath)
-		s.cleanup = append(s.cleanup, func() { _ = srv.FlushSavings() })
+		s.addCleanup("savings_flush", srv.FlushSavings)
 	} else {
 		logger.Warn("serverstack: savings persistence disabled", zap.Error(err))
 	}
@@ -900,7 +951,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		// its Close in the cleanup chain — the "caller owns Close" contract
 		// SetLLMService documents.
 		if llmSvc := srv.LLMService(); llmSvc != nil {
-			s.cleanup = append(s.cleanup, func() { _ = llmSvc.Close() })
+			s.addCleanup("llm", llmSvc.Close)
 		}
 	}
 
