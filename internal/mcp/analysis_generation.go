@@ -571,6 +571,7 @@ func (s *Server) DrainBackground() {
 	s.backgroundDrainOnce.Do(func() {
 		s.retireSymbolPages()
 		s.backgroundMaintenance.Wait()
+		s.StopHealthBroadcaster()
 	})
 }
 

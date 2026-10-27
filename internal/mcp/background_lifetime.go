@@ -33,4 +33,7 @@ func (s *Server) BeginBackgroundClose() {
 	if cancel != nil {
 		cancel()
 	}
+	if s.healthBroadcaster != nil {
+		s.healthBroadcaster.beginClose()
+	}
 }
