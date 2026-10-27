@@ -2,11 +2,14 @@ package mcp
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
+
+var graphFreshnessReceiptID = regexp.MustCompile(`^mutation-\d+$`)
 
 // handleMutationStatus answers "what actually happened to my edit?" after a
 // response was lost — the recovery path for a tool call the deadline wrapper
@@ -37,6 +40,14 @@ func (s *Server) handleMutationStatus(ctx context.Context, req mcp.CallToolReque
 
 	case mutationID != "":
 		record, ok := s.mutationCommits.byMutationID(mutationID)
+		if !ok && graphFreshnessReceiptID.MatchString(mutationID) {
+			if payload, found := s.graphRefreshReceiptPayload(ctx, mutationID); found {
+				payload["note"] = "this is a graph freshness receipt id, not a caller mutation_id"
+				return s.respondJSONOrTOON(ctx, req, payload)
+			}
+			return mcp.NewToolResultError("no mutation recorded for mutation_id " + mutationID +
+				" — use change.receipt options.receipt=" + mutationID + " to query a graph freshness receipt"), nil
+		}
 		if !ok || !mutationCommitInScope(ctx, record) {
 			return mcp.NewToolResultError("no mutation recorded for mutation_id " + mutationID), nil
 		}

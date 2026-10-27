@@ -190,8 +190,8 @@ func (s *Server) registerCodingTools() {
 	s.addTool(
 		mcp.NewTool("mutation_status",
 			mcp.WithDescription("Reports what a file mutation actually did, after the fact. Use it when an edit_file / write_file / edit_symbol call was abandoned at its deadline (\"the work may still complete in the background\"): instead of retrying blindly, ask here. Returns disk_status (committed / not_applied / failed / in_flight) separately from graph_status (fresh / pending / stale / failed), because the bytes reaching disk and the graph catching up are different questions. Only graph_status=pending resolves on its own: graph_status_terminal and graph_note say whether the value can still change, so do not wait on a terminal one. disk_status=committed means the edit is already applied — re-applying it by any route would duplicate it. Select a record by receipt, by mutation_id, or by path; with no argument it lists the most recent mutations. Receipts are retained for 30 minutes."),
-			mcp.WithString("receipt", mcp.Description("Mutation receipt id from an edit response (`mutation_receipt`) or from the `mutation_commit=` block on an abandoned-call error.")),
-			mcp.WithString("mutation_id", mcp.Description("Caller-chosen idempotency key passed to the original edit.")),
+			mcp.WithString("receipt", mcp.Description("Mutation commit id (`commit-N`) from an edit response (`mutation_receipt`) or the `mutation_commit=` block on an abandoned-call error. Also accepts graph freshness receipt ids (`mutation-N`) printed by freshness refusals.")),
+			mcp.WithString("mutation_id", mcp.Description("Caller-chosen idempotency key passed to the original edit. Also accepts graph freshness receipt ids (`mutation-N`) when no caller key matches; prefer the receipt field for those ids.")),
 			mcp.WithString("path", mcp.Description("File path — returns the most recent mutation recorded for it. Use when the response was lost entirely and no receipt id was ever seen.")),
 		),
 		s.handleMutationStatus,
