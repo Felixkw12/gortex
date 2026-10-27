@@ -118,8 +118,8 @@ func TestRuntimeTeardownCachesJoinedErrorsAndObservesOutsideOnce(t *testing.T) {
 	}
 	late, peer := net.Pipe()
 	t.Cleanup(func() { _ = peer.Close() })
-	require.False(t, s.trackConn(late))
 	require.NoError(t, peer.SetReadDeadline(time.Now().Add(time.Second)))
+	require.False(t, s.trackConn(late))
 	_, err := peer.Read(make([]byte, 1))
 	require.ErrorIs(t, err, io.EOF)
 	require.ErrorContains(t, s.Serve(), "already started or closed")
