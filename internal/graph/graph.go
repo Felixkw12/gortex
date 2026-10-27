@@ -1840,6 +1840,10 @@ func (g *Graph) AllEdgesLight(kinds ...EdgeKind) []*Edge {
 // in the disk backend where the equivalent path materialises the full
 // in-edge map.
 func (g *Graph) DeadCodeCandidates(allowedNodeKinds []NodeKind, allowedInEdgeKinds map[NodeKind][]EdgeKind) []*Node {
+	return g.deadCodeCandidates(allowedNodeKinds, allowedInEdgeKinds, nil)
+}
+
+func (g *Graph) deadCodeCandidates(allowedNodeKinds []NodeKind, allowedInEdgeKinds map[NodeKind][]EdgeKind, prefixes []string) []*Node {
 	if len(allowedNodeKinds) == 0 {
 		return nil
 	}
@@ -1858,7 +1862,7 @@ func (g *Graph) DeadCodeCandidates(allowedNodeKinds []NodeKind, allowedInEdgeKin
 	for _, k := range allowedNodeKinds {
 		allowed, hasAllow := allowedSet[k]
 		anyKindCounts := !hasAllow || len(allowed) == 0
-		for n := range g.NodesByKind(k) {
+		for n := range g.NodesByKindInRepos(k, prefixes) {
 			if n == nil {
 				continue
 			}
