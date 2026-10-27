@@ -21,7 +21,27 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/platform"
+	"github.com/zzet/gortex/internal/testenv"
+	"go.uber.org/zap"
 )
+
+type legacyStopEndpointController struct {
+	*realController
+	blocked     <-chan struct{}
+	enteredPath string
+}
+
+func (*legacyStopEndpointController) Status(context.Context) (daemon.StatusResponse, error) {
+	return daemon.StatusResponse{UptimeSeconds: 1}, nil
+}
+
+func (c *legacyStopEndpointController) Shutdown(context.Context) error {
+	if err := os.WriteFile(c.enteredPath, []byte("actual shutdown request entered"), 0o600); err != nil {
+		return err
+	}
+	<-c.blocked // Deliberate uncooperative helper: prove authorized PID fallback.
+	return nil
+}
 
 func TestDaemonStopTargetChild(t *testing.T) {
 	backend := os.Getenv("GORTEX_TEST_STOP_TARGET_BACKEND")
@@ -33,6 +53,29 @@ func TestDaemonStopTargetChild(t *testing.T) {
 	if err != nil || !held {
 		fmt.Fprintln(os.Stderr, "cannot acquire owned helper store lock", err)
 		os.Exit(2)
+	}
+	if os.Getenv("GORTEX_TEST_STOP_LEGACY_ENDPOINT") == "1" {
+		// Exact old-schema JSON, bypassing the new writer's native stamp.
+		content, err := json.Marshal(map[string]any{"pid": os.Getpid(), "backend_path": backend})
+		if err != nil {
+			os.Exit(7)
+		}
+		if err := os.WriteFile(daemon.RuntimeStatePath(), content, 0o600); err != nil {
+			os.Exit(8)
+		}
+		srv := daemon.New(daemon.SocketPath(), "legacy-schema-fixture", zap.NewNop())
+		srv.Controller = &legacyStopEndpointController{realController: &realController{}, blocked: make(chan struct{}), enteredPath: backend + ".shutdown-entered"}
+		if err := srv.Listen(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(9)
+		}
+		fmt.Fprintln(os.Stdout, "ready")
+		err = srv.Serve()
+		runtime.KeepAlive(lock)
+		if err != nil {
+			os.Exit(10)
+		}
+		os.Exit(0)
 	}
 	if err := os.WriteFile(daemon.PIDFilePath(), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		os.Exit(3)
@@ -60,15 +103,25 @@ func TestDaemonStopTargetChild(t *testing.T) {
 }
 
 func ownedStopTarget(t *testing.T) (*daemonStopTarget, func() error, func() error, func() error) {
+	return ownedStopTargetMode(t, false)
+}
+
+func ownedStopTargetMode(t *testing.T, legacyEndpoint bool) (*daemonStopTarget, func() error, func() error, func() error) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("GORTEX_DAEMON_PIDFILE", filepath.Join(dir, "daemon.pid"))
 	t.Setenv("GORTEX_DAEMON_STATEFILE", filepath.Join(dir, "daemon.json"))
 	t.Setenv("GORTEX_DAEMON_SOCKET", filepath.Join(dir, "daemon.sock"))
+	if legacyEndpoint {
+		t.Setenv("GORTEX_DAEMON_SOCKET", filepath.Join(testenv.ShortTempDir(t), "s"))
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDaemonStopTargetChild$")
 	cmd.Env = append(os.Environ(), "GORTEX_TEST_STOP_TARGET_BACKEND="+filepath.Join(dir, "store.sqlite"), "GORACE=atexit_sleep_ms=0")
+	if legacyEndpoint {
+		cmd.Env = append(cmd.Env, "GORTEX_TEST_STOP_LEGACY_ENDPOINT=1")
+	}
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
 	stdout, err := cmd.StdoutPipe()

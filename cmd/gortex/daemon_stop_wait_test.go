@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -221,4 +222,34 @@ func TestDaemonStopTermRechecksStoreAfterNativeAndRuntimeReads(t *testing.T) {
 	require.True(t, running, "observed store-free tail must remain unsignaled")
 	require.NoError(t, exit())
 	require.NoError(t, wait())
+}
+
+func TestDaemonStopLegacyProbeAuthorizesActualOwnedFallbackAndPreservesOtherChild(t *testing.T) {
+	unrelated, exitUnrelated, waitUnrelated, _ := ownedStopTarget(t)
+	legacy, _, wait, _ := ownedStopTargetMode(t, true)
+	require.False(t, legacy.signalOwnerVerified, "old JSON must not pretend to have a native stamp")
+	previousAck, previousGrace := daemonShutdownAckWait, daemonNoAckExitGrace
+	daemonShutdownAckWait, daemonNoAckExitGrace = 500*time.Millisecond, 150*time.Millisecond
+	t.Cleanup(func() { daemonShutdownAckWait, daemonNoAckExitGrace = previousAck, previousGrace })
+	// The actual CLI receives a successful real ControlProbe from this
+	// endpoint. Its PID must authorize fallback despite the exact legacy
+	// record lacking a stamp. Shutdown itself deliberately does not ACK.
+	var out bytes.Buffer
+	require.NoError(t, stopRunningDaemon(&out))
+	require.Error(t, wait(), "the actual legacy-schema helper must receive the intended fallback signal")
+	require.Contains(t, out.String(), "force-killed")
+	entered, err := os.ReadFile(strings.TrimSuffix(legacy.store.path, ".lock") + ".shutdown-entered")
+	require.NoError(t, err)
+	require.Equal(t, "actual shutdown request entered", string(entered))
+	free, err := legacy.storeFree()
+	require.NoError(t, err)
+	require.True(t, free)
+	gone, err := legacy.runtimeGone()
+	require.NoError(t, err)
+	require.True(t, gone)
+	running, err := unrelated.process.Running()
+	require.NoError(t, err)
+	require.True(t, running, "matching legacy endpoint must not authorize signaling another child")
+	require.NoError(t, exitUnrelated())
+	require.NoError(t, waitUnrelated())
 }
