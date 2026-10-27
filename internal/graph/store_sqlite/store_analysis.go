@@ -143,7 +143,7 @@ func (s *Store) deadCodeVerdictPage(ctx context.Context, q string, args ...any) 
 }
 
 func (s *Store) scanDeadCodeVerdictPage(ctx context.Context, q string, args ...any) ([]string, int, string, error) {
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := outlineRows(ctx, s.db, outlineQuery{sql: q, args: args})
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, 0, "", ctx.Err()

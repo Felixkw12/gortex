@@ -39,7 +39,7 @@ func (s *Store) OutlineNodesByName(scope graph.NodeScope, name string) ([]*graph
 	// before full payload rows leave SQLite. The name index bounds candidates.
 	q := `SELECT ` + qualifiedNodeColumns("n", lookupNodeCols) + ` FROM nodes n INDEXED BY nodes_by_name
 WHERE n.name = ? AND n.view_gen = ? AND ` + predicate
-	rows, err := s.db.QueryContext(s.readContext(), q, append([]any{name, s.viewGen}, args...)...)
+	rows, err := outlineRows(s.readContext(), s.db, outlineQuery{sql: q, args: append([]any{name, s.viewGen}, args...)})
 	if err != nil {
 		return nil, err
 	}

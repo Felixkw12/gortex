@@ -5,6 +5,7 @@ import (
 	"iter"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -168,7 +169,7 @@ WHERE implementing.view_gen = ? AND implementing.repo_prefix = ? AND n.kind = ? 
 		viaSQL, viaArgs := outlineViaPredicate(filter.ExcludeVia)
 		args = append(args, edgeArgs...)
 		args = append(args, viaArgs...)
-		rows, err := s.db.QueryContext(ctx, q+edgeSQL+viaSQL, args...)
+		rows, err := outlineRows(ctx, s.db, outlineQuery{sql: q + edgeSQL + viaSQL, args: args})
 		if err != nil {
 			return nil, err
 		}
@@ -191,6 +192,9 @@ func (s *Store) NodesByKindInRepos(kind graph.NodeKind, prefixes []string) iter.
 			after := ""
 			for {
 				page, scanned, lastID, err := s.scanNodePage(ctx, deadCodeScopedFilesPageSQL, s.viewGen, prefix, after, string(kind), deadCodePageSize)
+				if isNoSuchIndexErr(err) {
+					page, scanned, lastID, err = s.scanNodePage(ctx, strings.ReplaceAll(deadCodeScopedFilesPageSQL, " INDEXED BY nodes_by_repo", ""), s.viewGen, prefix, after, string(kind), deadCodePageSize)
+				}
 				if err != nil {
 					return
 				}

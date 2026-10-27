@@ -81,3 +81,39 @@ func TestDeadCodeScopedReadContextSurvivesBinding(t *testing.T) {
 	require.True(t, errors.Is(err, context.Canceled))
 	require.Empty(t, slices.Collect(reader.NodesByKindInRepos(graph.KindFile, []string{"repo"})))
 }
+
+func TestScopedAnalysisReadsSurviveBulkIndexWindow(t *testing.T) {
+	s, _ := openTempStore(t)
+	require.NoError(t, s.AddBatchChecked([]*graph.Node{
+		{ID: "a/main", Name: "main", Kind: graph.KindFunction, RepoPrefix: "a"},
+		{ID: "a/dead", Name: "dead", Kind: graph.KindFunction, RepoPrefix: "a"},
+		{ID: "a/file", Kind: graph.KindFile, RepoPrefix: "a"},
+		{ID: "a/type", Kind: graph.KindType, RepoPrefix: "a"},
+		{ID: "b/caller", Kind: graph.KindFunction, RepoPrefix: "b"},
+		{ID: "b/interface", Kind: graph.KindInterface, RepoPrefix: "b", Meta: map[string]any{"methods": []string{"Work"}}},
+	}, []*graph.Edge{
+		{From: "b/caller", To: "a/main", Kind: graph.EdgeCalls},
+		{From: "a/type", To: "b/interface", Kind: graph.EdgeImplements},
+	}))
+	// A cold bulk load deliberately removes secondary indexes. The capability
+	// remains exact there, with unhinted SQL until index readiness returns.
+	for _, name := range []string{"nodes_by_repo", "nodes_by_name", "edges_by_from"} {
+		_, err := s.writerDB.Exec("DROP INDEX " + name)
+		require.NoError(t, err)
+	}
+	nodes, err := s.DeadCodeCandidatesInReposFiltered([]graph.NodeKind{graph.KindFunction}, map[graph.NodeKind][]graph.EdgeKind{graph.KindFunction: {graph.EdgeCalls}}, []string{"a"}, graph.OutlineEdgeFilter{})
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.Equal(t, "a/dead", nodes[0].ID)
+	rows, err := s.IfaceImplementsRowsInReposFiltered([]string{"a"}, graph.OutlineEdgeFilter{})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, "b/interface", rows[0].IfaceID)
+	files := slices.Collect(s.NodesByKindInRepos(graph.KindFile, []string{"a"}))
+	require.Len(t, files, 1)
+	require.Equal(t, "a/file", files[0].ID)
+	mains, err := s.OutlineNodesByName(graph.NodeScope{RepoAllow: map[string]bool{"a": true}}, "main")
+	require.NoError(t, err)
+	require.Len(t, mains, 1)
+	require.Equal(t, "a/main", mains[0].ID)
+}
