@@ -262,11 +262,26 @@ func TestDaemonHandoffRejectsUnrelatedPIDAndChangedRuntime(t *testing.T) {
 	if err := os.WriteFile(daemon.PIDFilePath(), []byte(strconv.Itoa(child.cmd.Process.Pid)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := daemon.WriteRuntimeState(daemon.RuntimeState{PID: child.cmd.Process.Pid, BackendPath: filepath.Join(child.root, "other.sqlite")}); err != nil {
+	state, ok := daemon.ReadRuntimeState()
+	if !ok || state.PID != child.cmd.Process.Pid {
+		t.Fatalf("owned child runtime before path change: %+v (valid=%v)", state, ok)
+	}
+	state.BackendPath = filepath.Join(child.root, "other.sqlite")
+	// WriteRuntimeState stamps the caller's PID. This fixture must preserve
+	// the actual owned child's identity and change only its declared store.
+	encoded, err := json.Marshal(state)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.validate(true); err == nil {
-		t.Fatal("changed store identity accepted")
+	if err := os.WriteFile(daemon.RuntimeStatePath(), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, ok := daemon.ReadRuntimeState()
+	if !ok || changed.PID != child.cmd.Process.Pid || changed.BackendPath != state.BackendPath {
+		t.Fatalf("fixture lost child PID while changing store: %+v (valid=%v)", changed, ok)
+	}
+	if err := g.validate(true); err == nil || !strings.Contains(err.Error(), "PID/runtime/store identity changed") {
+		t.Fatalf("changed store refusal = %v", err)
 	}
 	if !platform.ProcessAlive(child.cmd.Process.Pid) {
 		t.Fatal("runtime refusal terminated the owned daemon")
