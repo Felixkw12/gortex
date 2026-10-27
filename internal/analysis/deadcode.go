@@ -19,6 +19,11 @@ type DeadCodeEntry struct {
 	Kind     string `json:"kind"`
 	FilePath string `json:"file_path"`
 	Line     int    `json:"start_line"`
+	// Ownership is carried to scope-aware callers without changing the wire
+	// payload or requiring another per-result node lookup.
+	RepoPrefix  string `json:"-"`
+	WorkspaceID string `json:"-"`
+	ProjectID   string `json:"-"`
 }
 
 // HotspotEntry represents a symbol with disproportionately high complexity metrics.
@@ -58,6 +63,10 @@ type HotspotEntry struct {
 // — none of them have a meaningful "is this code dead?" answer, and
 // surfacing them drowns the real dead-function signal in noise.
 type FindDeadCodeOptions struct {
+	// RepoPrefixes scopes candidates, implementing types, entry-point files
+	// and processes. Incoming callers/interfaces remain global evidence.
+	// Nil preserves the unscoped analysis; a non-nil empty set returns none.
+	RepoPrefixes []string
 	// IncludeVariables includes variable nodes in the results. Default false.
 	// Variables are excluded by default because the graph does not track
 	// intra-function data flow — local variables always appear "dead" even
@@ -236,6 +245,9 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	if len(opts) > 0 {
 		opt = opts[0]
 	}
+	if opt.RepoPrefixes != nil && len(opt.RepoPrefixes) == 0 {
+		return nil
+	}
 
 	// Build set of interface-required method names per type.
 	// If a type implements an interface, all methods that the interface
@@ -244,7 +256,7 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	// Backends that implement graph.IfaceImplementsScanner serve this
 	// from one join; the fallback walks NodesByKind + EdgesByKind
 	// just like before.
-	ifaceRequiredMethods := buildIfaceRequiredMethods(g)
+	ifaceRequiredMethods := scopedIfaceRequiredMethods(g, opt.RepoPrefixes)
 
 	// Pick the candidate-set source. When the backend implements
 	// DeadCodeCandidator, the "no incoming usage edge" filter runs
@@ -258,7 +270,19 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	// Build set of entry point node IDs from processes
 	entryPoints := make(map[string]bool)
 	if processes != nil {
+		var entryNodes map[string]*graph.Node
+		allowedRepos := deadCodeRepoSet(opt.RepoPrefixes)
+		if allowedRepos != nil {
+			ids := make([]string, 0, len(processes.Processes))
+			for _, proc := range processes.Processes {
+				ids = append(ids, proc.EntryPoint)
+			}
+			entryNodes = g.GetNodesByIDs(ids)
+		}
 		for _, proc := range processes.Processes {
+			if allowedRepos != nil && !deadCodeRepoAllows(entryNodes[proc.EntryPoint], allowedRepos) {
+				continue
+			}
 			entryPoints[proc.EntryPoint] = true
 			// Also consider all nodes that participate in any process
 			for _, step := range proc.Steps {
@@ -273,7 +297,7 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	// NodesByKind(KindFile) so on disk backends we don't have to
 	// materialise AllNodes() just to find the entry-point files.
 	entryPointFiles := make(map[string]bool)
-	for n := range g.NodesByKind(graph.KindFile) {
+	for n := range deadCodeFileNodes(g, opt.RepoPrefixes) {
 		if n != nil && isEntryPointNode(n) {
 			entryPointFiles[n.FilePath] = true
 		}
@@ -473,11 +497,8 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 		}
 
 		result = append(result, DeadCodeEntry{
-			ID:       n.ID,
-			Name:     n.Name,
-			Kind:     string(n.Kind),
-			FilePath: n.FilePath,
-			Line:     n.StartLine,
+			ID: n.ID, Name: n.Name, Kind: string(n.Kind), FilePath: n.FilePath, Line: n.StartLine,
+			RepoPrefix: n.RepoPrefix, WorkspaceID: n.WorkspaceID, ProjectID: n.ProjectID,
 		})
 		resultNodes = append(resultNodes, n)
 	}
@@ -551,40 +572,45 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 // behaviour. The post-filter loop in FindDeadCode handles both shapes
 // uniformly — incomingByID==nil means "filter already applied".
 func collectDeadCodeCandidates(g graph.Reader, opt FindDeadCodeOptions) (candidates []*graph.Node, incomingByID map[string][]*graph.Edge) {
-	if dc, ok := g.(graph.DeadCodeCandidator); ok {
-		kinds := candidateNodeKinds[:0:0]
-		for _, k := range candidateNodeKinds {
-			// Honour the IncludeFields / IncludeVariables / IncludeConstants
-			// opt-in switches at the candidate-source: kinds the caller
-			// explicitly excluded never need to cross cgo. The post-
-			// filter loop still re-checks these for the fallback path
-			// (which sees every kind) so the contract holds either way.
-			switch k {
-			case graph.KindField:
-				if !opt.IncludeFields {
-					continue
-				}
-			case graph.KindVariable:
-				if !opt.IncludeVariables {
-					continue
-				}
-			case graph.KindConstant:
-				if !opt.IncludeConstants {
-					continue
-				}
+	kinds := candidateNodeKinds[:0:0]
+	for _, k := range candidateNodeKinds {
+		// Honour the IncludeFields / IncludeVariables / IncludeConstants
+		// opt-in switches at the candidate-source: kinds the caller
+		// explicitly excluded never need to cross cgo. The post-
+		// filter loop still re-checks these for the fallback path
+		// (which sees every kind) so the contract holds either way.
+		switch k {
+		case graph.KindField:
+			if !opt.IncludeFields {
+				continue
 			}
-			kinds = append(kinds, k)
+		case graph.KindVariable:
+			if !opt.IncludeVariables {
+				continue
+			}
+		case graph.KindConstant:
+			if !opt.IncludeConstants {
+				continue
+			}
 		}
-		allowed := make(map[graph.NodeKind][]graph.EdgeKind, len(kinds))
-		for _, k := range kinds {
-			allowed[k] = incomingUsageKinds(k)
+		kinds = append(kinds, k)
+	}
+	allowed := make(map[graph.NodeKind][]graph.EdgeKind, len(kinds))
+	for _, k := range kinds {
+		allowed[k] = incomingUsageKinds(k)
+	}
+	if opt.RepoPrefixes != nil {
+		if scoped, ok := g.(graph.ScopedDeadCodeReader); ok {
+			return scoped.DeadCodeCandidatesInRepos(kinds, allowed, opt.RepoPrefixes), nil
 		}
-		return dc.DeadCodeCandidates(kinds, allowed), nil
+	}
+	if dc, ok := g.(graph.DeadCodeCandidator); ok {
+		return filterDeadCodeRepos(dc.DeadCodeCandidates(kinds, allowed), opt.RepoPrefixes), nil
 	}
 
 	// Fallback: pull every node and the batched in-edge map up front.
 	// Same shape as before the DeadCodeCandidator capability landed.
-	nodes := g.AllNodes()
+	nodes := filterDeadCodeRepos(g.AllNodes(), opt.RepoPrefixes)
 	nodeIDs := make([]string, 0, len(nodes))
 	for _, n := range nodes {
 		nodeIDs = append(nodeIDs, n.ID)
