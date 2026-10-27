@@ -23,11 +23,11 @@ func writeCounterFields(prefix string, d store_sqlite.VFSIOSplit) []zap.Field {
 	if r.Updated+r.Deleted+r.Inserted >= 100 {
 		reason := "none"
 		if r.Generic > 0 {
-			reason = "identity_or_collision"
+			reason = "not_uniform_namespace_conversion"
 		}
 		if r.ReceiptFallback > 0 {
 			if r.Generic > 0 {
-				reason = "identity_or_collision,receipt_reverse_conversion"
+				reason = "not_uniform_namespace_conversion,receipt_reverse_conversion"
 			} else {
 				reason = "receipt_reverse_conversion"
 			}
