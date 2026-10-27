@@ -279,16 +279,14 @@ func (s *Server) trackScopedMutationTicket(ticket *indexer.MutationTicket, repo,
 		// closes, so a caller that waited on the receipt observes a drained
 		// lease rather than racing this goroutine for it.
 		receipt.releaseViewPin()
-		close(receipt.done)
 		retention := mutationReceiptRetention
 		if receipt.checkoutScoped {
 			// A commit receipt can be queried long after publication finished.
 			// Its freshness ticket must outlive that ledger's polling window.
 			retention = mutationCommitRetention
 		}
-		time.AfterFunc(retention, func() {
-			s.mutationReceipts.Delete(receipt.id)
-		})
+		s.scheduleMutationReceiptExpiry(receipt, retention)
+		close(receipt.done)
 	}()
 	return receipt
 }
@@ -310,7 +308,7 @@ func (s *Server) failedCheckoutRefreshReceiptsBefore(checkoutID, incarnation str
 		}
 		return true
 	})
-	s.captureFailedSourceVersions(eligible, checkoutID, incarnation, "")
+	s.captureFailedSourceVersions(eligible, checkoutID, incarnation, "", false)
 	return eligible
 }
 
@@ -341,15 +339,16 @@ func (s *Server) resolveCheckoutRecoveryReceipts(recovery *mutationReceipt, elig
 // cannot heal, because a terminal error never completes differently.
 //
 // The failed receipt is resolved in place rather than deleted: the
-// mutation-commit ledger refreshes its graph half through
-// mutationReceiptState, and a deleted receipt would leave that record
-// reading "pending" forever. Stamping the superseding apply mirrors how
+// mutation-commit ledger refreshes its graph half from that evidence. Losing
+// the receipt would instead settle an unobserved outcome as receipt_lost.
+// Stamping the superseding apply mirrors how
 // completeMutationWaiters resolves earlier waiters with the later apply's
 // result. Pending receipts and failures at or above the succeeded
 // generation are left untouched. The succeeded result is passed by value so
 // the sweep holds no lock besides the receipt it is stamping.
 func (s *Server) resolveSupersededFailedReceipts(succeededPath string, succeededGeneration uint64, applied indexer.MutationResult) {
 	cleanPath := filepath.Clean(succeededPath)
+	eligible := make(map[string]struct{})
 	s.mutationReceipts.Range(func(_, value any) bool {
 		other, ok := value.(*mutationReceipt)
 		if !ok || other.checkoutScoped {
@@ -357,6 +356,25 @@ func (s *Server) resolveSupersededFailedReceipts(succeededPath string, succeeded
 		}
 		if other.generation >= succeededGeneration || filepath.Clean(other.path) != cleanPath {
 			return true
+		}
+		other.mu.RLock()
+		if other.completed && (other.result.Err != nil || !other.result.Reindexed) {
+			eligible[other.id] = struct{}{}
+		}
+		other.mu.RUnlock()
+		return true
+	})
+	// Supersession proves only the older failed tickets above, unlike an
+	// explicit scoped reparse which captures all existing failed versions.
+	s.captureFailedSourceVersions(eligible, "", "", cleanPath, true)
+	for id := range eligible {
+		value, ok := s.mutationReceipts.Load(id)
+		if !ok {
+			continue
+		}
+		other, ok := value.(*mutationReceipt)
+		if !ok || other.checkoutScoped || other.generation >= succeededGeneration || filepath.Clean(other.path) != cleanPath {
+			continue
 		}
 		other.mu.Lock()
 		if other.completed && (other.result.Err != nil || !other.result.Reindexed) {
@@ -367,8 +385,8 @@ func (s *Server) resolveSupersededFailedReceipts(succeededPath string, succeeded
 			}
 		}
 		other.mu.Unlock()
-		return true
-	})
+	}
+	s.resolveCapturedSourceVersions(eligible, "", "", cleanPath)
 }
 
 // resolveReindexedPathReceipts resolves terminally failed freshness receipts
@@ -409,7 +427,7 @@ func (s *Server) failedReceiptsBefore(paths []string, root string) map[string]st
 		}
 		return true
 	})
-	s.captureFailedSourceVersions(eligible, "", "", candidate)
+	s.captureFailedSourceVersions(eligible, "", "", candidate, false)
 	return eligible
 }
 

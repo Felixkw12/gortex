@@ -133,6 +133,7 @@ type mutationCommitRecord struct {
 	checkoutID          string
 	checkoutIncarnation string
 	errText             string
+	graphReason         string
 
 	startedAt   time.Time
 	committedAt time.Time
@@ -159,6 +160,7 @@ type mutationCommitSnapshot struct {
 	NewSHA              string `json:"new_sha,omitempty"`
 	BytesWritten        int    `json:"bytes_written,omitempty"`
 	Error               string `json:"error,omitempty"`
+	Reason              string `json:"reason,omitempty"`
 	StartedAt           string `json:"started_at,omitempty"`
 	CommittedAt         string `json:"committed_at,omitempty"`
 	ReindexReceipt      string `json:"reindex_receipt,omitempty"`
@@ -183,6 +185,7 @@ func (r *mutationCommitRecord) snapshot() mutationCommitSnapshot {
 		NewSHA:              r.newSHA,
 		BytesWritten:        r.bytesWritten,
 		Error:               r.errText,
+		Reason:              r.graphReason,
 		ReindexReceipt:      r.reindexReceipt,
 		ReindexGeneration:   r.reindexGeneration,
 		AppliedGeneration:   r.appliedGeneration,
@@ -206,7 +209,12 @@ func (r *mutationCommitRecord) diskStatus() string {
 
 func (r *mutationCommitRecord) markNotApplied(err error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer func() {
+		r.mu.Unlock()
+		if r.owner != nil {
+			r.owner.retireSettledPendingSource(r)
+		}
+	}()
 	r.disk = mutationDiskNotApplied
 	r.graph = mutationGraphStale
 	r.graphRecorded = true
@@ -217,7 +225,12 @@ func (r *mutationCommitRecord) markNotApplied(err error) {
 
 func (r *mutationCommitRecord) markFailed(err error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer func() {
+		r.mu.Unlock()
+		if r.owner != nil {
+			r.owner.retireSettledPendingSource(r)
+		}
+	}()
 	r.disk = mutationDiskFailed
 	r.graph = mutationGraphStale
 	r.graphRecorded = true
@@ -243,6 +256,12 @@ func (r *mutationCommitRecord) markCommitted(newSHA string, bytesWritten int) {
 // does not un-write a committed file, and conflating the two is the reporting
 // bug this ledger exists to fix.
 func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
+	r.recordGraphForReceipt("", outcome)
+}
+
+// An asynchronous observer may apply only to the receipt it sampled. Empty
+// expectedReceipt is reserved for the mutation handler binding its outcome.
+func (r *mutationCommitRecord) recordGraphForReceipt(expectedReceipt string, outcome mutationReindexOutcome) {
 	if r == nil {
 		return
 	}
@@ -263,6 +282,10 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 			r.owner.refreshPendingSourceRecord(r)
 		}
 	}()
+	if expectedReceipt != "" && (r.reindexReceipt != expectedReceipt ||
+		(r.graphRecorded && r.graph != mutationGraphPending)) {
+		return
+	}
 	// Concurrent pollers can hold an earlier pending snapshot after another
 	// poller observed completion. Never regress that same ticket to pending.
 	if outcome.Pending && r.graphRecorded && r.graph != mutationGraphPending && r.reindexReceipt != "" && r.reindexReceipt == outcome.Receipt {
@@ -270,6 +293,10 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 	}
 	r.graph = graphStatusFor(outcome)
 	r.graphRecorded = true
+	r.graphReason = ""
+	if r.reindexReceipt != outcome.Receipt {
+		r.pendingSourceRecovered = false
+	}
 	if ledger != nil {
 		ledger.unbindFreshnessLocked(r)
 		// A detached completion must not resurrect an evicted commit.
@@ -290,6 +317,29 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 	} else if r.disk == mutationDiskCommitted {
 		r.errText = ""
 	}
+}
+
+func (r *mutationCommitRecord) markSourceRecoveredForReceipt(expectedReceipt string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if expectedReceipt != "" && r.reindexReceipt == expectedReceipt {
+		r.pendingSourceRecovered = true
+	}
+}
+
+// A missing bound ticket is terminal failure, never publication evidence. The
+// identity/state recheck avoids overriding a concurrent rebind or completion.
+func (r *mutationCommitRecord) markReceiptLost(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if id == "" || r.reindexReceipt != id ||
+		(r.graph != mutationGraphPending && (r.graph != mutationGraphStale || r.graphRecorded)) {
+		return
+	}
+	r.graph = mutationGraphFailed
+	r.graphRecorded = true
+	r.graphReason = "receipt_lost"
+	r.errText = "graph freshness receipt " + id + " is no longer retained"
 }
 
 // retainResponse stores the successful payload for idempotent replay. Only
@@ -321,15 +371,6 @@ func (r *mutationCommitRecord) replayResponse() (map[string]any, bool) {
 		clone[key] = value
 	}
 	return clone, true
-}
-
-func (r *mutationCommitRecord) pendingReindexReceipt() string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.graph != mutationGraphPending {
-		return ""
-	}
-	return r.reindexReceipt
 }
 
 // graphStatusFor collapses a reindex outcome into the graph half of a receipt.
