@@ -5,6 +5,7 @@ package platform
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -53,6 +54,9 @@ func identityChild(t *testing.T) (ProcessIdentity, func() error, func() error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if running, err := identity.Running(); err != nil || !running {
+		t.Fatalf("ready child must have captured running state: running=%v error=%v", running, err)
+	}
 	return identity, stdin.Close, wait
 }
 
@@ -74,6 +78,9 @@ func TestProcessIdentityRefusesUnknownAndChangedIncarnations(t *testing.T) {
 	if same, err := changed.Matches(); err != nil || same {
 		t.Fatalf("changed identity match=%v error=%v", same, err)
 	}
+	if running, err := changed.Running(); running || !errors.Is(err, ErrProcessIdentityChanged) {
+		t.Fatalf("changed incarnation must remain a state error: running=%v error=%v", running, err)
+	}
 	for _, signal := range []func() error{changed.Terminate, changed.Kill} {
 		if err := signal(); err == nil {
 			t.Fatal("accepted signal for another incarnation")
@@ -90,6 +97,9 @@ func TestProcessIdentityRefusesUnknownAndChangedIncarnations(t *testing.T) {
 	}
 	if same, _ := child.Matches(); same {
 		t.Fatal("reaped child still matches its captured identity")
+	}
+	if running, err := child.Running(); running || !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("reaped child must have explicit exited evidence: running=%v error=%v", running, err)
 	}
 }
 

@@ -3,6 +3,7 @@ package platform
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"golang.org/x/sys/windows"
 )
@@ -15,13 +16,31 @@ func processHandleBirth(handle windows.Handle) ([2]uint64, error) {
 	return [2]uint64{uint64(creation.HighDateTime)<<32 | uint64(creation.LowDateTime), 0}, nil
 }
 
-func processBirth(pid int) (birth [2]uint64, err error) {
+func processBirth(pid int) ([2]uint64, error) {
+	birth, _, err := processBirthAndRunning(pid)
+	return birth, err
+}
+
+func processBirthAndRunning(pid int) (birth [2]uint64, running bool, err error) {
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
-		return birth, err
+		// OpenProcess documents ERROR_INVALID_PARAMETER for an absent PID.
+		// Access denied and all other failures remain unknown, not exited.
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+			err = errors.Join(os.ErrProcessDone, err)
+		}
+		return birth, false, err
 	}
 	defer func() { err = errors.Join(err, windows.CloseHandle(handle)) }()
-	return processHandleBirth(handle)
+	birth, err = processHandleBirth(handle)
+	if err != nil {
+		return birth, false, err
+	}
+	var code uint32
+	if err = windows.GetExitCodeProcess(handle, &code); err != nil {
+		return birth, false, err
+	}
+	return birth, code == stillActive, nil
 }
 
 func signalProcessIdentity(p ProcessIdentity, _ bool) (err error) {

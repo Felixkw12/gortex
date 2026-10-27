@@ -8,11 +8,20 @@ import (
 )
 
 func processBirth(pid int) ([2]uint64, error) {
+	birth, _, err := processBirthAndRunning(pid)
+	return birth, err
+}
+
+func processBirthAndRunning(pid int) ([2]uint64, bool, error) {
 	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
-		return [2]uint64{}, err
+		if errors.Is(err, os.ErrNotExist) {
+			err = errors.Join(os.ErrProcessDone, err)
+		}
+		return [2]uint64{}, false, err
 	}
-	return procStatBirth(stat)
+	birth, err := procStatBirth(stat)
+	return birth, !procStatIsZombie(stat), err
 }
 
 func procStatBirth(stat []byte) ([2]uint64, error) {

@@ -5,6 +5,9 @@ import (
 	"fmt"
 )
 
+// ErrProcessIdentityChanged means a PID names a different process incarnation.
+var ErrProcessIdentityChanged = errors.New("process incarnation changed")
+
 // ProcessIdentity names one observed process incarnation, rather than every
 // process that may eventually receive the same PID. Its zero value is invalid.
 type ProcessIdentity struct {
@@ -40,6 +43,23 @@ func (p ProcessIdentity) Matches() (bool, error) {
 	}
 	birth, err := processBirth(p.pid)
 	return birth == p.birth && err == nil, err
+}
+
+// Running checks both identity and native execution state. Exited Unix zombies
+// are not running, but remain matchable until reaped. A missing process reports
+// os.ErrProcessDone; inaccessible or unsupported metadata remains an error.
+func (p ProcessIdentity) Running() (bool, error) {
+	if p.pid <= 0 || p.birth == [2]uint64{} {
+		return false, errors.New("invalid captured process identity")
+	}
+	birth, running, err := processBirthAndRunning(p.pid)
+	if err != nil {
+		return false, err
+	}
+	if birth != p.birth {
+		return false, ErrProcessIdentityChanged
+	}
+	return running, nil
 }
 
 // Terminate requests termination only after checking this incarnation. On Unix
