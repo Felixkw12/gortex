@@ -41,7 +41,7 @@ func TestRunTrackOfflineSameWorkspaceWorktrees(t *testing.T) {
 		trackWait, trackName, trackAsWorktree = origWait, origName, origAs
 		trackEnsureDaemonReadyFn = origEnsure
 	})
-	trackWait, trackName, trackAsWorktree = false, "", false
+	trackWait, trackName, trackAsWorktree = false, "", true // Explicit separate graphs; the default now warns instead.
 	trackEnsureDaemonReadyFn = func(bool) daemonDecision { return daemonUnavailable }
 	cmd := &cobra.Command{}
 	cmd.SetErr(&bytes.Buffer{})
@@ -82,7 +82,7 @@ func TestRunTrackPlainLinkedWorktreeSameBasename(t *testing.T) {
 				trackWait, trackName, trackAsWorktree = origWait, origName, origAs
 				trackEnsureDaemonReadyFn, trackNotifyDaemonTrackFn = origEnsure, origNotify
 			})
-			trackWait, trackName, trackAsWorktree = false, "", false
+			trackWait, trackName, trackAsWorktree = false, "", true // Explicit separate graphs; the default now warns instead.
 			trackEnsureDaemonReadyFn = func(bool) daemonDecision {
 				if online {
 					return daemonReady
