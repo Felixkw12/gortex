@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +21,7 @@ import (
 
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/platform"
+	"github.com/zzet/gortex/internal/testenv"
 )
 
 // drainingController is a daemon whose store close takes closeFor: its
@@ -31,6 +36,7 @@ type drainingController struct {
 	exited      atomic.Bool
 	probePolicy string
 	statusCalls atomic.Int32
+	probeErr    error
 }
 
 func (c *drainingController) Status(context.Context) (daemon.StatusResponse, error) {
@@ -39,7 +45,22 @@ func (c *drainingController) Status(context.Context) (daemon.StatusResponse, err
 }
 
 func (c *drainingController) Probe(context.Context) (daemon.ProbeResponse, error) {
+	if c.probeErr != nil {
+		return daemon.ProbeResponse{}, c.probeErr
+	}
 	return daemon.ProbeResponse{CloseCheckpointPolicy: c.probePolicy, UptimeSeconds: 42}, nil
+}
+
+func TestDaemonStopFailedProbeSkipsDecorativeStatusFallback(t *testing.T) {
+	controller := &drainingController{
+		realController: &realController{}, probeErr: errors.New("probe unavailable"),
+		storage: &daemon.StorageStatus{CloseCheckpointEstimateMS: 1200},
+	}
+	newStopFixture(t, controller)
+	pre := daemonStatusBeforeStop()
+	require.Empty(t, pre.closePolicy)
+	require.False(t, pre.estimateKnown)
+	require.Zero(t, controller.statusCalls.Load())
 }
 
 func TestDaemonStopSkipPolicyUsesDaemonProbeWithoutStatus(t *testing.T) {
@@ -70,6 +91,60 @@ func TestDaemonStopFullAndLegacyPoliciesRetainStatusEstimate(t *testing.T) {
 			require.Equal(t, int32(1), controller.statusCalls.Load())
 		})
 	}
+}
+
+func TestDaemonStopAdvisoryHandshakeHasOneBudgetAndNoStatusRetry(t *testing.T) {
+	socket := filepath.Join(testenv.ShortTempDir(t), "s")
+	t.Setenv("GORTEX_DAEMON_SOCKET", socket)
+	listener, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var connections []net.Conn
+	var closing bool
+	var accepted atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			if closing {
+				mu.Unlock()
+				_ = conn.Close()
+				return
+			}
+			connections = append(connections, conn)
+			mu.Unlock()
+			accepted.Add(1)
+			// Consume the handshake but never send its ACK. Wait for the
+			// advisory caller itself to close this exact connection.
+			_, _ = io.Copy(io.Discard, conn)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		closing = true
+		owned := append([]net.Conn(nil), connections...)
+		mu.Unlock()
+		for _, conn := range owned {
+			_ = conn.Close()
+		}
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("owned advisory socket fixture did not join")
+		}
+	})
+	started := time.Now()
+	pre := daemonStatusBeforeStop()
+	require.Less(t, time.Since(started), time.Second, "advisory lookup inherited the ordinary 10s handshake budget")
+	require.Empty(t, pre.closePolicy)
+	require.False(t, pre.estimateKnown)
+	require.Equal(t, int32(1), accepted.Load(), "failed Probe started a second decorative Status handshake")
 }
 
 func (c *drainingController) Shutdown(context.Context) error {

@@ -1448,8 +1448,8 @@ func waitForDaemonExitWithin(w io.Writer, pid int, grace time.Duration, draining
 // the exit wait when the shutdown ack does not arrive (daemonStopExitGrace). A
 // status that times out leaves it unknown and the wait on its old schedule.
 func daemonStatusBeforeStop() daemonStopPreflight {
-	pre := daemonProbeBeforeStop()
-	if pre.closePolicy == "skip" {
+	pre, validProbe := daemonProbeBeforeStop()
+	if !validProbe || pre.closePolicy == "skip" {
 		return pre
 	}
 	c, err := daemonControlClient()
@@ -1479,26 +1479,34 @@ func daemonStatusBeforeStop() daemonStopPreflight {
 // the default stop path. The policy comes from the daemon, never the CLI's
 // inherited environment. Older/full-policy daemons retain their Status-based
 // estimate. A timed-out probe connection is discarded before that fallback.
-func daemonProbeBeforeStop() daemonStopPreflight {
+func daemonProbeBeforeStop() (daemonStopPreflight, bool) {
 	var pre daemonStopPreflight
-	c, err := daemonControlClient()
+	deadline := time.Now().Add(200 * time.Millisecond)
+	c, err := daemon.DialToWithDeadline(daemon.SocketPath(), daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"}, deadline)
 	if err != nil {
-		return pre
+		return pre, false
 	}
 	defer func() { _ = c.Close() }()
-	resp, err := c.ControlWithTimeout(daemon.ControlProbe, nil, 200*time.Millisecond)
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return pre, false
+	}
+	resp, err := c.ControlWithTimeout(daemon.ControlProbe, nil, remaining)
 	if err != nil || !resp.OK {
-		return pre
+		return pre, false
 	}
 	var probe daemon.ProbeResponse
 	if err := json.Unmarshal(resp.Result, &probe); err != nil {
-		return pre
+		return pre, false
+	}
+	if probe.PID <= 0 || probe.Version == "" {
+		return pre, false
 	}
 	pre.uptime = time.Duration(probe.UptimeSeconds) * time.Second
 	if probe.CloseCheckpointPolicy == "skip" || probe.CloseCheckpointPolicy == "full" {
 		pre.closePolicy = probe.CloseCheckpointPolicy
 	}
-	return pre
+	return pre, true
 }
 
 // emitDaemonStopAlreadyDown prints the "not running" message: a one-liner on
