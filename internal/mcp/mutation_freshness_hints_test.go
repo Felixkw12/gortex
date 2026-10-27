@@ -49,7 +49,7 @@ func TestFreshnessRefusalHintLists(t *testing.T) {
 	require.Contains(t, entries[1], " commit=commit-")
 	require.NotContains(t, entries[1], "mutation_id=")
 	require.NotContains(t, entries[2], "commit=")
-	for _, want := range []string{"later successful edit of the same path", "workspace_admin action=reindex", "reindex_repository", "paths=[P]", "exactly that single file", "retention", "last resort"} {
+	for _, want := range []string{"later successful edit of the same path", "workspace_admin operation=reindex", "reindex_repository", "paths=[P]", "exactly that single file", "retention", "last resort"} {
 		require.Contains(t, entries[3], want)
 	}
 	for _, unavailable := range []string{"reconcile", "retry_exhausted", "retry-exhausted", "ETA"} {
@@ -148,7 +148,7 @@ func TestFreshnessRefusalRecoveryFlow(t *testing.T) {
 	require.True(t, refused.IsError)
 	for _, want := range []string{
 		"graph freshness unavailable", "change.receipt options.receipt=" + id,
-		"workspace_admin action=reindex", "paths=[P]", `mutation_id="recovery-flow"`,
+		"workspace_admin operation=reindex", "paths=[P]", `mutation_id="recovery-flow"`,
 	} {
 		require.Contains(t, resultText(refused), want)
 	}

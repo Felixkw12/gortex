@@ -21,7 +21,7 @@ func mutationFreshnessRecoveryHint() string {
 	reserved := freshnessRecoveryHintSlots{}
 	hints := []string{
 		"a later successful edit of the same path",
-		"workspace_admin action=reindex (reindex_repository) with paths=[P] naming exactly that single file",
+		"workspace_admin operation=reindex options.paths=[P] (reindex_repository) naming exactly that single file",
 		reserved.operatorReconcile,
 		reserved.automaticReconcile,
 		reserved.retryExhausted,
