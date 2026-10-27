@@ -45,3 +45,19 @@ func TestReindexWriteFieldsThresholdAndFallback(t *testing.T) {
 	require.Equal(t, "receipt_reverse_conversion", fields["phase_reindex_fallback"])
 	require.Len(t, logs.All(), 2, "detail remains inline; no extra info events")
 }
+
+func TestDeltaWriterWriteCounterSource(t *testing.T) {
+	// The builder supplies its store handle's sampler separately from the
+	// composed graph. DeltaWriter need not expose a store/VFS capability.
+	want := store_sqlite.VFSIOMark{Available: true, Rows: store_sqlite.RowWriteCounts{Nodes: 123}, Transactions: 7}
+	calls := 0
+	idx := &Indexer{
+		graph: graph.NewDeltaWriter(graph.New(), nil),
+		writeCounters: func() store_sqlite.VFSIOMark {
+			calls++
+			return want
+		},
+	}
+	require.Equal(t, want, idx.writeCounterMark())
+	require.Equal(t, 1, calls, "sample the injected underlying store exactly once")
+}
