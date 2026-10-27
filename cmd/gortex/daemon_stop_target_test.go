@@ -48,6 +48,16 @@ func TestDaemonStopTargetChild(t *testing.T) {
 	if backend == "" {
 		return
 	}
+	// TestMain intentionally replaces inherited production daemon overrides.
+	// Reapply only these explicit test-owned paths after that sandbox exists;
+	// never exempt this child from the package's HOME/XDG isolation.
+	root := os.Getenv("GORTEX_TEST_STOP_TARGET_ROOT")
+	if root == "" {
+		os.Exit(11)
+	}
+	t.Setenv("GORTEX_DAEMON_PIDFILE", filepath.Join(root, "daemon.pid"))
+	t.Setenv("GORTEX_DAEMON_STATEFILE", filepath.Join(root, "daemon.json"))
+	t.Setenv("GORTEX_DAEMON_SOCKET", os.Getenv("GORTEX_TEST_STOP_TARGET_SOCKET"))
 	lock := flock.New(backend + ".lock")
 	held, err := lock.TryLock()
 	if err != nil || !held {
@@ -118,7 +128,8 @@ func ownedStopTargetMode(t *testing.T, legacyEndpoint bool) (*daemonStopTarget, 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDaemonStopTargetChild$")
-	cmd.Env = append(os.Environ(), "GORTEX_TEST_STOP_TARGET_BACKEND="+filepath.Join(dir, "store.sqlite"), "GORACE=atexit_sleep_ms=0")
+	cmd.Env = append(os.Environ(), "GORTEX_TEST_STOP_TARGET_BACKEND="+filepath.Join(dir, "store.sqlite"),
+		"GORTEX_TEST_STOP_TARGET_ROOT="+dir, "GORTEX_TEST_STOP_TARGET_SOCKET="+daemon.SocketPath(), "GORACE=atexit_sleep_ms=0")
 	if legacyEndpoint {
 		cmd.Env = append(cmd.Env, "GORTEX_TEST_STOP_LEGACY_ENDPOINT=1")
 	}
@@ -127,9 +138,16 @@ func ownedStopTargetMode(t *testing.T, legacyEndpoint bool) (*daemonStopTarget, 
 	stdout, err := cmd.StdoutPipe()
 	require.NoError(t, err)
 	require.NoError(t, cmd.Start())
+	t.Logf("owned stop helper started: pid=%d argv=%q", cmd.Process.Pid, cmd.Args)
 	var once sync.Once
 	var waitErr error
-	wait := func() error { once.Do(func() { waitErr = cmd.Wait() }); return waitErr }
+	wait := func() error {
+		once.Do(func() {
+			waitErr = cmd.Wait()
+			t.Logf("owned stop helper reaped: pid=%d state=%v error=%v", cmd.Process.Pid, cmd.ProcessState, waitErr)
+		})
+		return waitErr
+	}
 	t.Cleanup(func() { _ = stdin.Close(); _ = cmd.Process.Kill(); _ = wait() })
 	reader := bufio.NewReader(stdout)
 	line, err := reader.ReadString('\n')

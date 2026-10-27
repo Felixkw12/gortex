@@ -71,7 +71,7 @@ func TestDaemonStopSkipPolicyUsesDaemonProbeWithoutStatus(t *testing.T) {
 	t.Setenv("GORTEX_SQLITE_CLOSE_CHECKPOINT", "full")
 	pre := daemonStatusBeforeStop()
 	require.Equal(t, "skip", pre.closePolicy)
-	require.Equal(t, 42*time.Second, pre.uptime)
+	require.Equal(t, os.Getpid(), pre.probePID, "the actual server stamps probe identity and uptime")
 	require.False(t, pre.estimateKnown)
 	require.Zero(t, controller.statusCalls.Load())
 }
