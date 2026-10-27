@@ -391,3 +391,39 @@ func (*repeatingReader) Read(data []byte) (int, error) {
 	}
 	return len(data), nil
 }
+
+func TestInvalidationSubscriptionRecordsAvailabilityAndActualArguments(t *testing.T) {
+	for _, available := range []bool{false, true} {
+		t.Run(map[bool]string{false: "older-unavailable", true: "available"}[available], func(t *testing.T) {
+			socket := startStub(t, func(frame stubFrame) (any, *rpcError) {
+				args, _ := frame.Params["arguments"].(map[string]any)
+				if frame.Params["name"] != "session" || args["operation"] != "subscribe" || args["channel"] != "graph_invalidated" {
+					t.Errorf("wrong subscription: %+v", frame.Params)
+				}
+				if !available {
+					return nil, &rpcError{Code: -32601, Message: "subscription unavailable"}
+				}
+				return stubContent(map[string]any{"subscribed": true}), nil
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			client, err := openMCP(ctx, socket, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			phase := Phase{Gate: make(map[string]json.RawMessage)}
+			subscribeInvalidations(ctx, client, "sample", time.Second, &phase)
+			var receipt struct {
+				Available bool   `json:"available"`
+				Error     string `json:"error"`
+			}
+			if err := json.Unmarshal(phase.Gate["sample.graph_invalidated_subscription"], &receipt); err != nil || receipt.Available != available || (!available && receipt.Error == "") {
+				t.Fatalf("availability receipt lost: %+v %v", receipt, err)
+			}
+			if len(phase.Attempts) != 1 || phase.Attempts[0].Role != "probe" {
+				t.Fatal("subscription mixed into workload")
+			}
+		})
+	}
+}

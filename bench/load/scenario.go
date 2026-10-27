@@ -105,7 +105,7 @@ func runPhase(ctx context.Context, o runOptions, scenario string, corpora []Corp
 		for name, count := range logCrashes {
 			crashes[name] += count
 		}
-		resultErr = errors.Join(resultErr, err, os.RemoveAll(p.SocketDir))
+		resultErr = errors.Join(resultErr, err, collectPatchWrites(logArtifacts, &phase), os.RemoveAll(p.SocketDir))
 		if !o.KeepState {
 			resultErr = errors.Join(resultErr, p.removeState())
 		}
@@ -197,6 +197,7 @@ func runPhase(ctx context.Context, o runOptions, scenario string, corpora []Corp
 		clients = append(clients, client)
 		version = client.version
 		if i < len(p.Repos) {
+			subscribeInvalidations(warmCtx, client, repo.Corpus.Label, o.Deadline, &phase)
 			if err := preflightRoot(warmCtx, p, client, repo, scenario == "worktrees" && i > 0, o.Deadline, &phase); err != nil {
 				return phase, nil, artifacts, crashes, version, err
 			}
@@ -242,6 +243,7 @@ func runPhase(ctx context.Context, o runOptions, scenario string, corpora []Corp
 			return phase, nil, artifacts, crashes, version, err
 		}
 		clients = append(clients, client)
+		subscribeInvalidations(warmCtx, client, "restart", o.Deadline, &phase)
 		gate, rows, err := warmAnalysis(warmCtx, client, o.Deadline)
 		phase.Attempts = append(phase.Attempts, rows...)
 		for name, value := range gate {
@@ -287,7 +289,10 @@ func runPhase(ctx context.Context, o runOptions, scenario string, corpora []Corp
 	captureReceipt(ctx, p, clients[0], &phase)
 	for i, client := range clients {
 		client.mu.Lock()
-		data, marshalErr := json.Marshal(client.notifies)
+		data, marshalErr := json.Marshal(struct {
+			Received []notificationObservation `json:"received"`
+			Dropped  int                       `json:"dropped"`
+		}{client.notifies, client.notifyDropped})
 		client.mu.Unlock()
 		if marshalErr == nil {
 			phase.Gate[fmt.Sprintf("notifications.%d", i)] = data

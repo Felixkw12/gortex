@@ -32,17 +32,23 @@ type wireReply struct {
 	err    error
 }
 
+type notificationObservation struct {
+	Received time.Time       `json:"received"`
+	Payload  json.RawMessage `json:"payload"`
+}
+
 type socketClient struct {
-	conn      net.Conn
-	reader    *bufio.Reader
-	writeGate chan struct{}
-	mu        sync.Mutex
-	next      int64
-	pending   map[int64]chan wireReply
-	closed    error
-	done      chan struct{}
-	notifies  []json.RawMessage
-	version   string
+	conn          net.Conn
+	reader        *bufio.Reader
+	writeGate     chan struct{}
+	mu            sync.Mutex
+	next          int64
+	pending       map[int64]chan wireReply
+	closed        error
+	done          chan struct{}
+	notifies      []notificationObservation
+	notifyDropped int
+	version       string
 }
 
 func readWireLine(reader *bufio.Reader) ([]byte, error) {
@@ -138,7 +144,9 @@ func (c *socketClient) readLoop() {
 			// Keep invalidation/publication evidence without retaining unbounded
 			// diagnostic notifications throughout a saturation run.
 			if len(c.notifies) < 1000 {
-				c.notifies = append(c.notifies, append(json.RawMessage(nil), line...))
+				c.notifies = append(c.notifies, notificationObservation{Received: time.Now(), Payload: append(json.RawMessage(nil), line...)})
+			} else {
+				c.notifyDropped++
 			}
 			c.mu.Unlock()
 			continue

@@ -40,7 +40,7 @@ revision; replace with real values):
     "file": "sample.go",
     "symbol": "sample.go::Example",
     "query": "Example",
-	"proposed_signature": "func Example() int",
+    "proposed_signature": "func Example() int",
     "edit_anchor": "package sample\n",
     "edit_template": "\nfunc {{marker}}() {}\n"
   }
@@ -152,6 +152,39 @@ Daemon stdout/stderr and available daemon/crash logs are copied after stop,
 including failed runs. Panic, SIGABRT and OOM log-line counts remain distinct
 from authoritative cgroup OOM-kill counters.
 
+`gate.patch_write_intervals` collects only exact top-level JSON
+`graph patch complete` records from the copied logs. It retains source file,
+kind, delta class, logged end and inferred start (log timestamp minus duration),
+WAL-reset flag, WAL/main bytes, total/per-table rows, transactions and incident
+edges. Nested phase logs are excluded. The duration is captured before final handling
+and counter capture; its inferred start is not the exact counter-start time.
+Log timestamp formatting adds skew too. Window/boundary classifications are
+therefore inferred and cannot establish exact counter-window attribution.
+Inferred outside/boundary events stay in the report but are excluded from totals. Duplicate copies of
+one log record in different sinks are counted once. Overlapping contained
+intervals are counted explicitly: each is process-wide activity and can include
+the same writes or background work, so their sum is **not exclusive edit cost**.
+Zap sampling and log rotation can also omit records; these totals describe
+observed intervals, not a complete accounting assertion.
+
+The same evidence records successful edit acknowledgements and indexed-visible
+edits separately, with amortized interval-counter totals per acknowledged edit.
+Missing older-version counters, invalid records and WAL resets remain
+unavailable rather than zero. The raw events permit inspection when an
+aggregate is unavailable. `gate.process_counter_window` records the independent
+process meter endpoints; the phase timestamps and paired group window identify
+the workload interval. Whole-process meters include writes outside observed
+patch intervals and deferred I/O, while overlapping intervals can overcount:
+the two must not be forced to reconcile. Both macOS logical and physical disk
+write meters are retained for comparison.
+
+One session per loaded root opts into public graph invalidations before the
+workload. Subscription availability/response is recorded explicitly; an older
+build without support is not treated as having zero invalidations. Received
+notifications retain client timestamps and raw payloads, with a 1,000-record
+per-session cap and an explicit dropped count. Notifications supplement the
+public readiness/publication gates rather than replacing them.
+
 Completed private stores/clones are removed by default while JSON, logs and
 profiles remain. This prevents earlier scenarios' retained stores from using
 the next scenario's disk budget. `--keep-state` is only available for native
@@ -181,13 +214,47 @@ Unavailable per-cgroup swap I/O stays unavailable; host-global `/proc/vmstat`
 is never substituted. OOM kills come from `memory.events`. Whole-scenario
 cgroup counters include startup and stop; workload-only endpoints are separate.
 
-For paired baseline collection, use the same manifest, seed and offered-load
-options and balance binary order **within each scenario category** across
-repetitions (for two builds: tag/main, then main/tag). Preserve every raw run
-and failure. Do not pool unrelated phase durations or remove censored samples.
-Repeat on the same host before making a p95 repeatability claim. Request hashes
-support matching logical operations; noisy-host paired request ratios do not
-establish independent saturation capacity.
+## Coupled native comparisons
+
+On a noisy native host, start two or three private builds together with `paired`:
+
+```sh
+go run ./bench/load paired --build tag=/private/bin/tag \
+  --build main=/private/bin/main --manifest /private/corpus.json \
+  --scratch /private/paired-artifacts --host native --scenario edit \
+  --agents 4 --edit-agents 4 --duration 60s --out /private/paired.json
+```
+
+An optional third `--build candidate=/private/bin/candidate` uses the same
+protocol. Each build must have clean embedded Go VCS metadata; archive builds
+without that metadata can use standalone `run --git-sha` instead. All private
+builds pass their own readiness/publication/target gates before the shared
+workload barrier. Failure or cancellation before the barrier cancels and cleans
+up every owned daemon; no partial startup becomes a measured successful group.
+
+For each logical request, every build receives the same normalized request and
+corpus identity back-to-back. The first build rotates independently within each
+tool/role category. The report retains tuple hashes, dispatch/completion times,
+all failures and matched latency ratios; the summary uses the **median of
+matched per-request ratios**, never a ratio of raw percentile summaries. Failed,
+censored or mismatched pairs remain explicit exclusions. Workload and probe
+categories are separate. These are coupled comparisons, not independently
+measured saturation throughput or reference/floor capacity. Paired mode rejects
+saturation, reference/floor, cold/restart and CPU-profile options; use standalone
+runs for those measurements.
+
+Edits apply the same logical marker to each build's independent clone. Each
+build has its own acknowledgement and visibility deadline. Visibility ends at
+that build's first successful indexed probe completion, before waiting for any
+later build's probe. Further paired probes for already-visible builds remain
+probe-only evidence and cannot change completed visibility observations.
+
+Process counters bracket one common group window with each actual snapshot
+endpoint retained. Client CPU and shared cgroup counters are reported once at
+group scope, rather than attributed repeatedly to every daemon. Preserve raw
+reports and failures, repeat on the same host before p95 repeatability claims,
+and balance standalone build order per scenario. Coupled ratios do not replace
+independent scaling measurements.
 
 `delta` rejects incompatible workload/corpus/target/host-limit identities rather
 than printing an unqualified verdict. It lists every comparable timing metric

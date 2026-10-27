@@ -230,3 +230,21 @@ func warmAnalysis(ctx context.Context, client *socketClient, deadline time.Durat
 		return gate, attempts, nil
 	}
 }
+
+// Notification support is a recorded capability, not a substitute for a public
+// readiness/publication receipt. Older builds can explicitly report unavailable.
+func subscribeInvalidations(ctx context.Context, client *socketClient, label string, deadline time.Duration, phase *Phase) {
+	r := request{Tool: "session", Operation: "subscribe", Arguments: map[string]any{"operation": "subscribe", "channel": "graph_invalidated"}}
+	data, rows, err := callTool(ctx, client, r, r.Arguments, "probe", 0, -1, 0, deadline, waitContext)
+	phase.Attempts = append(phase.Attempts, rows...)
+	receipt := struct {
+		Available bool            `json:"available"`
+		Response  json.RawMessage `json:"response"`
+		Error     string          `json:"error"`
+	}{Available: err == nil, Response: data}
+	if err != nil {
+		receipt.Error = err.Error()
+	}
+	encoded, _ := json.Marshal(receipt)
+	phase.Gate[label+".graph_invalidated_subscription"] = encoded
+}

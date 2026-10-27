@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"sync"
@@ -68,7 +69,13 @@ func (m *phaseMonitor) finish(phase *Phase) {
 	m.done.Wait()
 	m.observe()
 	elapsed := time.Since(m.started).Seconds()
+	counterEnd := time.Now()
 	after := m.sampler.sample(m.pid)
+	window, _ := json.Marshal(measurementWindow{Started: m.started, Ended: counterEnd, Method: "process/cgroup counter snapshots bracket this interval; sequential reads have small endpoint skew; workload, background work and delayed I/O can contribute; these are not sums of patch intervals"})
+	if phase.Gate == nil {
+		phase.Gate = make(map[string]json.RawMessage)
+	}
+	phase.Gate["process_counter_window"] = window
 	clientAfter := m.sampler.sample(os.Getpid())
 	for key, value := range m.peaks {
 		phase.Metrics["peak_"+key] = value
