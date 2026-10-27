@@ -452,6 +452,21 @@ gortex instructions switch localization   # lean machine: diet body + 10-tool su
 gortex instructions switch core           # back to the balanced default
 ```
 
+
+Generated instruction profiles record the binary version that produced them.
+On daemon startup, an existing managed installation refreshes after an upgrade;
+its saved active selection stays unchanged, even when the daemon process has a
+`GORTEX_INSTRUCTIONS_PROFILE` override. The refresh applies to new sessions.
+A second start leaves already-current files unchanged.
+
+Automatic refresh accepts only recorded generated files or exact known legacy
+profile bodies from v0.64.10 and v0.64.11. It preserves customized, unrecognized or symlinked files and
+logs how to resolve the conflict; the daemon continues serving. Back up and move
+conflicting generated files aside, then run `gortex instructions regen` to
+restore them and record the current version. Keep personal guidance in your
+agent's user-managed instructions rather than editing generated profile files.
+
+
 ### `gortex analyze` — unified analysis dispatcher
 
 `gortex analyze --kind <k>` runs the daemon's `analyze` dispatcher. `gortex analyze kinds` lists the valid kinds (no daemon needed). Universal typed flags (`--limit`, `--compact`, `--path-prefix`, `--format json|gcx|toon|text`) cover the common parameters; kind-specific parameters ride on `--arg key=value` (same coercion as `call`, and a `--arg` pair overrides the matching typed flag).
