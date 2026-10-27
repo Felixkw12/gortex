@@ -57,19 +57,36 @@ func (l *CheckoutLifecycle) mutationRefusalWitness(checkout store_sqlite.Checkou
 	if slot == nil || slot.incarnation != checkout.Incarnation || !pathkey.EqualPaths(slot.root, checkout.RootPath) {
 		slot = &checkoutMutationRefusalSlot{checkoutID: strings.Clone(checkout.CheckoutID), incarnation: strings.Clone(checkout.Incarnation), root: strings.Clone(checkout.RootPath)}
 		l.mutationRefusals[slot.checkoutID] = slot
+		l.mutationRefusalEpoch++
 	}
 	return checkoutMutationRefusalWitness{slot: slot, revision: slot.revision, routeEpoch: routeEpoch}
 }
 
-// Capture route identity only on a stale error, after admission released its
-// locks. The ordinary error chain and optional byte-route fallback stay intact.
-func (l *CheckoutLifecycle) captureMutationRefusalError(ctx context.Context, err error, witness checkoutMutationRefusalWitness) error {
-	if err == nil || witness.slot == nil || !errors.Is(err, ErrCheckoutMutationStale) {
+// Route evidence is captured where admission actually read/checked it, never
+// by rereading after failure: a same-epoch replacement must not acquire an old
+// refusal. Unknown pre-route failures remain unmarked.
+type checkoutMutationObservedRouteError struct {
+	err   error
+	route store_sqlite.CheckoutRoute
+}
+
+func (e *checkoutMutationObservedRouteError) Error() string { return e.err.Error() }
+func (e *checkoutMutationObservedRouteError) Unwrap() error { return e.err }
+
+func withMutationRefusalRoute(err error, route store_sqlite.CheckoutRoute) error {
+	var observed *checkoutMutationObservedRouteError
+	if err == nil || !errors.Is(err, ErrCheckoutMutationStale) || errors.As(err, &observed) || route.RouteEpoch <= 0 || route.State != store_sqlite.RouteActive {
 		return err
 	}
-	if route, found, readErr := l.catalog.GetCheckoutRoute(ctx, witness.slot.checkoutID); readErr == nil && found && route.RouteEpoch == witness.routeEpoch {
-		witness.route = route
+	return &checkoutMutationObservedRouteError{err: err, route: route}
+}
+
+func (l *CheckoutLifecycle) captureMutationRefusalError(err error, witness checkoutMutationRefusalWitness) error {
+	var observed *checkoutMutationObservedRouteError
+	if err == nil || witness.slot == nil || !errors.Is(err, ErrCheckoutMutationStale) || !errors.As(err, &observed) || observed.route.RouteEpoch != witness.routeEpoch {
+		return err
 	}
+	witness.route = observed.route
 	return &checkoutMutationRefusalError{err: err, witness: witness}
 }
 
@@ -81,13 +98,17 @@ func (l *CheckoutLifecycle) clearMutationRefusalOnAdmission(w checkoutMutationRe
 	defer l.mutationRefusalMu.Unlock()
 	if l.mutationRefusals[w.slot.checkoutID] == w.slot {
 		w.slot.revision++
+		l.mutationRefusalEpoch++
 		w.slot.mark = nil
 	}
 }
 
 func (l *CheckoutLifecycle) forgetMutationRefusal(checkoutID string) {
 	l.mutationRefusalMu.Lock()
-	delete(l.mutationRefusals, checkoutID)
+	if l.mutationRefusals[checkoutID] != nil {
+		delete(l.mutationRefusals, checkoutID)
+		l.mutationRefusalEpoch++
+	}
 	l.mutationRefusalMu.Unlock()
 }
 
@@ -145,8 +166,15 @@ func (l *CheckoutLifecycle) RecordCheckoutMutationRefusal(ctx context.Context, e
 	if l.mutationRefusals[w.slot.checkoutID] != w.slot || w.slot.revision != w.revision {
 		return
 	}
+	if w.route.CheckoutID != w.slot.checkoutID || len(w.route.GraphID) > 256 {
+		return
+	}
+	ownedRoute := w.route
+	ownedRoute.CheckoutID = strings.Clone(ownedRoute.CheckoutID)
+	ownedRoute.GraphID = strings.Clone(ownedRoute.GraphID)
 	w.slot.revision++
-	w.slot.mark = &checkoutMutationRefusalMark{route: w.route, at: at, reason: reason}
+	l.mutationRefusalEpoch++
+	w.slot.mark = &checkoutMutationRefusalMark{route: ownedRoute, at: at, reason: reason}
 }
 
 // CheckoutMutationState distinguishes an authoritative healthy route from an
@@ -184,6 +212,7 @@ func (l *CheckoutLifecycle) CheckoutMutationState(ctx context.Context, checkoutI
 			return "read_only", mark.reason
 		}
 		slot.revision++
+		l.mutationRefusalEpoch++
 		slot.mark = nil
 	}
 	return "ready", ""
@@ -192,4 +221,38 @@ func (l *CheckoutLifecycle) CheckoutMutationState(ctx context.Context, checkoutI
 func (l *CheckoutLifecycle) CheckoutMutationRefusal(ctx context.Context, checkoutID, root string) (reason string, refused bool) {
 	state, reason := l.CheckoutMutationState(ctx, checkoutID, root)
 	return reason, state == "read_only"
+}
+
+// CheckoutMutationProbe is an opaque ordering token for one already-existing
+// coverage resolution. It tracks only refusal-slot changes, not graph writes.
+type CheckoutMutationProbe struct {
+	epoch uint64
+	valid bool
+}
+
+func (l *CheckoutLifecycle) CaptureCheckoutMutationProbe() CheckoutMutationProbe {
+	if l == nil {
+		return CheckoutMutationProbe{}
+	}
+	l.mutationRefusalMu.Lock()
+	defer l.mutationRefusalMu.Unlock()
+	return CheckoutMutationProbe{epoch: l.mutationRefusalEpoch, valid: true}
+}
+
+// A healthy exact/servable resolution already read the checkout and route.
+// Reuse that proof when no refusal-state change overlapped it, paying no new
+// catalog reads. Existing marks and concurrent state changes retain the fully
+// checked path; no stale lookup can clear newer state.
+func (l *CheckoutLifecycle) CheckoutMutationStateForProbe(ctx context.Context, checkoutID, root string, probe CheckoutMutationProbe, exactServable bool) (state, reason string) {
+	if l == nil || ctx.Err() != nil {
+		return "", ""
+	}
+	l.mutationRefusalMu.Lock()
+	slot := l.mutationRefusals[checkoutID]
+	if probe.valid && exactServable && probe.epoch == l.mutationRefusalEpoch && (slot == nil || slot.mark == nil) {
+		l.mutationRefusalMu.Unlock()
+		return "ready", ""
+	}
+	l.mutationRefusalMu.Unlock()
+	return l.CheckoutMutationState(ctx, checkoutID, root)
 }

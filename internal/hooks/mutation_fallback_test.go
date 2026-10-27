@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -202,5 +203,100 @@ func TestReadOnlyFallbackCheckoutBoundaryAndSymlinkIsolation(t *testing.T) {
 	}
 	if got := mutationCheckoutRoot(root, filepath.Join(link, "new.go"), false); got != other {
 		t.Fatalf("new file through symlink borrowed wrong checkout: %s", got)
+	}
+}
+
+func TestReadOnlyFallbackUncertainGitBoundaryCannotBorrowParent(t *testing.T) {
+	root := mutationRootFixture(t)
+	child := filepath.Join(root, "nested")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := mutationCheckoutRoot(child, "", true); got != root {
+		t.Fatal("ordinary missing nested .git should find the known parent")
+	}
+	got := mutationCheckoutRootWithLstat(child, "", true, func(path string) (os.FileInfo, error) {
+		if path == filepath.Join(child, ".git") {
+			return nil, &os.PathError{Op: "lstat", Path: path, Err: syscall.EACCES}
+		}
+		return os.Lstat(path)
+	})
+	if got != "" {
+		t.Fatalf("unreadable boundary borrowed parent allowance: %s", got)
+	}
+}
+
+func TestReadOnlyFallbackPostToolUseRunsForBothClientsWithoutDaemonProbe(t *testing.T) {
+	t.Setenv(hookSessionDirEnvVar, t.TempDir())
+	root := mutationRootFixture(t)
+	old := daemonReachableFn
+	daemonReachableFn = func() bool { t.Error("mutation response observation probed daemon availability"); return false }
+	t.Cleanup(func() { daemonReachableFn = old })
+	for _, client := range []string{"claude", "codex"} {
+		post := mutationPostFixture(root, client, true, legacyStaleRefusal)
+		if client == "codex" {
+			post.ToolName = "gortex__edit"
+		}
+		data, err := json.Marshal(post)
+		if err != nil {
+			t.Fatal(err)
+		}
+		captureHookStdout(t, func() {
+			if client == "codex" {
+				runCodex(data, 0, CodexModeDeny)
+			} else {
+				runPostToolUse(data)
+			}
+		})
+		if !mutationFallbackLive(loadSessionState(client), root, time.Now()) {
+			t.Fatalf("%s mutation observer was not dispatched", client)
+		}
+	}
+}
+
+func TestReadOnlyFallbackCannotBypassLocalizationTerminal(t *testing.T) {
+	configureLocalizationTerminalTestHome(t)
+	t.Setenv(hookSessionDirEnvVar, t.TempDir())
+	root := mutationRootFixture(t)
+	identity := beginTestLocalizationTurn(t, "terminal-refusal", "prompt", root)
+	if !markLocalizationTerminal(identity, localizationTerminalContractV2) {
+		t.Fatal("terminal fixture was not armed")
+	}
+	observeMutationFallback(mutationPostFixture(root, identity.SessionID, true, legacyStaleRefusal), time.Now())
+	probes := 0
+	stubFileIndexScopeBy(t, func(_, _ string) fileIndexStatus {
+		probes++
+		return fileIndexStatus{ReadOnly: true, MutationKnown: true, ProbeOK: true}
+	})
+	for _, tool := range []string{"Read", "Edit", "Write", "Bash"} {
+		args := map[string]any{"file_path": "a.go"}
+		if tool == "Bash" {
+			args = map[string]any{"command": "cat a.go"}
+		}
+		payload := preToolPayload(t, tool, "", identity, args)
+		output := captureHookStdout(t, func() { runPreToolUse(payload, 0, ModeDeny) })
+		var result HookOutput
+		if err := json.Unmarshal([]byte(output), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.HookSpecificOutput == nil || result.HookSpecificOutput.PermissionDecision != "deny" || probes != 0 {
+			t.Fatalf("%s bypassed terminal or probed: %+v probes=%d", tool, result, probes)
+		}
+	}
+}
+
+func TestReadOnlyFallbackSessionFilenameCollisionCannotShareAllowance(t *testing.T) {
+	t.Setenv(hookSessionDirEnvVar, t.TempDir())
+	root := mutationRootFixture(t)
+	observeMutationFallback(mutationPostFixture(root, "same/path", true, legacyStaleRefusal), time.Now())
+	if sessionStatePath("same/path") != sessionStatePath("same_path") {
+		t.Fatal("fixture must actually exercise the sanitizer collision")
+	}
+	stubFileIndexScope(t, fileIndexStatus{Indexed: true, ProbeOK: true, Tracked: true})
+	if st := sessionFileScopeProbe("same_path")(root, "a.go"); st.ReadOnly {
+		t.Fatal("different host session inherited native allowance")
+	}
+	if st := sessionFileScopeProbe("same/path")(root, "a.go"); !st.ReadOnly {
+		t.Fatal("original session lost its own fallback")
 	}
 }

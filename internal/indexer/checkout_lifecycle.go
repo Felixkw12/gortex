@@ -151,9 +151,10 @@ type checkoutHeadIdentity struct {
 	commit string
 }
 type CheckoutLifecycle struct {
-	mutationRefusalMu   sync.Mutex
-	mutationRefusals    map[string]*checkoutMutationRefusalSlot
-	contractCoreRuntime atomic.Pointer[ContractCoreRuntimeHooks]
+	mutationRefusalMu    sync.Mutex
+	mutationRefusals     map[string]*checkoutMutationRefusalSlot
+	mutationRefusalEpoch uint64
+	contractCoreRuntime  atomic.Pointer[ContractCoreRuntimeHooks]
 	// routePrewarm is the prewarmer every coordinator calls before a route
 	// flip (SetRoutePrewarmer).
 	routePrewarm routePrewarmerSlot

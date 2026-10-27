@@ -138,7 +138,7 @@ func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, check
 	// this optional admission before activation can consume the caller's whole
 	// deadline; the ordinary route wait retains its bounded refusal margin.
 	var witness checkoutMutationRefusalWitness
-	defer func() { resultErr = l.captureMutationRefusalError(ctx, resultErr, witness) }()
+	defer func() { resultErr = l.captureMutationRefusalError(resultErr, witness) }()
 	initialRoute, found, err := l.catalog.GetCheckoutRoute(ctx, checkoutID)
 	if err != nil {
 		return nil, err
@@ -226,6 +226,7 @@ func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, check
 		}
 	}()
 	witness = l.mutationRefusalWitness(anchor.checkout, anchor.route.RouteEpoch)
+	defer func() { resultErr = withMutationRefusalRoute(resultErr, anchor.route) }()
 	precheck := &CheckoutMutation{coordinator: c, checkout: anchor.checkout, rootInfo: anchor.rootInfo}
 	if err := precheck.validateCheckout(waitCtx); err != nil {
 		return nil, err

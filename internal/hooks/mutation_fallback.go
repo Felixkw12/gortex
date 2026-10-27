@@ -21,9 +21,12 @@ func sessionFileScopeProbe(sessionID string) fileScopeProbe {
 		if sessionID == "" || st.Unreached || st.MutationKnown || !st.ProbeOK {
 			return st
 		}
-		root := mutationCheckoutRoot(cwd, path, false)
 		local := loadSessionState(sessionID)
-		if root != "" && local.MutationRefusalSession == sessionID && mutationFallbackLive(local, root, time.Now()) {
+		if local.MutationRefusalSession != sessionID || len(local.MutationRefusals) == 0 {
+			return st
+		}
+		root := mutationCheckoutRoot(cwd, path, false)
+		if root != "" && mutationFallbackLive(local, root, time.Now()) {
 			st.ReadOnly = true
 			st.MutationReason = "checkout mutation admission was refused"
 		}
@@ -44,6 +47,10 @@ func mutationFallbackLive(st sessionState, root string, now time.Time) bool {
 // or the longest tracked prefix. A linked worktree/submodule gets its own root.
 // Unknown/symlink-unresolvable identities simply supply no legacy allowance.
 func mutationCheckoutRoot(cwd, path string, directory bool) string {
+	return mutationCheckoutRootWithLstat(cwd, path, directory, os.Lstat)
+}
+
+func mutationCheckoutRootWithLstat(cwd, path string, directory bool, lstat func(string) (os.FileInfo, error)) string {
 	if path == "" {
 		path, directory = cwd, true
 	}
@@ -68,7 +75,7 @@ func mutationCheckoutRoot(cwd, path string, directory bool) string {
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return ""
 		}
-		if info, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
+		if info, err := lstat(filepath.Join(path, ".git")); err == nil {
 			if !info.IsDir() && !info.Mode().IsRegular() {
 				return ""
 			}
@@ -77,6 +84,8 @@ func mutationCheckoutRoot(cwd, path string, directory bool) string {
 				return ""
 			}
 			return root
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return ""
 		}
 		parent := filepath.Dir(path)
 		if parent == path {
