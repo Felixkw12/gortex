@@ -615,7 +615,7 @@ func familyDiscoveryError(cwd string, inbound []byte, reason string, terminalLoa
 		"error": map[string]any{
 			"code":    -32000,
 			"message": "Git family checkout discovery is pending; retry graph calls without changing tracking configuration.",
-			"data": data,
+			"data":    data,
 		},
 	})
 	return out

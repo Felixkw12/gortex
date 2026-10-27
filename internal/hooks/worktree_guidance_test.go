@@ -46,9 +46,9 @@ func TestDirectUnloadedFamilyPrimaryHooksKeepDiscoveryGuidance(t *testing.T) {
 	status := &daemon.StatusResponse{Ready: true, TrackedRepos: []daemon.TrackedRepoStatus{{Path: primary, Name: "primary", Unloaded: true}}}
 	sessionStartStatusFn = func() (*daemon.StatusResponse, error) { return status, nil }
 	for name, text := range map[string]string{
-		"session-start": renderCwdCoverage(primary, status),
+		"session-start":      renderCwdCoverage(primary, status),
 		"lean-session-start": renderLeanReadiness(primary, status),
-		"external-agent": buildStaleIndexHint(primary),
+		"external-agent":     buildStaleIndexHint(primary),
 	} {
 		if !strings.Contains(text, "view_building") || !strings.Contains(text, "discovery is pending") || strings.Contains(text, "gortex track "+primary) || strings.Contains(strings.ReplaceAll(text, "no reconnect is needed", ""), "reconnect") {
 			t.Errorf("%s mislabeled direct configured/unloaded family: %s", name, text)
