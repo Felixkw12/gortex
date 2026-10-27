@@ -1637,6 +1637,12 @@ func (mi *MultiIndexer) scopedGlobalPassesEnabled() bool {
 }
 
 func (mi *MultiIndexer) EndBatch() {
+	mi.EndBatchContext(context.Background())
+}
+
+// EndBatchContext releases batch mode and gives its derived work the owning
+// producer's cancellation. ResetBatch remains the no-derived-work exit.
+func (mi *MultiIndexer) EndBatchContext(ctx context.Context) {
 	mi.batchMutationGate.Lock()
 	defer mi.batchMutationGate.Unlock()
 
@@ -1652,7 +1658,10 @@ func (mi *MultiIndexer) EndBatch() {
 
 	// Keep the transition write side through the complete global pass: a
 	// watcher admitted before or during EndBatch runs wholly before or after it.
-	mi.runGlobalGraphPasses(context.Background(), state.scope, state.censusEligible)
+	if ctx.Err() != nil {
+		return
+	}
+	mi.runGlobalGraphPasses(ctx, state.scope, state.censusEligible)
 }
 
 // ResetBatch clears deferred-batch mode WITHOUT running the graph-wide

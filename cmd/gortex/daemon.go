@@ -338,6 +338,8 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		}
 		return fmt.Errorf("install contract analysis: %w", err)
 	}
+	warmupTask := newDaemonWarmup(cmd.Context())
+	defer warmupTask.cancel()
 	// Teardown is wired into every exit path, not just the control-socket
 	// one. A SIGINT/SIGTERM is handled inside the daemon server: it calls
 	// Server.Shutdown directly, Serve returns, and the controller's hook is
@@ -353,7 +355,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		lifecycle := state.lifecycle
 		// Stacks the startup correction will change are warmed after it,
 		// not before (their caches would be orphaned).
-		lifecycle.DeferPrewarmsUntilCorrected(context.Background())
+		lifecycle.DeferPrewarmsUntilCorrected(warmupTask.ctx)
 		retirementWorker.SetAfterReady(func(ctx context.Context) {
 			if _, err := lifecycle.CorrectStaleDerivations(ctx); err != nil && ctx.Err() == nil {
 				logger.Warn("daemon: stale derivation correction stopped", zap.Error(err))
@@ -365,7 +367,10 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	}
 	defer retirementWorker.Stop()
 	stopBackground := func() {
-		controller.StopWatcher()
+		// Revoke startup before any join. The completion boundary is also
+		// the watcher handoff barrier: startup cannot attach/publish another
+		// watcher after StopWatcher has finished.
+		stopDaemonWarmup(warmupTask, controller, logger)
 		retirementWorker.Stop()
 	}
 	runTeardown := installDaemonTeardown(controller, stopBackground, func() error {
@@ -623,11 +628,13 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	// then a session whose cwd is in it gets repo_loading (retryable, with
 	// progress) for graph calls, and its tools start working in place when
 	// the repository registers — see installRepoLoadTracking.
-	go func() {
+	warmupTask.start(func(ctx context.Context) {
 		runtimeactivity.Begin("warmup")
 		defer func() {
 			runtimeactivity.End("warmup")
-			releaseMemoryToOS(logger, "warmup_complete")
+			if ctx.Err() == nil {
+				releaseMemoryToOS(logger, "warmup_complete")
+			}
 		}()
 
 		start := time.Now()
@@ -643,11 +650,14 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		if state.lifecycle != nil {
 			finishSeed := startWarmupStep(logger, "checkout_catalog_seed",
 				zap.Int("repos", len(state.configManager.Global().Repos)))
-			err := state.lifecycle.Seed(context.Background())
+			err := state.lifecycle.Seed(ctx)
 			finishSeed(zap.Error(err))
 			if err != nil {
 				logger.Warn("daemon: seeding the checkout catalog was incomplete", zap.Error(err))
 			}
+		}
+		if ctx.Err() != nil {
+			return
 		}
 		// markReady fires once references are resolved and the graph is
 		// queryable — ahead of the slow enrichment pass — so clients can
@@ -658,6 +668,9 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		// unconditional post-resolve fallback, whichever comes first.
 		var queryableElapsed time.Duration
 		markReady := sync.OnceFunc(func() {
+			if ctx.Err() != nil {
+				return
+			}
 			elapsed := time.Since(start)
 			queryableElapsed = elapsed
 			controller.MarkReady(elapsed)
@@ -667,12 +680,17 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 				"warmup_seconds": int64(elapsed.Seconds()),
 				"warmup_ms":      elapsed.Milliseconds(),
 			})
+			if ctx.Err() != nil {
+				return
+			}
 			if deferredRetirements != nil {
 				deferredRetirements.MarkReady()
 			}
 		})
-		mw, warmup := warmupDaemonState(state, logger, markReady)
-		controller.AttachWatcher(mw)
+		mw, warmup := warmupDaemonStateContext(ctx, state, logger, markReady, controller.startAndAttachWatcher)
+		if ctx.Err() != nil {
+			return
+		}
 		// Drive the /v1/events SSE stream from the MultiWatcher. The hub is
 		// the only consumer of mw.Events() (SetWatcher reads History(), not
 		// the channel), so this can't starve any other reader. No-op when
@@ -684,16 +702,19 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		// accepted during warmup before admitting linked builds or co-change
 		// writes that could make their initial copy yield to foreground demand.
 		baseStep := startWarmupStep(logger, "known_committed_bases")
-		baseReport, baseErr := joinKnownStartupBases(cmd.Context(), state.basePublisher, viewBuilds)
+		baseReport, baseErr := joinKnownStartupBases(ctx, state.basePublisher, viewBuilds)
 		baseStep(zap.String("outcome", baseReport.outcome(baseErr)),
 			zap.Int("published", baseReport.published), zap.Int("owner_only", baseReport.ownerOnly),
 			zap.Int("uncommitted", baseReport.uncommitted),
 			zap.Int("failed", baseReport.failed), zap.Error(baseErr))
 		if baseErr != nil {
 			logger.Warn("daemon: known committed base preparation incomplete; view builds remain available for recovery", zap.Error(baseErr))
-			if cmd.Context().Err() != nil || baseReport.interrupted {
+			if ctx.Err() != nil || baseReport.interrupted {
 				return
 			}
+		}
+		if ctx.Err() != nil {
+			return
 		}
 		// Community detection and process discovery are a whole-graph pass
 		// costing minutes on a large workspace, and most sessions never ask
@@ -716,13 +737,22 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			// goroutine — but even the git log itself can take 10–30s
 			// on a large history, and we want that off every request
 			// path.
+			if ctx.Err() != nil {
+				return
+			}
 			state.mcpServer.PrewarmCoChange()
+		}
+		if ctx.Err() != nil {
+			return
 		}
 		elapsed := time.Since(start)
 		controller.MarkEnriched(elapsed)
 		// The warmup tail is done, so the view builds that were competing with
 		// it are admitted. Every coordinator holding a cycle and every ref-view
 		// build parked on a claim starts here, without being asked again.
+		if ctx.Err() != nil {
+			return
+		}
 		viewBuilds.Open()
 		logger.Info("daemon: enrichment complete", zap.Duration("warmup", elapsed))
 		publishReadinessPhase(state, "enrichment_complete", true, map[string]any{
@@ -734,16 +764,30 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		// Audit repo ownership once the graph has settled. Runs here, after
 		// every reconcile and derived pass, so it observes the state the
 		// daemon will actually serve rather than a mid-warmup transient.
+		if ctx.Err() != nil {
+			return
+		}
+		auditStep := startWarmupStep(logger, "repo_ownership_audit")
 		logRepoOwnershipAudit(state.graph, logger)
+		auditStep()
 		// Carry stored note / memory symbol anchors onto prefixed node ids.
 		// Also here, and for the same reason: the rewrite decides by asking
 		// the graph which ids resolve, so it needs the settled graph. Marked
 		// per repo in the sidecar, so this is a no-op on every later start.
 		if state.mcpServer != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			migrationStep := startWarmupStep(logger, "symbol_anchor_migration")
 			state.mcpServer.MigrateSymbolAnchors(logger)
+			migrationStep()
 		}
-	}()
+	})
 
+	// Serve returns directly on the signal path. Register this last so startup
+	// is canceled before deferred health/janitor joins, not only when the later
+	// once-guarded backend teardown is reached.
+	defer warmupTask.cancel()
 	return srv.Serve()
 }
 
