@@ -1544,8 +1544,7 @@ func ServerInstructionsUntracked(cwd string, roots ...string) string {
 	}
 	msg := fmt.Sprintf("Gortex is connected but INACTIVE for this directory: %q is not covered by any tracked repository, "+
 		"so the graph tools have nothing to answer with yet.\n\n"+
-		"To activate: run `gortex track %s`, then reconnect — the full tool catalogue and the "+
-		"graph become available.\n\n"+
+		"To activate: run `gortex track %s`, then retry graph calls; no reconnect is needed.\n\n"+
 		"Until then only capabilities and workspace_admin(operation:\"track\") will answer; every other call "+
 		"returns repo_not_tracked, so fall back to your own file reads and text search.", target, target)
 	// Append the tracked roots so the mismatch is self-diagnosing: a
@@ -1571,11 +1570,18 @@ func ServerInstructionsPendingAutomaticCheckout(cwd string, roots ...string) str
 	if target == "" {
 		target = "."
 	}
-	msg := fmt.Sprintf("Gortex is connected but this Git checkout is still awaiting automatic discovery: %q belongs to an already tracked Git family, but its overlay route is not published yet.\n\n"+
-		"Do not run `gortex track` for this state: implicit/session checkouts are automatic overlays. Retry after other work; if the route is still pending after a few attempts, continue natively for this step and report the discovery lag. Reconnecting or requesting reconciliation is a user action. Explicit tracking is only for a user-requested dedicated graph.\n\n"+
-		"Until its route is published, graph calls may return repo_not_tracked rather than silently reading another checkout.\n\n"+
-		"Worktree and branch routing:\n\n%s", target, profiles.WorktreeBranchRoutingPolicy)
+	msg := fmt.Sprintf("Gortex is connected; checkout discovery is pending for %q.\n\n%s\n\n"+
+		"Retry after other work; if discovery is still pending after a few attempts, continue natively for this step and report the discovery lag.\n\n"+
+		"Worktree and branch routing:\n\n%s", target, agents.PendingAutomaticCheckoutGuidance, profiles.WorktreeBranchRoutingPolicy)
 	return appendTrackedRootsDiagnostic(msg+"\n\n"+toolref.TransportClause()+" "+toolref.DegradedModeLine(), roots)
+}
+
+// ServerInstructionsPendingFamilyLoad retains the terminal load failure as
+// context, without suggesting a second track operation for a declared family.
+func ServerInstructionsPendingFamilyLoad(cwd string, load indexer.RepoLoad, roots ...string) string {
+	return ServerInstructionsPendingAutomaticCheckout(cwd, roots...) + fmt.Sprintf(
+		"\n\nConfigured repository %q finished loading without registration (state=%s). Load diagnostic: %s",
+		load.Root, load.State, load.Reason)
 }
 
 func appendTrackedRootsDiagnostic(msg string, roots []string) string {
@@ -1586,7 +1592,7 @@ func appendTrackedRootsDiagnostic(msg string, roots []string) string {
 	for i, root := range roots {
 		quoted[i] = fmt.Sprintf("%q", root)
 	}
-	return msg + fmt.Sprintf("\n\nTracked repository roots: [%s]. The worktree shares a Git common directory with one of these roots.",
+	return msg + fmt.Sprintf("\n\nKnown repository roots (registered or configured): [%s]. The checkout shares a Git common directory with one of these roots.",
 		strings.Join(quoted, ", "))
 }
 
@@ -1606,7 +1612,7 @@ func (s *Server) afterInitializeInstructions(ctx context.Context, _ any, req *mc
 		return
 	}
 	result.Instructions = s.stateAwareInstructionsForPolicy(
-		SessionCWDFromContext(ctx), s.effectiveSessionPolicy(ctx))
+		ctx, SessionCWDFromContext(ctx), s.effectiveSessionPolicy(ctx))
 }
 
 // Modern clients discover the server without an initialize handshake. Apply
@@ -1620,7 +1626,7 @@ func (s *Server) afterDiscoverInstructions(ctx context.Context, _ any, _ *mcp.Di
 		s.sessionFor(ctx).recordClientName(info.ClientInfo.Name)
 	}
 	result.Instructions = s.stateAwareInstructionsForPolicy(
-		SessionCWDFromContext(ctx), s.effectiveSessionPolicy(ctx))
+		ctx, SessionCWDFromContext(ctx), s.effectiveSessionPolicy(ctx))
 }
 
 // stateAwareInstructions chooses the initialize `instructions` text for a
@@ -1649,18 +1655,22 @@ func (s *Server) stateAwareInstructions(cwd string) string {
 }
 
 func (s *Server) stateAwareInstructionsForClient(cwd, client string) string {
-	return s.stateAwareInstructionsForPolicy(cwd, s.clientDefaultPolicy(client))
+	return s.stateAwareInstructionsForPolicy(context.Background(), cwd, s.clientDefaultPolicy(client))
 }
 
-func (s *Server) stateAwareInstructionsForPolicy(cwd string, policy *toolPolicy) string {
+func (s *Server) stateAwareInstructionsForPolicy(ctx context.Context, cwd string, policy *toolPolicy) string {
 	base := serverInstructions
 	if policy != nil && policy.preset == FacadeSurfaceVersion {
 		base = codingAgentInstructions
 	}
-	return s.stateAwareInstructionsWithBase(cwd, base)
+	return s.stateAwareInstructionsContext(ctx, cwd, base)
 }
 
 func (s *Server) stateAwareInstructionsWithBase(cwd, base string) string {
+	return s.stateAwareInstructionsContext(context.Background(), cwd, base)
+}
+
+func (s *Server) stateAwareInstructionsContext(ctx context.Context, cwd, base string) string {
 	// The reachability test must match the dispatcher's gate exactly.
 	// Telling a session it is INACTIVE while every call succeeds is the
 	// same divergence as the reverse, just quieter.
@@ -1673,6 +1683,10 @@ func (s *Server) stateAwareInstructionsWithBase(cwd, base string) string {
 			// advice that made agents re-track or stop on every restart.
 			if rec, pending := s.multiIndexer.PendingRepoForPath(cwd); pending {
 				if !rec.State.Loading() {
+					roots := agents.FamilyRepoRoots(s.trackedRepoRoots(), s.multiIndexer.ConfiguredRepoRoots())
+					if agents.PendingAutomaticCheckout(cwd, roots) {
+						return ServerInstructionsPendingFamilyLoad(cwd, rec, roots...)
+					}
 					return ServerInstructionsUnavailable(rec.Root, rec.Reason)
 				}
 				// The ordinary instructions follow the loading preamble: the
@@ -1681,13 +1695,22 @@ func (s *Server) stateAwareInstructionsWithBase(cwd, base string) string {
 				phase, percent := s.WarmupProgress()
 				return ServerInstructionsLoading(rec.Label(), phase, percent) + "\n\n" + base
 			}
-			roots := s.trackedRepoRoots()
+			if serves, err := s.CheckoutServesCWDChecked(ctx, cwd); err != nil {
+				return CheckoutAdmissionInstructions(cwd, err)
+			} else if serves {
+				return s.appendLiveInstructions(cwd, base)
+			}
+			roots := agents.FamilyRepoRoots(s.trackedRepoRoots(), s.multiIndexer.ConfiguredRepoRoots())
 			if agents.PendingAutomaticCheckout(cwd, roots) {
 				return ServerInstructionsPendingAutomaticCheckout(cwd, roots...)
 			}
 			return ServerInstructionsUntracked(cwd, roots...)
 		}
 	}
+	return s.appendLiveInstructions(cwd, base)
+}
+
+func (s *Server) appendLiveInstructions(cwd, base string) string {
 	if facts := s.liveInstructionFacts(cwd); facts != "" {
 		base = base + "\n\n" + facts
 	}

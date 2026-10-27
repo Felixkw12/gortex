@@ -73,7 +73,7 @@ func TestRulePreambleRoutesByOutcomeAndPreservesExactIdentifiers(t *testing.T) {
 
 func sessionGuidanceGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", append([]string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
@@ -105,15 +105,25 @@ func TestRenderCwdCoverageWaitsForAutomaticFamilyCheckout(t *testing.T) {
 
 	status := &daemon.StatusResponse{TrackedRepos: []daemon.TrackedRepoStatus{{Name: "main", Path: main}}}
 	got := renderCwdCoverage(linked, status)
-	if !strings.Contains(got, "awaiting automatic discovery") || !strings.Contains(got, "Do not run `gortex track`") {
+	if !strings.Contains(got, "Checkout discovery is pending") || !strings.Contains(got, "Do not run `gortex track`") {
 		t.Fatalf("linked worktree received no neutral discovery guidance:\n%s", got)
 	}
 	if strings.Contains(got, "`gortex track "+linked+"`") {
 		t.Fatalf("linked worktree was told to become a dedicated graph:\n%s", got)
 	}
+	previousRoots := hookConfiguredRepoRoots
+	t.Cleanup(func() { hookConfiguredRepoRoots = previousRoots })
+	hookConfiguredRepoRoots = func() []string { return []string{main} }
+	configuredOnly := renderCwdCoverage(linked, &daemon.StatusResponse{})
+	if !strings.Contains(configuredOnly, "Checkout discovery is pending") || strings.Contains(configuredOnly, "gortex track "+linked) || cwdUntracked(linked, nil) {
+		t.Fatalf("unregistered configured family was classified as unrelated: %s", configuredOnly)
+	}
+	if strings.Contains(strings.ReplaceAll(configuredOnly, "no reconnect is needed", ""), "reconnect") {
+		t.Fatal("configured family received a reconnect instruction")
+	}
 	reverse := &daemon.StatusResponse{TrackedRepos: []daemon.TrackedRepoStatus{{Name: "linked", Path: linked}}}
 	reverseGuidance := renderCwdCoverage(main, reverse)
-	if !strings.Contains(reverseGuidance, "awaiting automatic discovery") || strings.Contains(reverseGuidance, "`gortex track "+main+"`") {
+	if !strings.Contains(reverseGuidance, "Checkout discovery is pending") || strings.Contains(reverseGuidance, "`gortex track "+main+"`") {
 		t.Fatalf("primary checkout was not treated as automatic when a linked family member is tracked:\n%s", reverseGuidance)
 	}
 

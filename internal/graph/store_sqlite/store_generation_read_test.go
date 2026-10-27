@@ -2101,6 +2101,7 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.ExistingNodeIDFinder)(nil), probe: "ExistingNodeIDs"},
 		{iface: (*graph.ExtractCandidatesScanner)(nil), probe: "ExtractCandidates"},
 		{iface: (*graph.FileBatchEvicter)(nil), skip: skipWrite, writeFence: "TestGenerationScopedFileEvict"},
+		{iface: (*graph.FileIdentityBatchEvicter)(nil), skip: skipWrite, writeFence: "TestFileIdentityEvictionIsGenerationScoped"},
 		{iface: (*graph.FileEditingContext)(nil), probe: "FileEditingContext"},
 		{iface: (*graph.FileImportAggregator)(nil), probe: "FileImportCounts"},
 		{iface: (*graph.ScopedOutlineAggregator)(nil), probe: "ScopedOutlineCounts"},

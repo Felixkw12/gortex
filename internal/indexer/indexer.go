@@ -5136,7 +5136,7 @@ func (idx *Indexer) indexFile(
 	// first leaves the file at zero nodes whenever the on-disk bytes are
 	// transiently unparseable (a save mid-edit) — a failed extraction
 	// then returns early and the symbols stay nuked. Capturing the old
-	// state up front and deferring the actual eviction to evictExisting()
+	// state up front and deferring the actual eviction to evictExisting(result)
 	// keeps the file stale-but-present on failure (stale beats empty) and
 	// shrinks the no-nodes window to the gap between evict and AddBatch.
 	//
@@ -5144,11 +5144,13 @@ func (idx *Indexer) indexFile(
 	// incremental clone index can drop their CMS/LSH contributions —
 	// EvictFile removes the nodes (and their clone_sig) from the graph,
 	// so it must be captured before evictExisting runs.
+	priorNodes, legacyIDs, legacyPath := idx.filePriorWithLegacy(graphPath, idx.graph.GetFileNodes(graphPath))
+	var legacyCarried []*graph.Edge
 	var oldFuncIDs []string
-	evictExisting := func() {
+	evictExisting := func(result *parser.ExtractionResult) {
 		idx.invalidateGoModuleSourceStamp(relPath)
 		var oldFTSNodeIDs []string
-		for _, n := range idx.graph.GetFileNodes(graphPath) {
+		for _, n := range priorNodes {
 			if n == nil {
 				continue
 			}
@@ -5164,11 +5166,33 @@ func (idx *Indexer) indexFile(
 		// batch replacement by deleting its prior documents explicitly;
 		// canonical contracts follow the store's owner-retention decision.
 		idx.deleteSymbolFTS(oldFTSNodeIDs)
-		npmConsumers := idx.restubIncomingRefs(graphPath)
+		var npmConsumers []string
+		if len(legacyIDs) == 0 {
+			npmConsumers = idx.restubIncomingRefs(graphPath)
+		} else {
+			// Extraction is still unprefixed here. Build only the identity surface
+			// needed by the same incoming frontier used by the structural batch.
+			fresh := &parser.ExtractionResult{}
+			for _, node := range extractionNodes(result) {
+				if node == nil {
+					continue
+				}
+				copied := *node
+				copied.ID = idx.prefixPath(node.ID)
+				fresh.Nodes = append(fresh.Nodes, &copied)
+			}
+			stage := &incrementalBatchStage{graphPath: graphPath, legacyPath: legacyPath, priorNodes: priorNodes, result: fresh}
+			stages := []*incrementalBatchStage{stage}
+			legacyCarried, npmConsumers = restubIncomingRefsFromView(idx.graph, stages, loadIncrementalPriorView(idx.graph, stages))
+		}
 		if markerBatch != nil {
 			markerBatch.npmConsumerFiles = appendUniqueSorted(markerBatch.npmConsumerFiles, npmConsumers...)
 		}
-		idx.graph.EvictFile(graphPath)
+		if len(legacyIDs) == 0 {
+			idx.graph.EvictFile(graphPath)
+		} else {
+			idx.evictFileIdentities([]string{graphPath}, legacyIDs, []string{legacyPath})
+		}
 	}
 
 	// A delta probe already owns a shared admission lease together with its
@@ -5234,7 +5258,7 @@ func (idx *Indexer) indexFile(
 					return err
 				}
 			}
-			evictExisting()
+			evictExisting(result)
 			idx.graph.AddBatch([]*graph.Node{n}, nil)
 			if !idx.recordFileReadVersion(mtimeKey, absPath, readVersion) {
 				return idx.fileIndexFailureError(absPath)
@@ -5258,7 +5282,7 @@ func (idx *Indexer) indexFile(
 					return err
 				}
 			}
-			evictExisting()
+			evictExisting(result)
 			idx.graph.AddBatch([]*graph.Node{n}, nil)
 			if !idx.recordFileReadVersion(mtimeKey, absPath, readVersion) {
 				return idx.fileIndexFailureError(absPath)
@@ -5360,7 +5384,7 @@ func (idx *Indexer) indexFile(
 			return err
 		}
 	}
-	evictExisting()
+	evictExisting(result)
 
 	// Coverage extractors (todos, licenses, ownership). A prepared watcher
 	// delta already ran this exact pipeline; reusing it avoids both a second
@@ -5398,6 +5422,9 @@ func (idx *Indexer) indexFile(
 	if visCaptured && priorVis != freshVis {
 		reuseIdx, priorUnresolved, priorDeclarations = nil, nil, nil
 	}
+	if len(legacyIDs) > 0 {
+		reuseIdx, priorUnresolved = nil, nil
+	}
 	if reused := applyResolvedOutEdges(idx.graph, result.Edges, reuseIdx, newNodeIDs); reused > 0 {
 		idx.logger.Debug("indexer: reused prior resolutions",
 			zap.Int("edges", reused), zap.String("file", graphPath))
@@ -5409,7 +5436,7 @@ func (idx *Indexer) indexFile(
 	// the node.
 	idx.replaceContentSections(graphPath, result.Nodes, false)
 
-	idx.graph.AddBatch(result.Nodes, result.Edges)
+	idx.graph.AddBatch(result.Nodes, append(result.Edges, legacyCarried...))
 	idx.persistFileMeta(relPath, src, result)
 	idx.persistConstValues(result)
 	// No subsequent stage reads source bytes or the parse tree. Release both
@@ -7243,6 +7270,8 @@ func (idx *Indexer) incrementalReindexPathsMode(
 			staleFiles = append(staleFiles, absPath)
 		}
 	}
+
+	staleFiles = append(staleFiles, idx.legacyFileCandidates(diskFiles)...)
 
 	projectionCandidates := make([]string, 0, 1)
 	for relPath := range diskFiles {

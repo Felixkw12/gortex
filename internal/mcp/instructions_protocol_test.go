@@ -31,7 +31,7 @@ func TestProtocolDiscoveryTransientInstructions(t *testing.T) {
 	}{
 		{"ready", routed, main, []string{"When Gortex can serve the step:", "Index status: ready"}},
 		{"loading", loading, repo, []string{"LOADING repo-l", "parallel_parse, 15%", "no reconnect is needed"}},
-		{"pending", routed, linked, []string{"awaiting automatic discovery", "Retry after other work", "after a few attempts", "Reconnecting or requesting reconciliation is a user action"}},
+		{"pending", routed, linked, []string{"checkout discovery is pending", "view_building", "no reconnect is needed", "Do not run `gortex track`", "Retry after other work", "after a few attempts"}},
 	} {
 		for _, client := range []string{"claude-code", "codex"} {
 			for _, method := range []string{"initialize", "server/discover"} {

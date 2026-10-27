@@ -293,6 +293,7 @@ func contractCoreUnprobedCapabilities() []contractCoreCapName {
 		{"ExternalCallCandidateIterator", capOf[graph.ExternalCallCandidateIterator]},
 		{"ExternalCallCandidates", capOf[graph.ExternalCallCandidates]},
 		{"FileBatchEvicter", capOf[graph.FileBatchEvicter]},
+		{"FileIdentityBatchEvicter", capOf[graph.FileIdentityBatchEvicter]},
 		{"FileIndexFailureReader", capOf[graph.FileIndexFailureReader]},
 		{"FileIndexFailureWriter", capOf[graph.FileIndexFailureWriter]},
 		{"FileLanguageNodeSequencer", capOf[graph.FileLanguageNodeSequencer]},

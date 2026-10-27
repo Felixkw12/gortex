@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/agents"
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/pathkey"
 	"github.com/zzet/gortex/internal/profiles"
@@ -162,6 +163,10 @@ func fetchDaemonProbeAsStatus() (*daemon.StatusResponse, error) {
 		return nil, err
 	}
 
+	return sessionStartStatusFromProbe(probe), nil
+}
+
+func sessionStartStatusFromProbe(probe daemon.ProbeResponse) *daemon.StatusResponse {
 	status := &daemon.StatusResponse{
 		Version:            probe.Version,
 		PID:                probe.PID,
@@ -178,9 +183,12 @@ func fetchDaemonProbeAsStatus() (*daemon.StatusResponse, error) {
 			Name:      r.Name,
 			Workspace: r.Workspace,
 			Project:   r.Project,
+			Loading:   r.State == daemon.RepoStateLoading,
+			Unloaded:  r.State == daemon.RepoStateLoading || r.State == daemon.RepoStateFailed || r.State == daemon.RepoStateMissing,
+			Missing:   r.State == daemon.RepoStateMissing,
 		})
 	}
-	return status, nil
+	return status
 }
 
 // sessionStartProbeBudget bounds the fallback. Probe touches no store, no
@@ -415,7 +423,7 @@ func renderCwdCoverage(cwd string, s *daemon.StatusResponse) string {
 			abs, len(contained), summary, len(contained), example)
 	default:
 		if pendingAutomaticCheckout(abs, s.TrackedRepos) {
-			return fmt.Sprintf("⏳ **cwd `%s` is a Git checkout awaiting automatic discovery.** Its Git family is already tracked, but the overlay route is not published yet. Do not run `gortex track`; wait for reconciliation and reconnect. Explicit tracking is only for a user-requested dedicated graph.\n", abs)
+			return fmt.Sprintf("⏳ **Checkout discovery is pending for cwd `%s`.** %s\n", abs, agents.PendingAutomaticCheckoutGuidance)
 		}
 		return fmt.Sprintf("⚠️  **cwd `%s` is not covered by any tracked repo.** Read/Grep/Glob/Bash will fall through to soft guidance only — graph tools won't be available for this directory.\n\nTo enable enforcement: `gortex track %s`\n",
 			abs, abs)
@@ -429,7 +437,17 @@ func pendingAutomaticCheckout(cwd string, repos []daemon.TrackedRepoStatus) bool
 			roots = append(roots, repo.Path)
 		}
 	}
-	return agents.PendingAutomaticCheckout(cwd, roots)
+	return agents.PendingAutomaticCheckout(cwd, agents.FamilyRepoRoots(roots, hookConfiguredRepoRoots()))
+}
+
+// Hooks read only declarations; an unavailable config does not invent family
+// membership. Tests can supply a private snapshot without reading user state.
+var hookConfiguredRepoRoots = func() []string {
+	gc, err := config.LoadGlobal()
+	if err != nil {
+		return nil
+	}
+	return gc.ConfiguredRepoRoots()
 }
 
 // classifyCwd partitions the relationship between cwd and the daemon's
@@ -442,6 +460,9 @@ func classifyCwd(cwd string, repos []daemon.TrackedRepoStatus) (exact *daemon.Tr
 	var enclosing *daemon.TrackedRepoStatus
 	for i := range repos {
 		repo := repos[i]
+		if repo.Unloaded && !repo.Loading {
+			continue // a terminal configured declaration is not live graph coverage
+		}
 		repoPath := filepath.Clean(repo.Path)
 		if pathkey.EqualPaths(repoPath, cwd) {
 			exact = &repos[i]

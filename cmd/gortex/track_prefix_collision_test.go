@@ -182,7 +182,7 @@ func TestRunTrackOfflineUsesWorktreeInstancePrefix(t *testing.T) {
 	require.NoError(t, gc.Save())
 	origWait, origName, origAs := trackWait, trackName, trackAsWorktree
 	origEnsure := trackEnsureDaemonReadyFn
-	trackWait, trackName, trackAsWorktree = false, "", false
+	trackWait, trackName, trackAsWorktree = false, "", true // This test explicitly requests an independent graph.
 	trackEnsureDaemonReadyFn = func(bool) daemonDecision { return daemonUnavailable }
 	t.Cleanup(func() {
 		trackWait, trackName, trackAsWorktree = origWait, origName, origAs
