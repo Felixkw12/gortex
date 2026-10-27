@@ -1,0 +1,134 @@
+package indexer
+
+import (
+	"path/filepath"
+	"strings"
+
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/parser"
+)
+
+// legacyFilePath is deliberately host-specific. On POSIX a backslash is a
+// legal filename character, not an alternative spelling of a directory slash.
+// Old Windows extractors used native relative paths beneath the repo prefix.
+func (idx *Indexer) legacyFilePath(graphPath string) string {
+	if _, ok := idx.graph.(graph.FileIdentityBatchEvicter); !ok {
+		return ""
+	}
+	if filepath.Separator != '\\' {
+		return ""
+	}
+	rel := strings.TrimPrefix(graphPath, idx.prefixPath(""))
+	if !strings.Contains(rel, "/") {
+		return ""
+	}
+	return idx.prefixPath(filepath.FromSlash(rel))
+}
+
+// legacyFileCandidates only probes exact file identities in the requested
+// discovery frontier. An unchanged explicit reindex must reach the repair
+// before the mtime/Merkle and extraction-fingerprint shortcuts.
+func (idx *Indexer) legacyFileCandidates(diskFiles map[string]bool) []string {
+	if filepath.Separator != '\\' {
+		return nil
+	}
+	var ids []string
+	rels := make(map[string]string)
+	for rel := range diskFiles {
+		if native := idx.legacyFilePath(idx.prefixPath(rel)); native != "" {
+			ids = append(ids, native)
+			rels[native] = rel
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var paths []string
+	for id, node := range idx.graph.GetNodesByIDs(ids) {
+		if node != nil && (node.FilePath == id || node.FilePath == idx.prefixPath(rels[id])) {
+			paths = append(paths, filepath.Join(idx.rootPath, filepath.FromSlash(rels[id])))
+		}
+	}
+	return paths
+}
+
+// filePriorWithLegacy admits only ordinary IDs rooted in this exact file.
+// A shared license/team/module can be anchored at the old scalar path, but
+// its identity is outside this prefix and must not enter endpoint eviction.
+func (idx *Indexer) filePriorWithLegacy(graphPath string, prior []*graph.Node) ([]*graph.Node, []string, string) {
+	native := idx.legacyFilePath(graphPath)
+	if native == "" {
+		return prior, nil, ""
+	}
+	seen := make(map[string]bool, len(prior))
+	var ids []string
+	for _, node := range prior {
+		if node != nil {
+			seen[node.ID] = true
+			if node.ID == native || strings.HasPrefix(node.ID, native+"::") {
+				ids = append(ids, node.ID)
+			}
+		}
+	}
+	for _, node := range idx.graph.GetFileNodesByPaths([]string{native})[native] {
+		if node == nil || (node.ID != native && !strings.HasPrefix(node.ID, native+"::")) {
+			continue
+		}
+		if !seen[node.ID] {
+			prior = append(prior, node)
+			ids = append(ids, node.ID)
+			seen[node.ID] = true
+		}
+	}
+	if len(ids) == 0 {
+		return prior, nil, ""
+	}
+	return prior, ids, native
+}
+
+func (idx *Indexer) evictFileIdentities(paths, legacyIDs, legacyPaths []string) {
+	if len(legacyIDs) == 0 {
+		evictFilesBatched(idx.graph, paths)
+		return
+	}
+	// The optional capability is checked before discovery/staging; never widen
+	// an unsupported store's eviction to a whole native file-path bucket.
+	idx.graph.(graph.FileIdentityBatchEvicter).EvictFilesWithNodeIDs(paths, legacyIDs)
+	evictDetachedRecordedEdges(idx.graph, append(append([]string(nil), paths...), legacyPaths...))
+	idx.deleteIncrementalSidecars(legacyPaths)
+	idx.deleteRefFactsForFiles(idx.repoPrefix, legacyPaths)
+	idx.clearIncrementalContent(legacyPaths)
+	idx.deleteEnrichmentByNodeIDs(legacyIDs)
+}
+
+// legacyReplacements maps an identity-only rename for incoming imports and
+// caller-owned dataflow. Calls still take the normal declaration restub path.
+func legacyReplacements(stage *incrementalBatchStage) map[string]string {
+	if stage.legacyPath == "" {
+		return nil
+	}
+	freshByID := make(map[string]*graph.Node, len(stage.result.Nodes))
+	for _, fresh := range stage.result.Nodes {
+		if fresh != nil {
+			freshByID[fresh.ID] = fresh
+		}
+	}
+	replacements := make(map[string]string)
+	for _, node := range stage.priorNodes {
+		if node == nil || (node.ID != stage.legacyPath && !strings.HasPrefix(node.ID, stage.legacyPath+"::")) {
+			continue
+		}
+		id := stage.graphPath + strings.TrimPrefix(node.ID, stage.legacyPath)
+		if fresh := freshByID[id]; fresh != nil && fresh.Kind == node.Kind && fresh.Name == node.Name {
+			replacements[node.ID] = id
+		}
+	}
+	return replacements
+}
+
+func extractionNodes(result *parser.ExtractionResult) []*graph.Node {
+	if result == nil {
+		return nil
+	}
+	return result.Nodes
+}
