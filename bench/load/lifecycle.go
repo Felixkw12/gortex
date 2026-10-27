@@ -18,6 +18,7 @@ type privateRepo struct {
 	Corpus Corpus
 	Path   string
 	File   string
+	Prefix string
 }
 
 type privateRun struct {
@@ -293,6 +294,7 @@ func (p *privateRun) start() error {
 		return err
 	}
 	cmd := exec.Command(p.Binary, "--config", p.Config, "daemon", "start", "--backend-path", p.Store, "--tools", "facade-v1", "--tools-mode", "hide")
+	configureOwnedProcess(cmd)
 	cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = p.Root, p.Env, p.stdout, p.stderr
 	if err := cmd.Start(); err != nil {
 		_ = p.stdout.Close()
@@ -320,17 +322,25 @@ func (p *privateRun) stop(ctx context.Context) (elapsed time.Duration, forced bo
 	}()
 	select {
 	case <-p.done:
-		return 0, false, p.exitErr
+		return 0, false, errors.Join(errors.New("private daemon exited before requested shutdown"), p.exitErr, killOwnedProcess(p.process))
 	default:
 	}
 	_, controlErr := control(ctx, p.Socket, "shutdown", nil)
 	select {
 	case <-p.done:
-		return 0, false, errors.Join(controlErr, p.exitErr)
+		return 0, false, errors.Join(controlErr, p.exitErr, killOwnedProcess(p.process))
 	case <-ctx.Done():
 		forced = true
-		killErr := p.process.Process.Kill() // only the process handle we started
+		killErr := killOwnedProcess(p.process)
 		<-p.done
 		return 0, true, errors.Join(ctx.Err(), controlErr, killErr, p.exitErr)
 	}
+}
+
+func (p *privateRun) removeState() error {
+	var result error
+	for _, name := range []string{"repos", "cache", "data", "home", "config", "runtime", "tmp", "store.db", "store.db-wal", "store.db-shm"} {
+		result = errors.Join(result, os.RemoveAll(filepath.Join(p.Root, name)))
+	}
+	return result
 }

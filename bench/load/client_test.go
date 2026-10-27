@@ -192,8 +192,10 @@ func TestStubDaemonSweepTargetsBusyAndMetrics(t *testing.T) {
 
 func TestSocketConcurrentRoutingAndIndependentCancellation(t *testing.T) {
 	release := make(chan struct{})
+	blockedReceived := make(chan struct{})
 	socket := startStub(t, func(frame stubFrame) (any, *rpcError) {
 		if frame.Method == "blocked" {
+			close(blockedReceived)
 			<-release
 		}
 		if frame.Method == "slow" {
@@ -227,11 +229,24 @@ func TestSocketConcurrentRoutingAndIndependentCancellation(t *testing.T) {
 		})
 	}
 	workers.Wait()
-	short, end = context.WithTimeout(ctx, time.Millisecond)
+	short, end = context.WithCancel(ctx)
 	defer end()
-	_, err = c.call(short, "blocked", nil)
+	callDone := make(chan error, 1)
+	go func() { _, err := c.call(short, "blocked", nil); callDone <- err }()
+	select {
+	case <-blockedReceived:
+	case <-ctx.Done():
+		t.Fatal("blocked request was not received")
+	}
+	for len(c.writeGate) != 0 {
+		if waitContext(ctx, time.Millisecond) != nil {
+			t.Fatal("request writer did not finish")
+		}
+	}
+	end()
+	err = <-callDone
 	close(release)
-	if !errors.Is(err, context.DeadlineExceeded) {
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("in-flight call was not cancelled: %v", err)
 	}
 	if _, err := c.call(ctx, "fast", nil); err != nil {
