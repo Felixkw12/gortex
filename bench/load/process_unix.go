@@ -22,3 +22,6 @@ func killOwnedProcess(cmd *exec.Cmd) error {
 	}
 	return err
 }
+
+// Wait has completed, but children can still be alive in the owned Unix group.
+func cleanupExitedOwnedProcess(cmd *exec.Cmd) error { return killOwnedProcess(cmd) }

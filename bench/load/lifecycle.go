@@ -264,12 +264,14 @@ func (p *privateRun) git(ctx context.Context, dir string, args ...string) ([]byt
 	}
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir, cmd.Env = dir, p.Env
-	data, err := cmd.CombinedOutput()
+	var stderr diagnosticBuffer
+	cmd.Stderr = &stderr
+	data, err := cmd.Output()
 	if err != nil {
 		if cmd.Process != nil {
-			_ = killOwnedProcess(cmd)
+			_ = cleanupExitedOwnedProcess(cmd)
 		}
-		return nil, fmt.Errorf("git %s: %w: %s", operation, err, data)
+		return nil, fmt.Errorf("git %s in %s: %w; stderr: %s", operation, dir, err, stderr.String())
 	}
 	return data, nil
 }
@@ -358,13 +360,13 @@ func (p *privateRun) stop(ctx context.Context) (elapsed time.Duration, forced bo
 	}()
 	select {
 	case <-p.done:
-		return 0, false, errors.Join(errors.New("private daemon exited before requested shutdown"), p.exitErr, killOwnedProcess(p.process))
+		return 0, false, errors.Join(errors.New("private daemon exited before requested shutdown"), p.exitErr, cleanupExitedOwnedProcess(p.process))
 	default:
 	}
 	_, controlErr := control(ctx, p.Socket, "shutdown", nil)
 	select {
 	case <-p.done:
-		return 0, false, errors.Join(controlErr, p.exitErr, killOwnedProcess(p.process))
+		return 0, false, errors.Join(controlErr, p.exitErr, cleanupExitedOwnedProcess(p.process))
 	case <-ctx.Done():
 		forced = true
 		killErr := killOwnedProcess(p.process)
