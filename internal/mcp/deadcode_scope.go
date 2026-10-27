@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 
@@ -39,10 +40,34 @@ func (s *Server) deadCodeRepoPrefixes(ctx context.Context) []string {
 	return prefixes
 }
 
-func (s *Server) deadCodeProcesses(ctx context.Context, reader graph.Reader) *analysis.ProcessResult {
+func (s *Server) deadCodeProcesses(ctx context.Context, reader graph.Reader) (*analysis.ProcessResult, error) {
+	if s.scopeFiltersActive(ctx) {
+		if query, header, current := s.activeAnalysisQueryForAnswer(); current {
+			// Query the published base analysis, but admit entry points through the
+			// selected view. Steps of an admitted process remain global evidence.
+			if selected, ok := query.(graph.Reader); ok {
+				if bound, ok := graph.BindReadContext(selected, ctx).(graph.AnalysisQueryStore); ok {
+					query = bound
+				}
+			}
+			result, err := s.readDeadCodeProcesses(ctx, reader, query, header)
+			if errors.Is(err, graph.ErrAnalysisGenerationInactive) {
+				return nil, nil
+			}
+			if err != nil {
+				return nil, err
+			}
+			_, after, current := s.activeAnalysisQueryForAnswer()
+			if !current || after.GenerationID != header.GenerationID || after.GraphRevision != header.GraphRevision {
+				return nil, nil
+			}
+			return result, nil
+		}
+	}
+
 	processes := s.getProcesses()
 	if processes == nil || !s.scopeFiltersActive(ctx) {
-		return processes
+		return processes, nil
 	}
 	ids := make([]string, 0, len(processes.Processes))
 	for _, process := range processes.Processes {
@@ -56,5 +81,73 @@ func (s *Server) deadCodeProcesses(ctx context.Context, reader graph.Reader) *an
 			filtered.Processes = append(filtered.Processes, process)
 		}
 	}
-	return &filtered
+	return &filtered, nil
+}
+
+// readDeadCodeProcesses pages compact headers for admission and never reads
+// steps of a foreign-entry process. No scalar endpoint lookups or full-process
+// compatibility map is needed by the dead-code consumer.
+func (s *Server) readDeadCodeProcesses(ctx context.Context, reader graph.Reader, query graph.AnalysisQueryStore, header graph.AnalysisGenerationHeader) (*analysis.ProcessResult, error) {
+	result := &analysis.ProcessResult{NodeToProcs: make(map[string][]string), Truncated: header.ProcessesTruncated, TruncationReason: header.ProcessesTruncationReason}
+	cursor := ""
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		rows, next, err := query.ListAnalysisProcessSummaries(header.GenerationID, analysisGenerationQueryPage, cursor)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		ids := make([]string, 0, len(rows))
+		for _, row := range rows {
+			ids = append(ids, row.EntryPoint)
+		}
+		var nodes map[string]*graph.Node
+		if checked, ok := reader.(interface {
+			GetNodesByIDsContext(context.Context, []string) (map[string]*graph.Node, error)
+		}); ok {
+			nodes, err = checked.GetNodesByIDsContext(ctx, ids)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			nodes = graph.BindReadContext(reader, ctx).GetNodesByIDs(ids)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			if !s.analyzeNodeVisible(ctx, nodes[row.EntryPoint]) {
+				continue
+			}
+			process := analysis.Process{ID: row.ID, Name: row.Name, EntryPoint: row.EntryPoint, StepCount: row.StepCount, Score: row.Score, Truncated: row.Truncated, Files: append([]string(nil), row.Files...)}
+			ordinal := -1
+			for {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				steps, nextOrdinal, err := query.AnalysisProcessSteps(header.GenerationID, row.ID, analysisGenerationQueryPage, ordinal)
+				if err != nil {
+					return nil, err
+				}
+				for _, step := range steps {
+					process.Steps = append(process.Steps, analysis.Step{ID: step.NodeID, Depth: step.Depth})
+					result.NodeToProcs[step.NodeID] = append(result.NodeToProcs[step.NodeID], row.ID)
+				}
+				if len(steps) == 0 || nextOrdinal <= ordinal {
+					break
+				}
+				ordinal = nextOrdinal
+			}
+			result.Processes = append(result.Processes, process)
+		}
+		if len(rows) == 0 || next == "" || next == cursor {
+			break
+		}
+		cursor = next
+	}
+	return result, ctx.Err()
 }

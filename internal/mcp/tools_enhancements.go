@@ -2574,7 +2574,11 @@ func (s *Server) handleFindDeadCode(ctx context.Context, req mcp.CallToolRequest
 	opts.RepoPrefixes = s.deadCodeRepoPrefixes(ctx)
 	// Keep scope capabilities on the context-bound request reader. Unsupported
 	// composed readers retain their exact visibility-aware fallback.
-	entries := analysis.FindDeadCode(graph.BindReadContext(reader, ctx), s.deadCodeProcesses(ctx, reader), nil, opts)
+	processes, err := s.deadCodeProcesses(ctx, reader)
+	if err != nil {
+		return nil, err
+	}
+	entries := analysis.FindDeadCode(graph.BindReadContext(reader, ctx), processes, nil, opts)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
