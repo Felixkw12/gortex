@@ -18,9 +18,18 @@ import (
 )
 
 type Event struct {
-	Name, Base, Head, Author string
-	Full                     bool
-	Labels                   []string
+	Name, Base, Head, Ref, Author string
+	Full                          bool
+	Labels                        []string
+	PullRequest                   *PullRequest
+	MetadataError                 string
+}
+
+// PullRequest is event metadata, distinct from Head: CI tests the synthetic
+// merge checkout, whose second parent must be this PR's source revision.
+type PullRequest struct {
+	Number              int
+	Head, Base, BaseRef string
 }
 type Manifest struct {
 	Schema    int                 `json:"schema"`
@@ -98,6 +107,46 @@ type Change struct {
 }
 
 var commitSHA = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
+
+// testedMergeBase selects only the verified integration's first parent for
+// changed-file discovery. Dependency discovery and manifest validation still
+// use the checked-out merge, including changes that arrived on main meanwhile.
+func (p *Planner) testedMergeBase(ctx context.Context, event Event) (string, error) {
+	if event.MetadataError != "" {
+		return "", fmt.Errorf("unavailable pull-request metadata: %s", event.MetadataError)
+	}
+	pr := event.PullRequest
+	if pr == nil || pr.Number <= 0 || pr.BaseRef != "main" || event.Author == "" || event.Ref != fmt.Sprintf("refs/pull/%d/merge", pr.Number) {
+		return "", fmt.Errorf("unverified pull-request merge event")
+	}
+	if !commitSHA.MatchString(event.Base) || !commitSHA.MatchString(event.Head) || !commitSHA.MatchString(pr.Head) || pr.Base != event.Base {
+		return "", fmt.Errorf("invalid or inconsistent pull-request revisions")
+	}
+	actual, err := p.exec(ctx, p.Env, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	if actual != event.Head {
+		return "", fmt.Errorf("checkout does not match the event revision")
+	}
+	text, err := p.exec(ctx, p.Env, "git", "show", "--no-patch", "--format=%P", event.Head)
+	if err != nil {
+		return "", err
+	}
+	parents := strings.Fields(text)
+	if len(parents) != 2 || !commitSHA.MatchString(parents[0]) || !commitSHA.MatchString(parents[1]) {
+		return "", fmt.Errorf("tested pull-request revision is not a two-parent merge")
+	}
+	if parents[1] != pr.Head {
+		return "", fmt.Errorf("tested merge second parent does not match the pull-request head")
+	}
+	// A normal base advance preserves ancestry. Rewrites or unrelated metadata
+	// are uncertain, so retain the full-suite fallback rather than guessing.
+	if _, err := p.exec(ctx, p.Env, "git", "merge-base", "--is-ancestor", event.Base, parents[0]); err != nil {
+		return "", fmt.Errorf("tested merge base is not descended from the event base: %w", err)
+	}
+	return parents[0], nil
+}
 
 func (p *Planner) Changes(ctx context.Context, base, head string) ([]Change, error) {
 	if !commitSHA.MatchString(base) || !commitSHA.MatchString(head) {
@@ -397,7 +446,12 @@ func (p *Planner) Plan(ctx context.Context, event Event) (Manifest, error) {
 	case event.Author == "dependabot[bot]":
 		m.Reason = "full suite for Dependabot dependency updates"
 	default:
-		changes, err = p.Changes(ctx, event.Base, event.Head)
+		var comparisonBase string
+		comparisonBase, err = p.testedMergeBase(ctx, event)
+		if err == nil {
+			m.Base = comparisonBase
+			changes, err = p.Changes(ctx, comparisonBase, event.Head)
+		}
 		if err == nil {
 			for _, c := range changes {
 				if err = ordinaryChange(c); err != nil {
