@@ -16,6 +16,7 @@ import (
 type staleDaemonFixture struct {
 	mu       sync.Mutex
 	version  string
+	alive    bool
 	stops    atomic.Int32
 	spawns   atomic.Int32
 	restarts atomic.Int32
@@ -25,8 +26,12 @@ func installStaleDaemonFixture(t *testing.T, daemonVer, binaryVer string) *stale
 	t.Helper()
 	isolateSpawnLock(t)
 	t.Cleanup(restoreSeams)
-	f := &staleDaemonFixture{version: daemonVer}
-	isDaemonRunning = func() bool { return true }
+	f := &staleDaemonFixture{version: daemonVer, alive: true}
+	isDaemonRunning = func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.alive
+	}
 	stopIntentActive = func() bool { return false }
 	serviceActive = func() bool { return false }
 	serviceRestart = func(io.Writer) error {
@@ -40,17 +45,24 @@ func installStaleDaemonFixture(t *testing.T, daemonVer, binaryVer string) *stale
 	runningDaemonInfo = func() daemonIdentity {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if !f.alive {
+			return daemonIdentity{err: daemon.ErrDaemonUnavailable}
+		}
 		return daemonIdentity{version: f.version, protocol: daemon.ProtocolVersion, protocolKnown: true}
 	}
-	stopStaleDaemon = func() error {
+	stopStaleDaemon = func(daemonIdentity) error {
 		f.stops.Add(1)
 		time.Sleep(20 * time.Millisecond) // widen the window for racing callers
+		f.mu.Lock()
+		f.alive = false
+		f.mu.Unlock()
 		return nil
 	}
 	spawnDaemon = func() error {
 		f.spawns.Add(1)
 		f.mu.Lock()
 		f.version = binaryVer
+		f.alive = true
 		f.mu.Unlock()
 		return nil
 	}
@@ -123,7 +135,7 @@ func TestEnsureDaemon_StaleReplaceIsSingleFlight(t *testing.T) {
 
 func TestEnsureDaemon_StaleStopFailureKeepsOldDaemon(t *testing.T) {
 	f := installStaleDaemonFixture(t, "v0.70.0", "v0.71.0")
-	stopStaleDaemon = func() error { f.stops.Add(1); return errors.New("stop failed") }
+	stopStaleDaemon = func(daemonIdentity) error { f.stops.Add(1); return errors.New("stop failed") }
 	if d := ensureDaemonReady(true); d != daemonReady {
 		t.Fatalf("a failed stop must fall back to the running daemon, got %d", d)
 	}

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -59,7 +58,7 @@ func restoreSeams() {
 	stopIntentActive = daemon.StopIntentActive
 	runningDaemonInfo = dialRunningDaemonIdentity
 	binaryVersion = canonicalVersion
-	stopStaleDaemon = func() error { return stopRunningDaemon(io.Discard) }
+	stopStaleDaemon = stopDaemonForHandoff
 	serviceActive = defaultServiceActive
 	serviceRestart = defaultServiceRestart
 }

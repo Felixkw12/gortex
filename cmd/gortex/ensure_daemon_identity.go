@@ -16,6 +16,7 @@ type daemonIdentity struct {
 	protocol      int
 	protocolKnown bool
 	instance      string
+	peerPID       int
 	err           error
 }
 
@@ -27,7 +28,7 @@ func dialRunningDaemonIdentity() daemonIdentity {
 	defer c.Close()
 	// A successful handshake proves protocol equality even when an older
 	// daemon omitted the new identity field.
-	return daemonIdentity{version: c.Ack.DaemonVersion, protocol: daemon.ProtocolVersion, protocolKnown: true, instance: c.Ack.DaemonInstance}
+	return daemonIdentity{version: c.Ack.DaemonVersion, protocol: daemon.ProtocolVersion, protocolKnown: true, instance: c.Ack.DaemonInstance, peerPID: c.PeerPID}
 }
 
 // Newer in either known dimension vetoes replacement, including contradictory
@@ -120,7 +121,7 @@ func waitForReplacementDaemon() (daemonIdentity, error) {
 func daemonIdentityFromMismatch(err error) daemonIdentity {
 	var mismatch *daemon.ProtocolMismatchError
 	if errors.As(err, &mismatch) {
-		return daemonIdentity{version: mismatch.DaemonVersion, protocol: mismatch.DaemonProtocol, protocolKnown: mismatch.DaemonProtocolKnown, err: err}
+		return daemonIdentity{version: mismatch.DaemonVersion, protocol: mismatch.DaemonProtocol, protocolKnown: mismatch.DaemonProtocolKnown, instance: mismatch.DaemonInstance, peerPID: mismatch.PeerPID, err: err}
 	}
 	return daemonIdentity{err: err}
 }

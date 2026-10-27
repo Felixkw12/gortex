@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -81,5 +83,11 @@ func TestServerProtocolRejectionAnnouncesIdentity(t *testing.T) {
 	var mismatch *ProtocolMismatchError
 	if !errors.As(err, &mismatch) || mismatch.DaemonVersion != srv.Version || !mismatch.DaemonProtocolKnown || mismatch.DaemonProtocol != ProtocolVersion || mismatch.ClientProtocol != ProtocolVersion+1 {
 		t.Fatalf("server rejection identity = %v", err)
+	}
+	if (runtime.GOOS == "darwin" || runtime.GOOS == "linux") && mismatch.PeerPID != os.Getpid() {
+		t.Fatalf("socket peer PID = %d, expected test server %d", mismatch.PeerPID, os.Getpid())
+	}
+	if mismatch.DaemonInstance == "" {
+		t.Fatal("current server omitted rejection instance identity")
 	}
 }

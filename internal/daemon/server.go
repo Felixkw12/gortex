@@ -543,6 +543,7 @@ func (s *Server) handshake(conn net.Conn, reader *bufio.Reader) (*Session, error
 			ErrorCode:      ErrProtocolMismatch,
 			DaemonVersion:  s.Version,
 			DaemonProtocol: &protocol,
+			DaemonInstance: s.instanceID,
 			ErrorMsg: fmt.Sprintf("daemon expects protocol %d, client sent %d",
 				ProtocolVersion, h.Version),
 		})

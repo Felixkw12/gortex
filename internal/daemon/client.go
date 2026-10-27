@@ -17,9 +17,10 @@ import (
 //
 // A Client is not safe for concurrent use — each caller owns its own.
 type Client struct {
-	Conn   net.Conn
-	reader *bufio.Reader
-	Ack    HandshakeAck
+	Conn    net.Conn
+	reader  *bufio.Reader
+	Ack     HandshakeAck
+	PeerPID int // kernel socket peer identity; zero when unavailable
 }
 
 // Dial connects to the daemon on the default socket path and completes a
@@ -78,16 +79,19 @@ func DialTo(socketPath string, h Handshake) (*Client, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("parse handshake ack: %w", err)
 	}
+	peerPID := peerProcessID(conn)
 	if !ack.OK {
 		_ = conn.Close()
 		// Preserve mismatch identity for direction-aware startup handoff. It is
 		// never evidence that the daemon is absent or embedded mode is safe.
 		if ack.ErrorCode == ErrProtocolMismatch {
-			return nil, protocolMismatch(ack, h.Version)
+			mismatch := protocolMismatch(ack, h.Version)
+			mismatch.PeerPID = peerPID
+			return nil, mismatch
 		}
 		return nil, fmt.Errorf("daemon rejected handshake [%s]: %s", ack.ErrorCode, ack.ErrorMsg)
 	}
-	return &Client{Conn: conn, reader: reader, Ack: ack}, nil
+	return &Client{Conn: conn, reader: reader, Ack: ack, PeerPID: peerPID}, nil
 }
 
 // Close tears down the connection.

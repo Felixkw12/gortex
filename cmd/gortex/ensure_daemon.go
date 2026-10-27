@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -137,7 +138,7 @@ var (
 	stopIntentActive  = daemon.StopIntentActive
 	runningDaemonInfo = dialRunningDaemonIdentity
 	binaryVersion     = canonicalVersion
-	stopStaleDaemon   = func() error { return stopRunningDaemon(io.Discard) }
+	stopStaleDaemon   = stopDaemonForHandoff
 )
 
 // spawnBareDaemon is the autostart default for spawnDaemon. Autostart has no
@@ -270,14 +271,30 @@ func replaceStaleDaemon(observed daemonIdentity) (daemonDecision, error) {
 		logDaemonHandoff(identity, current)
 		return daemonReady, nil
 	}
-	if err := stopStaleDaemon(); err != nil {
+	if err := stopStaleDaemon(identity); err != nil {
 		return daemonReady, daemonHandoffError(identity, "stop old daemon", err)
+	}
+	// The store-lock wait may have allowed an independently started daemon
+	// to appear. Revalidate under the spawn lock before starting anything.
+	current := runningDaemonInfo()
+	if current.err == nil {
+		if !current.olderThan(binaryVersion()) {
+			logDaemonHandoff(identity, current)
+			return daemonReady, nil
+		}
+		return daemonReady, daemonHandoffError(identity, "old daemon still running", fmt.Errorf("shutdown did not retire the old daemon"))
+	}
+	if !errors.Is(current.err, daemon.ErrDaemonUnavailable) {
+		if current.mismatch() {
+			return daemonReady, daemonMismatchError(current)
+		}
+		return daemonUnavailable, daemonHandoffError(identity, "recheck daemon after close", current.err)
 	}
 	if err := spawnDaemon(); err != nil {
 		stampSpawnFailure()
 		return daemonUnavailable, daemonHandoffError(identity, "start replacement", err)
 	}
-	current, err := waitForReplacementDaemon()
+	current, err = waitForReplacementDaemon()
 	if err != nil {
 		return daemonUnavailable, daemonHandoffError(identity, "wait for replacement", err)
 	}

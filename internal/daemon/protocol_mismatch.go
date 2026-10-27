@@ -10,6 +10,8 @@ import (
 // handshake. Protocol zero is valid; DaemonProtocolKnown distinguishes it from
 // a rejection too old or malformed to identify the daemon's protocol.
 type ProtocolMismatchError struct {
+	PeerPID             int
+	DaemonInstance      string
 	DaemonVersion       string
 	DaemonProtocol      int
 	DaemonProtocolKnown bool
@@ -26,6 +28,7 @@ func (e *ProtocolMismatchError) Unwrap() error { return ErrProtocolVersionMismat
 func protocolMismatch(ack HandshakeAck, clientProtocol int) *ProtocolMismatchError {
 	e := &ProtocolMismatchError{
 		DaemonVersion:  ack.DaemonVersion,
+		DaemonInstance: ack.DaemonInstance,
 		ClientProtocol: clientProtocol,
 		Message:        ack.ErrorMsg,
 	}
