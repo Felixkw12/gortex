@@ -21,6 +21,11 @@ func TestProtocolFallbackEmbedded(t *testing.T) {
 	if ShouldFallBackToEmbedded(wrapped) {
 		t.Error("a wrapped ErrProtocolVersionMismatch must not trigger embedded fallback")
 	}
+	// A failed handoff can carry both the original live-daemon refusal and
+	// a later unavailable replacement. That still must not open a store.
+	if ShouldFallBackToEmbedded(errors.Join(ErrDaemonUnavailable, wrapped)) {
+		t.Error("a later absence must not erase an observed protocol mismatch")
+	}
 	if ShouldFallBackToEmbedded(errors.New("permission denied")) {
 		t.Error("an unrelated error must NOT trigger fallback (would mask a real bug)")
 	}

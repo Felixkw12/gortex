@@ -95,6 +95,18 @@ func TestRunMCPMismatchNeverCreatesEmbeddedStore(t *testing.T) {
 				t.Chdir(repo)
 				stubUnavailableMCPDaemon(t)
 				t.Cleanup(restoreSeams)
+				if strings.HasPrefix(tc.name, "newer") {
+					t.Setenv("GORTEX_AUTOSTART", "1")
+				}
+				stops, spawns := 0, 0
+				stopStaleDaemon = func(daemonIdentity) error {
+					stops++
+					return errors.New("unexpected replacement stop")
+				}
+				spawnDaemon = func() error {
+					spawns++
+					return errors.New("unexpected replacement spawn")
+				}
 				binaryVersion = func() string { return "v0.64.12" }
 				isDaemonRunning = daemon.IsRunning
 				runningDaemonInfo = dialRunningDaemonIdentity
@@ -117,6 +129,9 @@ func TestRunMCPMismatchNeverCreatesEmbeddedStore(t *testing.T) {
 				err := runMCP(cmd, nil)
 				if !errors.Is(err, daemon.ErrProtocolVersionMismatch) {
 					t.Fatalf("runMCP = %v", err)
+				}
+				if stops != 0 || spawns != 0 || !daemon.IsRunningAt(socket) {
+					t.Fatalf("refusal disturbed running daemon: stops=%d spawns=%d", stops, spawns)
 				}
 				for _, want := range []string{"protocol", "CLI v0.64.12", "daemon "} {
 					if !strings.Contains(err.Error(), want) {

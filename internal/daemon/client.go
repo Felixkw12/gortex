@@ -236,7 +236,7 @@ func isTimeoutErr(err error) bool {
 // (permissions, a genuinely broken socket) is a real failure the caller must
 // surface.
 func ShouldFallBackToEmbedded(err error) bool {
-	return errors.Is(err, ErrDaemonUnavailable)
+	return errors.Is(err, ErrDaemonUnavailable) && !errors.Is(err, ErrProtocolVersionMismatch)
 }
 
 // isNoDaemonErr returns true for the subset of dial errors that mean
