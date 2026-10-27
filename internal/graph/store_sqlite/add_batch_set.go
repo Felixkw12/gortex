@@ -337,6 +337,7 @@ func insertNodeChunksTxWithConflict(tx *sql.Tx, viewGen int64, nodes []*graph.No
 		}
 
 		if returnChanged {
+			rowsAt := rowsChanged
 			var rows *sql.Rows
 			if stmt != nil {
 				rows, err = stmt.Query(args...)
@@ -365,14 +366,15 @@ func insertNodeChunksTxWithConflict(tx *sql.Tx, viewGen int64, nodes []*graph.No
 			if closeErr := rows.Close(); closeErr != nil {
 				return rowsChanged, statements, changedIDs, closeErr
 			}
+			nodeRowsWritten.Add(int64(rowsChanged - rowsAt))
 			continue
 		}
 
 		var result sql.Result
 		if stmt != nil {
-			result, err = stmt.Exec(args...)
+			result, err = countNodeWrite(stmt.Exec(args...))
 		} else {
-			result, err = tx.Exec(query, args...)
+			result, err = countNodeWrite(tx.Exec(query, args...))
 		}
 		if err != nil {
 			if retryAtLowerLimit(err) {
@@ -473,6 +475,7 @@ func insertEdgeChunksTxLimited(tx *sql.Tx, viewGen int64, edges []*graph.Edge, r
 		}
 
 		if returnInserted {
+			rowsAt := rowsInserted
 			var rows *sql.Rows
 			if stmt != nil {
 				rows, err = stmt.Query(args...)
@@ -501,14 +504,15 @@ func insertEdgeChunksTxLimited(tx *sql.Tx, viewGen int64, edges []*graph.Edge, r
 			if closeErr := rows.Close(); closeErr != nil {
 				return rowsInserted, statements, insertedKeys, closeErr
 			}
+			edgeRowsWritten.Add(int64(rowsInserted - rowsAt))
 			continue
 		}
 
 		var result sql.Result
 		if stmt != nil {
-			result, err = stmt.Exec(args...)
+			result, err = countEdgeWrite(stmt.Exec(args...))
 		} else {
-			result, err = tx.Exec(query, args...)
+			result, err = countEdgeWrite(tx.Exec(query, args...))
 		}
 		if err != nil {
 			if retryAtLowerLimit(err) {

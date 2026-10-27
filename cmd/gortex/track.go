@@ -182,16 +182,18 @@ func runTrack(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("path is not a directory: %s", absPath)
 	}
 
-	emitTrackBanner(w, absPath, daemon.IsRunning())
-
-	// 1. Config write FIRST. Registering a repo is a config operation
-	//    that always succeeds with no daemon, so `gortex track` is
-	//    offline-safe — the durable source of truth is written before any
-	//    daemon contact.
+	// Read-only preflight must precede every mutation: a linked worktree of
+	// an existing family is automatically served unless explicitly requested
+	// as an independent graph. Accepted tracks still persist before track RPC.
 	gc, err := config.LoadGlobal()
 	if err != nil {
 		return fmt.Errorf("loading global config: %w", err)
 	}
+	if refuseAutomaticWorktree(w, absPath, gc) {
+		return nil
+	}
+	emitTrackBanner(w, absPath, daemon.IsRunning())
+	// 1. Durable config write before handing an accepted track to the daemon.
 	// Heal any pre-existing duplicate case-variant entries so the track
 	// path (and the persisted config) sees a clean list (#270).
 	healDuplicateRepos(gc, nil)

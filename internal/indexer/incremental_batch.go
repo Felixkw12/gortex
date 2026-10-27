@@ -34,6 +34,8 @@ type incrementalBatchStage struct {
 	rawSHA256              string
 	relPath                string
 	graphPath              string
+	legacyIDs              []string
+	legacyPath             string
 	src                    []byte
 	result                 *parser.ExtractionResult
 	prepared               *preparedExtraction
@@ -153,7 +155,7 @@ func (idx *Indexer) reindexIncrementalFilesBatched(
 		}
 		defer func() { idx.deletionReparsePaths = nil }()
 	}
-	deleteTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "graph_delete",
+	deleteTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "graph_delete",
 		zap.Int("deleted_files", len(deletedFiles)))
 	defer deleteTiming.abort()
 	idx.evictDeletedFilesBatched(deletedFiles, &invalidation)
@@ -251,15 +253,16 @@ func (idx *Indexer) reindexIncrementalChunk(
 	}
 
 	graphPaths := make([]string, len(files))
-	priorTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_prior_graph",
+	priorTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_prior_graph",
 		zap.Int("candidate_files", len(files)))
 	defer priorTiming.abort()
 	for i, filePath := range files {
 		graphPaths[i] = idx.prefixPath(idx.relKey(filePath))
 	}
 	priorByFile := idx.graph.GetFileNodesByPaths(graphPaths)
+	legacyByFile := idx.legacyNodesByPath(graphPaths)
 	priorTiming.complete(nil)
-	parseTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_parse",
+	parseTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_parse",
 		zap.Int("candidate_files", len(files)), zap.Bool("includes_admission_wait", true))
 	defer parseTiming.abort()
 
@@ -283,6 +286,8 @@ func (idx *Indexer) reindexIncrementalChunk(
 	for i, filePath := range files {
 		graphPath := graphPaths[i]
 		priorNodes := priorByFile[graphPath]
+		nativePath := idx.legacyFilePath(graphPath)
+		priorNodes, legacyIDs, legacyPath := mergeLegacyFilePrior(nativePath, priorNodes, legacyByFile[nativePath])
 		storedGraph := storedExtractionGraphFingerprints(priorNodes)
 		storedDerived := storedDerivedFingerprints(priorNodes)
 		// A prior row stamped before derived fingerprints existed is given
@@ -320,7 +325,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 		// An importer of a deleted file is re-derived from source as a
 		// structural stage whatever its fingerprints say
 		// (deletion_importers.go).
-		forced := idx.forceReparse(filePath)
+		forced := idx.forceReparse(filePath) || len(legacyIDs) > 0
 		inert := probeOK && storedGraph.semantic != "" &&
 			probe.fingerprints.semantic == storedGraph.semantic &&
 			probe.fingerprints.metadata == storedGraph.metadata &&
@@ -396,6 +401,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 			readVersion: prepared.readVersion,
 			rawSHA256:   prepared.rawSHA256,
 			relPath:     prepared.relPath, graphPath: graphPath,
+			legacyIDs: legacyIDs, legacyPath: legacyPath,
 			src: prepared.src, result: prepared.result, prepared: prepared, priorNodes: priorNodes,
 			storedGraph: storedGraph, storedDerived: storedDerived, probe: probe,
 			metadataOnly: !forced && storedGraph.semantic != "" &&
@@ -444,7 +450,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 			stage.releasePrepared()
 		}
 	}
-	receiptTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_receipts",
+	receiptTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_receipts",
 		zap.Int("receipts", len(receipts)))
 	defer receiptTiming.abort()
 	freshPaths, stalePaths := idx.recordFileReadVersionsBatched(receipts)
@@ -466,7 +472,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 	if len(fallbacks) > 0 {
 		// Legacy fallback combines extraction and graph mutation; do not label
 		// this interval as parse-only or silently charge it to graph apply.
-		fallbackTiming = startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_fallback_parse_apply",
+		fallbackTiming = idx.startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_fallback_parse_apply",
 			zap.Int("files", len(fallbacks)))
 		defer fallbackTiming.abort()
 	}
@@ -625,7 +631,7 @@ func (idx *Indexer) commitIncrementalStages(
 	stages []*incrementalBatchStage,
 	markerBatch *reparsePendingEnrichmentBatch,
 ) DerivedInvalidationPlan {
-	timing := startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_graph_apply",
+	timing := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_graph_apply",
 		zap.Int("staged_files", len(stages)))
 	defer timing.abort()
 	var plan DerivedInvalidationPlan
@@ -685,6 +691,10 @@ func (idx *Indexer) commitIncrementalStages(
 		// The importer of a deleted file is re-derived because what its
 		// references bind to changed: neither the prior resolutions nor the
 		// references the deletion just parked may short-cut its resolution.
+		if len(stage.legacyIDs) > 0 {
+			stage.reuse, stage.priorPending = nil, nil
+			stage.metadataOnly = false
+		}
 		if idx.forceReparse(stage.absPath) {
 			if idx.forceReparseDropsResolutions(stage.absPath) {
 				stage.reuse, stage.priorPending = nil, nil
@@ -1064,6 +1074,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 ) {
 	deferResolverCatchup := markerBatch != nil && markerBatch.deferResolverCatchup
 	paths := make([]string, 0, len(stages))
+	var legacyIDs, legacyPaths []string
 	oldFTSNodeIDs := make([]string, 0)
 	oldFuncIDs := make([]string, 0)
 	var nodes []*graph.Node
@@ -1071,6 +1082,10 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 	var priorPending []*graph.Edge
 	for _, stage := range stages {
 		paths = append(paths, stage.graphPath)
+		legacyIDs = append(legacyIDs, stage.legacyIDs...)
+		if stage.legacyPath != "" {
+			legacyPaths = append(legacyPaths, stage.legacyPath)
+		}
 		nodes = append(nodes, stage.result.Nodes...)
 		edges = append(edges, stage.result.Edges...)
 		priorPending = append(priorPending, stage.priorPending...)
@@ -1109,7 +1124,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 	// Retained contracts keep existing rows; actual orphans are deleted there.
 	idx.deleteSymbolFTS(oldFTSNodeIDs)
 	idx.applyLap("fts_delete")
-	evictFilesBatched(idx.graph, paths)
+	idx.evictFileIdentities(paths, legacyIDs, legacyPaths)
 	idx.applyLap("evict")
 	// The carried in-edges ride the same AddBatch as the fresh payload: the
 	// eviction above deletes every edge incident to a doomed node, including
@@ -1364,6 +1379,13 @@ func restubIncomingRefsFromView(
 	carriedSeen := make(map[*graph.Edge]struct{})
 	for _, stage := range stages {
 		frontier := restubFrontierForStage(stage, view)
+		// Separator repair changes identity, not the declaration contract.
+		// The normal shape/visibility/parameter gates still decide every carry.
+		if !frontier.conservative {
+			for legacyID := range legacyReplacements(stage) {
+				frontier.survivingIDs[legacyID] = struct{}{}
+			}
+		}
 		for _, node := range stage.priorNodes {
 			if node != nil && node.Kind == graph.KindFile {
 				// Another file's import of this one is recorded in the
@@ -1515,7 +1537,7 @@ func restubIncomingRefsFromView(
 	if len(reindexes) > 0 {
 		g.ReindexEdges(reindexes)
 	}
-	return carried, npmConsumers
+	return canonicalizeLegacyCarried(stages, evicted, carried), npmConsumers
 }
 
 // dataflowSourceSite is a reference's site: the file that records it and its
@@ -1878,10 +1900,11 @@ func (idx *Indexer) materializeDataflowParamsForStages(stages []*incrementalBatc
 // switch does not retain 1,000 parse trees or issue one query per file.
 func (idx *Indexer) materializeDataflowParamsForFiles(graphPaths []string) {
 	graphPaths = appendUniqueSorted(nil, graphPaths...)
-	legs := newRefFactLegs()
+	legs := newRefFactLegs(idx.writeCounterMark)
+	writes := idx.writeCounterMark()
 	defer func() {
 		if idx.logger != nil && len(graphPaths) > 0 {
-			fields := legs.fields(len(graphPaths))
+			fields := append(legs.fields(len(graphPaths)), writeCounterFields("dataflow_", idx.writeCounterMark().Since(writes))...)
 			if p := idx.dataflowParams; p != nil {
 				fields = append(fields, zap.Int("param_hits", p.hits), zap.Int("param_misses", p.misses))
 			}

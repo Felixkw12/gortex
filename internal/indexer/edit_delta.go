@@ -365,6 +365,9 @@ type EditDeltaReport struct {
 	// from the cache kept across deltas instead of a read of the view below.
 	ContractRegistryCached bool
 	PhaseWALBytes          map[string]int64
+	PhaseWALReset          map[string]bool
+	PhaseMainBytes         map[string]int64
+	PhaseRows              map[string]int64
 	PhaseWriteTx           map[string]int64
 	ResolveFrontier        int
 	ResolveDuration        time.Duration
@@ -497,7 +500,8 @@ func (b *SparseGenerationBuilder) buildEditDelta(ctx context.Context, req BuildR
 				return err
 			}
 		}
-		enrichWAL, enrichTx, enrichIO, enrichStarted := handle.WALWriteMark(), store_sqlite.WriteTransactionsBegun(), editDeltaProcessIO(), time.Now()
+		enrichTx, enrichIO, enrichStarted := store_sqlite.WriteTransactionsBegun(), editDeltaProcessIO(), time.Now()
+		enrichWrites := handle.WriteMark()
 		enrichCPU, enrichStore := processCPUTime(), b.storeWaitMark()
 		b.runEnrichment(ctx, req, handle, &report)
 		enrichStageMs := float64(time.Since(enrichStarted).Microseconds()) / 1000
@@ -567,7 +571,7 @@ func (b *SparseGenerationBuilder) buildEditDelta(ctx context.Context, req BuildR
 				zap.Float64("cpu_ms", float64((processCPUTime()-enrichCPU).Microseconds())/1000),
 				zap.Any("store_io", storeWaitMillis(b.storeWaitMark().Split(enrichStore))),
 				zap.Int64("major_faults", editDeltaProcessIO().since(enrichIO).majorFaults),
-				zap.Int64("wal_bytes", store_sqlite.WALWrittenBetween(enrichWAL, handle.WALWriteMark()).Bytes),
+				zap.Inline(patchWriteLog{split: handle.WriteMark().Since(enrichWrites)}),
 				zap.Int64("write_tx", store_sqlite.WriteTransactionsBegun()-enrichTx),
 				zap.Int("restated", delta.EnrichmentRestated),
 				zap.Int("node_claims", delta.EnrichmentNodeClaims))
@@ -708,6 +712,9 @@ func (b *SparseGenerationBuilder) runEditDelta(
 	}
 	cpuLast, storeLast := processCPUTime(), storeMark()
 	out.PhaseWALBytes = make(map[string]int64)
+	out.PhaseWALReset = make(map[string]bool)
+	out.PhaseMainBytes = make(map[string]int64)
+	out.PhaseRows = make(map[string]int64)
 	out.PhaseWriteTx = make(map[string]int64)
 	out.PhaseLayerRows = make(map[string]int)
 	walLast, txLast := handle.WALWriteMark(), store_sqlite.WriteTransactionsBegun()
@@ -756,9 +763,15 @@ func (b *SparseGenerationBuilder) runEditDelta(
 		out.SleepGaugeInstalled = storeNow.Sleep.Installed
 		out.SleepGaugeVFSOnly = storeNow.Sleep.VFSOnly
 		walNow, txNow := handle.WALWriteMark(), store_sqlite.WriteTransactionsBegun()
-		if wal := store_sqlite.WALWrittenBetween(walLast, walNow); wal.Bytes > 0 {
+		if storeNow.VFS.Available {
+			out.PhaseWALBytes[name] += split.VFS.WALBytes()
+		} else {
+			wal := store_sqlite.WALWrittenBetween(walLast, walNow)
 			out.PhaseWALBytes[name] += wal.Bytes
+			out.PhaseWALReset[name] = out.PhaseWALReset[name] || wal.Reset
 		}
+		out.PhaseMainBytes[name] += split.VFS.WriterMainWriteBytes + split.VFS.OtherMainWriteBytes
+		out.PhaseRows[name] += split.VFS.Rows.Total()
 		if tx := txNow - txLast; tx > 0 {
 			out.PhaseWriteTx[name] += tx
 		}
@@ -839,6 +852,8 @@ func (b *SparseGenerationBuilder) runEditDelta(
 	idx.headProvenance = req.headProvenance
 	if store := b.Store; store != nil {
 		idx.storeWaits = store.ReaderWaitMark
+		idx.writeCounters = handle.WriteMark
+		idx.resolver.SetWriteCounterSource(handle.WriteMark)
 	}
 	// The project name shapes every symbol search document (a whole index
 	// detects it from the root it walks); the per-save engine never walks.
@@ -1306,7 +1321,8 @@ func (b *SparseGenerationBuilder) runEditDelta(
 			zap.Any("phase_sched_waits", out.PhaseSchedWaits),
 			zap.Bool("sqlite_sleep_gauge_installed", out.SleepGaugeInstalled),
 			zap.Bool("sqlite_sleep_gauge_vfs_only", out.SleepGaugeVFSOnly),
-			zap.Any("phase_wal_bytes", out.PhaseWALBytes),
+			zap.Any("phase_wal_bytes", out.PhaseWALBytes), zap.Any("phase_wal_bytes_reset", out.PhaseWALReset),
+			zap.Any("phase_main_bytes", out.PhaseMainBytes), zap.Any("phase_rows", out.PhaseRows), zap.Any("phase_txns", out.PhaseWriteTx),
 			zap.Any("phase_write_tx", out.PhaseWriteTx),
 			zap.Strings("stack", dw.StackShape()),
 			// chain_depth is the number of layers the delta composes over the

@@ -45,9 +45,19 @@ suite for:
   metadata, unsupported Go flags/workspaces/experiments, or differing normal and
   race-tagged package censuses.
 
-`scripts/ci-select` (using the shared `internal/citest` package) compares the merge base of the event's base SHA
-and exact checkout SHA. NUL-delimited Git status records preserve unusual path
-names and rename pairs. It obtains `go list -json` metadata without `-test` for
+`scripts/ci-select` (using the shared `internal/citest` package) selects changes
+relative to the first parent of the verified PR merge checkout. It verifies the
+`refs/pull/<number>/merge` event identity, the exact checkout revision, two merge
+parents, the second parent's match to the event's PR head, and ancestry from the
+event's base to the tested first parent. An older event base therefore does not
+include unrelated changes subsequently merged to `main`. Missing, malformed or
+inconsistent event/merge metadata requests the full suite.
+
+Dependency discovery and manifest validation stay on the actual tested merge:
+new imports or test dependents introduced on `main` still participate in
+selection. The manifest records that tested merge as its head and the verified
+first parent as its comparison base. NUL-delimited Git status records preserve
+unusual path names and rename pairs. It obtains `go list -json` metadata without `-test` for
 Linux amd64, macOS arm64 and Windows amd64, all with cgo enabled. Normal and race
 metadata are conservatively unioned. Traversal includes dependency nodes reached
 through test imports, including local replacement modules that connect two root

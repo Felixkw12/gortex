@@ -949,11 +949,12 @@ func TestGenerationScopedWriterFamilies(t *testing.T) {
 // the isolation proof for a mutating capability, so they have to stay bound to
 // something that actually runs.
 var generationWriteFences = map[string]func(t *testing.T){
-	"TestGenerationScopedEdgeAttributeUpdate":  TestGenerationScopedEdgeAttributeUpdate,
-	"TestGenerationScopedEdgeProvenanceUpdate": TestGenerationScopedEdgeProvenanceUpdate,
-	"TestGenerationScopedExactEdgeDelete":      TestGenerationScopedExactEdgeDelete,
-	"TestGenerationScopedFileEvict":            TestGenerationScopedFileEvict,
-	"TestGenerationScopedReceiverRebind":       TestGenerationScopedReceiverRebind,
+	"TestFileIdentityEvictionIsGenerationScoped": TestFileIdentityEvictionIsGenerationScoped,
+	"TestGenerationScopedEdgeAttributeUpdate":    TestGenerationScopedEdgeAttributeUpdate,
+	"TestGenerationScopedEdgeProvenanceUpdate":   TestGenerationScopedEdgeProvenanceUpdate,
+	"TestGenerationScopedExactEdgeDelete":        TestGenerationScopedExactEdgeDelete,
+	"TestGenerationScopedFileEvict":              TestGenerationScopedFileEvict,
+	"TestGenerationScopedReceiverRebind":         TestGenerationScopedReceiverRebind,
 }
 
 // generationWriteFenceNames is every name a capability may cite: the standalone

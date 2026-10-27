@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 
+	"github.com/zzet/gortex/internal/embedding"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/search"
@@ -46,7 +48,12 @@ func (b *exploreContextBlockingBackend) SearchContext(ctx context.Context, _ str
 	return nil
 }
 
-func newExploreContextCancellationServer(backend search.Backend) *Server {
+func newExploreContextCancellationServer(t *testing.T, backend search.Backend) *Server {
+	t.Helper()
+	// This fixture exercises backend cancellation, not cold semantic loading.
+	// SetRerank(nil) alone does not suppress explore's eager rerank context.
+	resetRerankProviderForTest(t)
+	embedding.SetCodeEmbedderEnabled(false)
 	g := graph.New()
 	eng := query.NewEngine(g)
 	eng.SetSearch(backend)
@@ -79,11 +86,24 @@ func callExploreContext(srv *Server, ctx context.Context, req mcpgo.CallToolRequ
 	return done
 }
 
-func awaitExploreWorker(done <-chan exploreContextResponse) {
+func awaitExploreWorker(done <-chan exploreContextResponse) (exploreContextResponse, bool) {
 	select {
-	case <-done:
+	case got := <-done:
+		return got, true
 	case <-time.After(time.Second):
+		return exploreContextResponse{}, false
 	}
+}
+
+func failExploreWorkerWatchdog(t *testing.T, message string, done <-chan exploreContextResponse) {
+	t.Helper()
+	// Capture before joining so a context-independent initialization/lock wait
+	// is visible even if it happens to finish during the cleanup window.
+	stack := make([]byte, 64<<10)
+	n := runtime.Stack(stack, true)
+	got, joined := awaitExploreWorker(done)
+	t.Fatalf("%s; worker_joined=%t worker_error=%v result=%#v\ngoroutines (bounded to %d bytes):\n%s",
+		message, joined, got.err, got.result, len(stack), stack[:n])
 }
 
 func TestFacadeExploreCancellationStopsInFlightSearch(t *testing.T) {
@@ -91,17 +111,19 @@ func TestFacadeExploreCancellationStopsInFlightSearch(t *testing.T) {
 		block:   true,
 		started: make(chan struct{}),
 	}
-	srv := newExploreContextCancellationServer(backend)
+	srv := newExploreContextCancellationServer(t, backend)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := callExploreContext(srv, ctx, exploreContextCancellationRequest())
 
 	select {
 	case <-backend.started:
+	case got := <-done:
+		t.Fatalf("explore returned before entering the context-aware backend: error=%v result=%#v context=%v",
+			got.err, got.result, ctx.Err())
 	case <-ctx.Done():
 		cancel()
-		awaitExploreWorker(done)
-		t.Fatal("explore never entered the context-aware backend")
+		failExploreWorkerWatchdog(t, "explore never entered the context-aware backend", done)
 	}
 	cancel()
 
@@ -109,7 +131,7 @@ func TestFacadeExploreCancellationStopsInFlightSearch(t *testing.T) {
 	select {
 	case got = <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("explore did not return after request cancellation")
+		failExploreWorkerWatchdog(t, "explore did not return after request cancellation", done)
 	}
 	if !errors.Is(got.err, context.Canceled) {
 		t.Fatalf("handleFacade error = %v, want context.Canceled (result=%#v)", got.err, got.result)
@@ -129,7 +151,7 @@ func TestFacadeExplorePreCanceledAndLiveEmptyContracts(t *testing.T) {
 	req := exploreContextCancellationRequest()
 
 	preCanceled := &exploreContextBlockingBackend{}
-	srv := newExploreContextCancellationServer(preCanceled)
+	srv := newExploreContextCancellationServer(t, preCanceled)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	result, err := srv.handleFacade(ctx, "explore", req)
@@ -142,7 +164,7 @@ func TestFacadeExplorePreCanceledAndLiveEmptyContracts(t *testing.T) {
 	}
 
 	live := &exploreContextBlockingBackend{}
-	srv = newExploreContextCancellationServer(live)
+	srv = newExploreContextCancellationServer(t, live)
 	liveCtx, liveCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer liveCancel()
 	liveDone := callExploreContext(srv, liveCtx, req)
@@ -151,8 +173,7 @@ func TestFacadeExplorePreCanceledAndLiveEmptyContracts(t *testing.T) {
 	case got = <-liveDone:
 	case <-liveCtx.Done():
 		liveCancel()
-		awaitExploreWorker(liveDone)
-		t.Fatal("live empty explore did not return before its deadline")
+		failExploreWorkerWatchdog(t, "live empty explore did not return before its deadline", liveDone)
 	}
 	if got.err != nil {
 		t.Fatal(got.err)

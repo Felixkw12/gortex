@@ -345,14 +345,17 @@ func collectContractBaselineAcceptedReceipt(ctx context.Context, idx *Indexer, f
 		return contractBoundaryReceipt{}, fmt.Errorf("contract baseline: accepted extractor unavailable for %s", file.Language)
 	}
 	rel := strings.TrimPrefix(file.Path, file.RepoPrefix+"/")
-	result, skipped, err := idx.extractFileCtxWithRawLease(ctx, nil, nil, nil, nil, file.Path, rel, file.Language, ext, accepted.Bytes)
+	// A content skip (binary or minified) is a successful read with a nil
+	// error; foreground indexing records a receipt for its skip node, so
+	// reconstruction folds the same result. Failed skips return an error.
+	result, _, err := idx.extractFileCtxWithRawLease(ctx, nil, nil, nil, nil, file.Path, rel, file.Language, ext, accepted.Bytes)
 	if result != nil {
 		defer result.ReleaseTree()
 	}
 	if err != nil {
 		return contractBoundaryReceipt{}, err
 	}
-	if skipped || result == nil {
+	if result == nil {
 		return contractBoundaryReceipt{}, fmt.Errorf("contract baseline: accepted extraction incomplete for %s", file.Path)
 	}
 	return idx.collectContractBoundaryReceipt(ctx, file.Path, file.Language, accepted.Bytes, result)

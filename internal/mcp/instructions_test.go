@@ -15,6 +15,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
@@ -70,6 +71,25 @@ func TestServerInstructions_NonEmpty(t *testing.T) {
 }
 
 func TestStateAwareInstructionsWaitForAutomaticFamilyCheckout(t *testing.T) {
+	for _, routed := range []bool{true, false} {
+		name := "routed"
+		if !routed {
+			name = "ready-without-route"
+		}
+		t.Run(name, func(t *testing.T) {
+			v := newViewStack(t)
+			if !routed {
+				require.NoError(t, v.store.Catalog().DeleteCheckoutRoute(t.Context(), viewTestWorktree))
+			}
+			serves, err := v.srv.CheckoutServesCWDChecked(t.Context(), v.worktreeRoot)
+			require.NoError(t, err)
+			require.True(t, serves)
+			got := v.srv.stateAwareInstructions(v.worktreeRoot)
+			require.NotContains(t, got, "awaiting automatic discovery")
+			require.NotContains(t, got, "checkout discovery is pending")
+			require.Contains(t, got, serverInstructions)
+		})
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -80,14 +100,14 @@ func TestStateAwareInstructionsWaitForAutomaticFamilyCheckout(t *testing.T) {
 
 	srv, _ := newWorktreeMCPServer(t, config.RepoEntry{Path: main, Name: "main"})
 	got := srv.stateAwareInstructions(linked)
-	require.Contains(t, got, "awaiting automatic discovery")
+	require.Contains(t, got, "checkout discovery is pending")
 	require.Contains(t, got, "Do not run `gortex track`")
 	require.NotContains(t, got, "`gortex track "+linked+"`")
 	require.Equal(t, 1, strings.Count(got, profiles.WorktreeBranchRoutingPolicy))
 
 	reverseSrv, _ := newWorktreeMCPServer(t, config.RepoEntry{Path: linked, Name: "linked"})
 	reverse := reverseSrv.stateAwareInstructions(main)
-	require.Contains(t, reverse, "awaiting automatic discovery")
+	require.Contains(t, reverse, "checkout discovery is pending")
 	require.Contains(t, reverse, "Do not run `gortex track`")
 	require.NotContains(t, reverse, "`gortex track "+main+"`")
 
@@ -95,6 +115,40 @@ func TestStateAwareInstructionsWaitForAutomaticFamilyCheckout(t *testing.T) {
 	require.NoError(t, os.MkdirAll(unrelated, 0o755))
 	unrelatedInstructions := srv.stateAwareInstructions(unrelated)
 	require.Contains(t, unrelatedInstructions, "gortex track "+unrelated)
+}
+
+func TestPendingTextNoReconnect(t *testing.T) {
+	for _, text := range []string{ServerInstructionsPendingAutomaticCheckout("/checkout"), ServerInstructionsUntracked("/other")} {
+		withoutException := strings.ReplaceAll(text, "no reconnect is needed", "")
+		require.NotContains(t, strings.ToLower(withoutException), "reconnect")
+		require.NotContains(t, text, "may return repo_not_tracked")
+	}
+}
+
+func TestStateAwareInstructionsChecksAdmissionErrors(t *testing.T) {
+	v := newViewStack(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := v.srv.CheckoutServesCWDChecked(ctx, v.worktreeRoot)
+	require.Error(t, err)
+	got := v.srv.stateAwareInstructionsContext(ctx, v.worktreeRoot, serverInstructions)
+	require.Equal(t, CheckoutAdmissionInstructions(v.worktreeRoot, err), got)
+	require.NotContains(t, got, "gortex track")
+}
+
+func TestStateAwareInstructionsGraceAndTransitionDoNotRecommendTrack(t *testing.T) {
+	for _, state := range []store_sqlite.CheckoutState{store_sqlite.CheckoutStateAvailabilityGrace, store_sqlite.CheckoutStateReconciling} {
+		t.Run(string(state), func(t *testing.T) {
+			v := newViewStack(t)
+			gitInitWorktreeRepo(t, v.repoRoot)
+			gitInit(t, v.repoRoot, "worktree", "add", "-q", "-b", "feature", v.worktreeRoot)
+			v.setWorktreeState(t, state)
+			got := v.srv.stateAwareInstructions(v.worktreeRoot)
+			require.Contains(t, got, "checkout discovery is pending")
+			require.Contains(t, got, "view_building")
+			require.NotContains(t, got, "gortex track "+v.worktreeRoot)
+		})
+	}
 }
 
 // TestStateAwareInstructionsVariants proves the F5 contract: the initialize

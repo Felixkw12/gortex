@@ -1214,9 +1214,10 @@ type payloadSweepChunk func(ctx context.Context, tx *sql.Tx) (int64, error)
 // deleteGenerationRowsChunk runs one bounded delete statement. The generation
 // binds twice: once for the outer delete and once for the bounding subselect,
 // which reads the very table the delete shrinks.
-func deleteGenerationRowsChunk(query string, generationID int64) payloadSweepChunk {
+func deleteGenerationRowsChunk(table, query string, generationID int64) payloadSweepChunk {
 	return func(ctx context.Context, tx *sql.Tx) (int64, error) {
 		result, err := tx.ExecContext(ctx, query, generationID, generationID, sweepBatchFrom(ctx))
+		noteTableRows(table, result, err)
 		if err != nil {
 			return 0, err
 		}
@@ -1242,7 +1243,9 @@ func deleteFTSDocidChunk(docidMap ftsDocidMap, generationID int64) payloadSweepC
 		if err := payloadQuantumStatementGuard(ctx); err != nil {
 			return 0, err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM `+docidMap.fts+` WHERE rowid IN (`+list+`)`); err != nil {
+		result, err := tx.ExecContext(ctx, `DELETE FROM `+docidMap.fts+` WHERE rowid IN (`+list+`)`)
+		noteTableRows(docidMap.fts, result, err)
+		if err != nil {
 			return 0, err
 		}
 		if err := payloadQuantumStatementGuard(ctx); err != nil {

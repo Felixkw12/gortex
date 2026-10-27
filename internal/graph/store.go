@@ -681,6 +681,15 @@ type FileBatchEvicter interface {
 	EvictFiles(filePaths []string) (nodesRemoved, edgesRemoved int)
 }
 
+// FileIdentityBatchEvicter replaces the same bounded file frontier while also
+// removing explicitly identified legacy file-owned nodes. Callers include those
+// identities in their prior-state/restub frontier first. Their native path may
+// also anchor shared targets, so evicting that whole spelling is not equivalent.
+// Additional IDs never widen the operation to another payload generation.
+type FileIdentityBatchEvicter interface {
+	EvictFilesWithNodeIDs(filePaths, nodeIDs []string) (nodesRemoved, edgesRemoved int)
+}
+
 // ContentHit is one result from a ContentSearcher query: the content
 // section node's ID plus locating metadata (file + ordinal), its BM25
 // relevance score (higher = more relevant), and a short snippet excerpt
