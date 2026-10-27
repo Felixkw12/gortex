@@ -346,7 +346,7 @@ func TestEnsureDaemonMismatchedHandoffConcurrentClientsReachPublicTools(t *testi
 							errs <- err
 							return
 						}
-						c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeMCP})
+						c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeMCP, ClientName: "handoff-test", Tools: "facade-v1", ToolsMode: "hide"})
 						if err != nil {
 							errs <- err
 							return
@@ -357,31 +357,44 @@ func TestEnsureDaemonMismatchedHandoffConcurrentClientsReachPublicTools(t *testi
 							return
 						}
 						_ = c.Conn.SetDeadline(time.Now().Add(5 * time.Second))
-						for _, frame := range []string{`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"handoff-test","version":"1"}}}`, `{"jsonrpc":"2.0","method":"notifications/initialized"}`, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`} {
-							if err := c.WriteMCPFrame([]byte(frame)); err != nil {
-								errs <- err
+						initialized, err := handoffMCPRequest(c, 1, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"handoff-test","version":"1"}}}`)
+						if err != nil {
+							errs <- err
+							return
+						}
+						var initResult struct {
+							ServerInfo struct {
+								Name string `json:"name"`
+							} `json:"serverInfo"`
+						}
+						if json.Unmarshal(initialized, &initResult) != nil || initResult.ServerInfo.Name != "gortex" {
+							errs <- fmt.Errorf("public initialize identity: %s", initialized)
+							return
+						}
+						if err := c.WriteMCPFrame([]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)); err != nil {
+							errs <- err
+							return
+						}
+						listed, err := handoffMCPRequest(c, 2, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+						if err != nil {
+							errs <- err
+							return
+						}
+						var tools struct {
+							Tools []struct {
+								Name string `json:"name"`
+							} `json:"tools"`
+						}
+						if err := json.Unmarshal(listed, &tools); err != nil {
+							errs <- err
+							return
+						}
+						for _, tool := range tools.Tools {
+							if tool.Name == "read" {
 								return
 							}
-							if strings.Contains(frame, `"id":`) {
-								reply, err := c.ReadMCPFrame()
-								if err != nil {
-									errs <- err
-									return
-								}
-								var result struct {
-									Error  json.RawMessage `json:"error"`
-									Result json.RawMessage `json:"result"`
-								}
-								if json.Unmarshal(reply, &result) != nil || len(result.Error) > 0 || len(result.Result) == 0 {
-									errs <- fmt.Errorf("public MCP response: %s", reply)
-									return
-								}
-								if strings.Contains(frame, "tools/list") && !strings.Contains(string(result.Result), `"tools"`) {
-									errs <- fmt.Errorf("tools/list missing tools: %s", reply)
-									return
-								}
-							}
 						}
+						errs <- fmt.Errorf("replacement did not publish public read facade: %s", listed)
 					})
 				}
 				wg.Wait()
@@ -400,5 +413,35 @@ func TestEnsureDaemonMismatchedHandoffConcurrentClientsReachPublicTools(t *testi
 				t.Fatalf("handoff identities missing:\n%s", stderr)
 			}
 		})
+	}
+}
+
+// Daemons may send notifications between responses. Match the actual request
+// ID rather than treating an unrelated frame or an empty tool list as success.
+func handoffMCPRequest(c *daemon.Client, id int, frame string) (json.RawMessage, error) {
+	if err := c.WriteMCPFrame([]byte(frame)); err != nil {
+		return nil, err
+	}
+	for {
+		reply, err := c.ReadMCPFrame()
+		if err != nil {
+			return nil, err
+		}
+		var response struct {
+			ID     *int            `json:"id"`
+			Method string          `json:"method"`
+			Error  json.RawMessage `json:"error"`
+			Result json.RawMessage `json:"result"`
+		}
+		if err := json.Unmarshal(reply, &response); err != nil {
+			return nil, err
+		}
+		if response.ID == nil && response.Method != "" {
+			continue
+		}
+		if response.ID == nil || *response.ID != id || len(response.Error) > 0 && string(response.Error) != "null" || len(response.Result) == 0 {
+			return nil, fmt.Errorf("public MCP response for id %d: %s", id, reply)
+		}
+		return response.Result, nil
 	}
 }
