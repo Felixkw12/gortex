@@ -93,11 +93,12 @@ func (f daemonStopFile) present() (bool, error) {
 }
 
 type daemonStopTarget struct {
-	process   platform.ProcessIdentity
-	absentPID int // positive native absence observed before any RPC; never signal
-	files     []daemonStopFile
-	store     *daemonStoreLock
-	storeErr  error
+	process             platform.ProcessIdentity
+	absentPID           int // positive native absence observed before any RPC; never signal
+	files               []daemonStopFile
+	store               *daemonStoreLock
+	storeErr            error
+	signalOwnerVerified bool
 	// Only an absent legacy runtime record or an explicitly empty backend
 	// permits process-exit fallback. A failed/missing expected lock does not.
 	noStore bool
@@ -137,6 +138,16 @@ func captureDaemonStopTarget(pid int) (*daemonStopTarget, error) {
 		if runtime.PID != pid {
 			return nil, errors.New("daemon runtime record does not match captured process")
 		}
+		if runtime.ProcessBirthToken != "" && target.absentPID == 0 {
+			token, err := identity.Token()
+			if err != nil {
+				return nil, err
+			}
+			if runtime.ProcessBirthToken != token {
+				return nil, fmt.Errorf("daemon runtime birth token does not match native process: %w", platform.ErrProcessIdentityChanged)
+			}
+			target.signalOwnerVerified = true
+		}
 		if runtime.BackendPath == "" {
 			target.noStore = true
 		} else {
@@ -151,6 +162,24 @@ func captureDaemonStopTarget(pid int) (*daemonStopTarget, error) {
 		return nil, errors.Join(errors.New("daemon process changed during stop capture"), err)
 	}
 	return target, nil
+}
+
+func (t *daemonStopTarget) acceptProbeOwner(pid int) error {
+	if pid <= 0 || pid != t.pid() {
+		return errors.New("daemon probe PID does not match captured runtime owner")
+	}
+	if err := t.verifyBeforeControl(); err != nil {
+		return err
+	}
+	t.signalOwnerVerified = true
+	return nil
+}
+
+func (t *daemonStopTarget) requireSignalOwner() error {
+	if t.absentPID != 0 || !t.signalOwnerVerified {
+		return errors.New("cannot verify daemon incarnation for PID signal: legacy runtime has no matching birth token or successful matching daemon probe")
+	}
+	return nil
 }
 
 func (t *daemonStopTarget) pid() int {

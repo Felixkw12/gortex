@@ -3,6 +3,7 @@ package platform
 import (
 	"errors"
 	"fmt"
+	"runtime"
 )
 
 // ErrProcessIdentityChanged means a PID names a different process incarnation.
@@ -33,6 +34,21 @@ func CaptureProcessIdentity(pid int) (ProcessIdentity, error) {
 
 // PID returns the captured PID; it is not by itself proof of ownership.
 func (p ProcessIdentity) PID() int { return p.pid }
+
+// Token is a persisted incarnation stamp for startup/runtime records. Linux
+// scopes its boot-relative start ticks by boot_id; epoch-based Darwin/Windows
+// timestamps need no extra boot lookup. This is setup/capture work, not part
+// of Running's polling path.
+func (p ProcessIdentity) Token() (string, error) {
+	if p.pid <= 0 || p.birth == [2]uint64{} {
+		return "", errors.New("invalid captured process identity")
+	}
+	scope, err := processBootScope()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s:%d:%016x:%016x:%s", runtime.GOOS, p.pid, p.birth[0], p.birth[1], scope), nil
+}
 
 // Matches reports whether the native PID still names the captured incarnation.
 // Missing, inaccessible or unsupported native metadata is an error, not proof

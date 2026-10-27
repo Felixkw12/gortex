@@ -73,8 +73,24 @@ func TestProcessIdentityRefusesUnknownAndChangedIncarnations(t *testing.T) {
 	if child.PID() <= 0 {
 		t.Fatal("lost captured PID")
 	}
+	token, err := child.Token()
+	if err != nil || token == "" {
+		t.Fatalf("actual child token=%q error=%v", token, err)
+	}
+	again, err := CaptureProcessIdentity(child.PID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stableToken, err := again.Token()
+	if err != nil || stableToken != token {
+		t.Fatalf("same native child token changed: %q -> %q (%v)", token, stableToken, err)
+	}
 	changed := child
 	changed.birth[0]++ // Simulate a captured PID that now names another birth.
+	changedToken, err := changed.Token()
+	if err != nil || changedToken == token {
+		t.Fatalf("different native birth did not change token: %q (%v)", changedToken, err)
+	}
 	if same, err := changed.Matches(); err != nil || same {
 		t.Fatalf("changed identity match=%v error=%v", same, err)
 	}

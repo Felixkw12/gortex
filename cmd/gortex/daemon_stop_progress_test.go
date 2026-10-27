@@ -34,6 +34,9 @@ func (f *fakeClosingDaemon) install(t *testing.T, pid int) {
 	if err := os.WriteFile(daemon.PIDFilePath(), []byte(strconv.Itoa(pid)), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := daemon.WriteRuntimeState(daemon.RuntimeState{}); err != nil {
+		t.Fatal(err)
+	}
 	prevRunning, prevKill, prevProgress := daemonCapturedProcessRunning, daemonKillCapturedProcess, daemonCloseProgress
 	prevTerminate := daemonTerminateCapturedProcess
 	prevBound, prevPeriod := daemonCloseNoProgressBound, daemonDrainProgressPeriod

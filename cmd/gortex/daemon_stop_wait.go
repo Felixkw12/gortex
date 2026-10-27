@@ -123,6 +123,9 @@ func waitForDaemonTarget(w io.Writer, target *daemonStopTarget, grace time.Durat
 	if _, err := target.runtimeGone(); err != nil {
 		return daemonStopResult{}, fmt.Errorf("refusing force with changed runtime ownership: %w", err)
 	}
+	if err := target.requireSignalOwner(); err != nil {
+		return daemonStopResult{}, err
+	}
 	// Recheck immediately before signaling: close may have finished while
 	// the incarnation/runtime guards were being read. Never ignore an
 	// observed free store just because an earlier poll saw its lock held.
@@ -172,6 +175,9 @@ func terminateCapturedDaemon(w io.Writer, target *daemonStopTarget) (daemonStopR
 			return daemonStopResult{}, err
 		}
 		if running {
+			if err := target.requireSignalOwner(); err != nil {
+				return daemonStopResult{}, err
+			}
 			// Closing may have released the lock during native/runtime
 			// checks. Apply the same last observed-free guard as KILL.
 			free, err := target.storeFree()

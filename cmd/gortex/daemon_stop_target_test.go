@@ -4,7 +4,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +20,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/platform"
 )
 
 func TestDaemonStopTargetChild(t *testing.T) {
@@ -183,4 +186,52 @@ func TestDaemonStopRuntimeFileRefusesNewAndReplacedPaths(t *testing.T) {
 	require.ErrorContains(t, err, "changed identity", "identical content cannot certify a replacement inode")
 	_, err = captureDaemonStopFile(t.TempDir(), false)
 	require.ErrorContains(t, err, "unexpected daemon endpoint file type")
+}
+
+func TestDaemonStopTargetRefusesPresentMismatchedBirthToken(t *testing.T) {
+	target, exit, wait, _ := ownedStopTarget(t)
+	require.True(t, target.signalOwnerVerified)
+	content, err := os.ReadFile(daemon.RuntimeStatePath())
+	require.NoError(t, err)
+	var state daemon.RuntimeState
+	require.NoError(t, json.Unmarshal(content, &state))
+	state.ProcessBirthToken = "different-native-incarnation"
+	content, err = json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(daemon.RuntimeStatePath(), content, 0o600))
+	_, err = captureDaemonStopTarget(target.process.PID())
+	require.ErrorIs(t, err, platform.ErrProcessIdentityChanged)
+	require.ErrorIs(t, stopRunningDaemon(&bytes.Buffer{}), platform.ErrProcessIdentityChanged)
+	running, err := target.process.Running()
+	require.NoError(t, err)
+	require.True(t, running)
+	require.NoError(t, exit())
+	require.NoError(t, wait(), "mismatched owner must not receive a signal")
+}
+
+func TestDaemonStopLegacySignalNeedsMatchingSuccessfulProbe(t *testing.T) {
+	target, exit, wait, _ := ownedStopTarget(t)
+	content, err := os.ReadFile(daemon.RuntimeStatePath())
+	require.NoError(t, err)
+	var state daemon.RuntimeState
+	require.NoError(t, json.Unmarshal(content, &state))
+	state.ProcessBirthToken = "" // Exact legacy JSON omits this optional field.
+	content, err = json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(daemon.RuntimeStatePath(), content, 0o600))
+	legacy, err := captureDaemonStopTarget(target.process.PID())
+	require.NoError(t, err)
+	require.False(t, legacy.signalOwnerVerified)
+	require.NoError(t, legacy.verifyBeforeControl(), "legacy graceful control remains allowed")
+	require.Error(t, legacy.acceptProbeOwner(legacy.pid()+1))
+	require.False(t, legacy.signalOwnerVerified)
+	_, err = terminateCapturedDaemon(&bytes.Buffer{}, legacy)
+	require.ErrorContains(t, err, "cannot verify daemon incarnation")
+	_, err = waitForDaemonTarget(&bytes.Buffer{}, legacy, 0, false)
+	require.ErrorContains(t, err, "cannot verify daemon incarnation")
+	running, err := legacy.process.Running()
+	require.NoError(t, err)
+	require.True(t, running)
+	require.NoError(t, exit())
+	require.NoError(t, wait(), "unverified legacy fallback must not signal this actual process")
 }

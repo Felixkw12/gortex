@@ -1233,6 +1233,11 @@ func stopRunningDaemon(w io.Writer) error {
 		return reportCapturedDaemonStop(w, result, err, daemon.SocketPath(), 0)
 	}
 	pre := daemonStatusBeforeStop()
+	if pre.probePID != 0 {
+		if err := target.acceptProbeOwner(pre.probePID); err != nil {
+			return err
+		}
+	}
 	if pre.closePolicy != "skip" {
 		stopCloseProgress := installDaemonCloseProgressForTarget(target)
 		defer stopCloseProgress()
@@ -1331,6 +1336,7 @@ var (
 type daemonStopPreflight struct {
 	uptime        time.Duration
 	closePolicy   string
+	probePID      int
 	closeEstimate time.Duration
 	pendingFrames int64
 	// estimateKnown is false when the status call failed, timed out, or came
@@ -1419,12 +1425,17 @@ func daemonStatusBeforeStop() daemonStopPreflight {
 	if !validProbe || pre.closePolicy == "skip" {
 		return pre
 	}
-	c, err := daemonControlClient()
+	deadline := time.Now().Add(daemonStatusCardTimeout)
+	c, err := daemon.DialToWithDeadline(daemon.SocketPath(), daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"}, deadline)
 	if err != nil {
 		return pre
 	}
 	defer c.Close()
-	resp, err := c.ControlWithTimeout(daemon.ControlStatus, nil, daemonStatusCardTimeout)
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return pre
+	}
+	resp, err := c.ControlWithTimeout(daemon.ControlStatus, nil, remaining)
 	if err != nil || !resp.OK {
 		return pre
 	}
@@ -1470,6 +1481,7 @@ func daemonProbeBeforeStop() (daemonStopPreflight, bool) {
 		return pre, false
 	}
 	pre.uptime = time.Duration(probe.UptimeSeconds) * time.Second
+	pre.probePID = probe.PID
 	if probe.CloseCheckpointPolicy == "skip" || probe.CloseCheckpointPolicy == "full" {
 		pre.closePolicy = probe.CloseCheckpointPolicy
 	}
