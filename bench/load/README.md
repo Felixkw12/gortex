@@ -150,7 +150,13 @@ visibility wait is recorded separately.
 
 Daemon CPU and write counters use process endpoints. macOS records CPU,
 resident size, `phys_footprint`, `ri_logical_writes` and disk I/O writes
-separately. Linux records procfs CPU, RSS, PSS, RssAnon and disk/syscall writes;
+separately. On macOS, `ri_logical_writes` reads the internal-volume ledger;
+external-volume writes use a separate ledger that this API field does not
+include. Use internal-volume source/store/HOME for comparisons that require
+this logical-write meter, and record runtime and cache volume placement.
+Mixed-volume activity is not a whole-process logical-write total. Physical
+disk I/O writes remain a separate meter and must not replace logical writes.
+Linux records procfs CPU, RSS, PSS, RssAnon and disk/syscall writes;
 the latter is not relabeled as macOS logical writes. Phase memory/store/WAL
 peaks are sampled at 500 ms. The post-workload memory sample is explicitly
 labeled after a 2-second settle period, not proof that background work is idle.

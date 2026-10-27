@@ -38,6 +38,11 @@ func (s darwinProcessSampler) sample(pid int) map[string]Metric {
 	metrics["cpu_seconds"] = machCPUSeconds(uint64(info.ri_user_time), uint64(info.ri_system_time), s.numer, s.denom)
 	metrics["rss_bytes"] = measured(float64(info.ri_resident_size), "bytes")
 	metrics["phys_footprint_bytes"] = measured(float64(info.ri_phys_footprint), "bytes")
+	// XNU gather_rusage_info uses get_task_logical_writes(task, false): the
+	// internal-volume ledger. External-volume writes have a separate ledger
+	// and are not included here; disk I/O is a distinct physical meter.
+	// https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_resource.c
+	// https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/bsd_kern.c
 	metrics["logical_written_bytes"] = measured(float64(info.ri_logical_writes), "bytes")
 	metrics["diskio_written_bytes"] = measured(float64(info.ri_diskio_byteswritten), "bytes")
 	return metrics
