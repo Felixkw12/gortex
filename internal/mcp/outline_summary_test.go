@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
@@ -105,4 +106,19 @@ func TestOutlinePreparedSectionsOwnAndBoundExactFinalRankings(t *testing.T) {
 	cache.clear()
 	_, ok = cache.putSummary(fresh, graph.OutlineCounts{}, nil)
 	require.False(t, ok)
+}
+
+func TestOutlineSummaryOwnsSmallSubstringsFromLargeCandidates(t *testing.T) {
+	source := strings.Repeat("q", 1<<20)
+	path := source[100:120]
+	language := source[200:203]
+	counts := graph.OutlineCounts{ByLanguage: map[string]int{language: 1}, FileImports: []graph.FileImportCountRow{{FilePath: path, Count: 1}}}
+	cache := outlineResponseCache{}
+	_, ok := cache.putSummary(outlineResponseKey{}, counts, nil)
+	require.True(t, ok)
+	retained := cache.summaries[outlineResponseKey{}]
+	for key := range retained.counts.ByLanguage {
+		require.NotEqual(t, unsafe.StringData(language), unsafe.StringData(key))
+	}
+	require.NotEqual(t, unsafe.StringData(path), unsafe.StringData(retained.imports[0]["path"].(string)))
 }
