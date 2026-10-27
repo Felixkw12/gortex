@@ -6,10 +6,14 @@ import (
 	"sync"
 )
 
-// pendingSourceRegistry is publication truth, independent of the bounded
-// recovery ledger. Each mutation has its own version (commit receipt); an
-// older publication cannot clear a newer write to the same checkout/path.
-// There is deliberately no age or capacity eviction for unresolved writes.
+// pendingSourceRegistry keeps per-commit publication evidence, independently
+// of the bounded recovery ledger. Canonical records have no source-request
+// reader: retire failed/fresh graph outcomes (including receipt_lost) and
+// unapplied/failed disk writes promptly. An explicitly recorded terminal stale
+// history is distinct from an unrecorded stale seed and retains its existing
+// bookkeeping semantics. Checkout failures stay pending until a successful
+// newer commit, a captured recovery, or authoritative incarnation retirement.
+// Neither lane becomes fresh by time; unresolved versions have no age/cap eviction.
 type pendingSourceRegistry struct {
 	mu       sync.Mutex
 	versions map[string]*mutationCommitRecord
@@ -38,6 +42,21 @@ func (p *pendingSourceRegistry) register(record *mutationCommitRecord) {
 // not evidence that the graph contains the committed bytes.
 func (s *Server) pendingSourcePaths(checkoutID, incarnation string) []string {
 	p := &s.pendingSourceFiles
+	// Refresh may update a commit and retire canonical versions. Never invoke
+	// that callback while holding the registry lock.
+	p.mu.Lock()
+	records := make([]*mutationCommitRecord, 0, len(p.versions))
+	for _, record := range p.versions {
+		records = append(records, record)
+	}
+	p.mu.Unlock()
+	for _, record := range records {
+		s.refreshPendingSourceRecord(record)
+	}
+	return p.paths(checkoutID, incarnation)
+}
+
+func (p *pendingSourceRegistry) paths(checkoutID, incarnation string) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.freshCommits == nil {
@@ -45,7 +64,6 @@ func (s *Server) pendingSourcePaths(checkoutID, incarnation string) []string {
 	}
 	survivors := make(map[string]mutationCommitSnapshot, len(p.versions))
 	for id, record := range p.versions {
-		s.refreshPendingSourceRecord(record)
 		snap := record.snapshot()
 		record.mu.RLock()
 		recovered := record.pendingSourceRecovered
@@ -57,6 +75,7 @@ func (s *Server) pendingSourcePaths(checkoutID, incarnation string) []string {
 			}
 		}
 		if recovered || snap.DiskStatus == mutationDiskNotApplied || snap.DiskStatus == mutationDiskFailed ||
+			(snap.CheckoutID == "" && snap.GraphRecorded && snap.GraphStatus == mutationGraphFailed) ||
 			(snap.DiskStatus == mutationDiskCommitted && snap.GraphStatus == mutationGraphFresh) {
 			delete(p.versions, id)
 			continue
@@ -99,6 +118,7 @@ func (s *Server) pendingSourcePaths(checkoutID, incarnation string) []string {
 // Resolve a late ticket immediately when the commit binds its receipt. The
 // receipt can finish before the mutation handler records its pending outcome.
 func (s *Server) refreshPendingSourceRecord(record *mutationCommitRecord) {
+	defer s.retireCanonicalPendingSource(record)
 	snap := record.snapshot()
 	if snap.GraphStatus == mutationGraphFresh || snap.ReindexReceipt == "" {
 		return
@@ -125,6 +145,18 @@ func (s *Server) refreshPendingSourceRecord(record *mutationCommitRecord) {
 				record.recordGraph(outcome)
 			}
 		}
+	}
+}
+
+func (s *Server) retireCanonicalPendingSource(record *mutationCommitRecord) {
+	record.mu.RLock()
+	retire := record.checkoutID == "" && (record.disk == mutationDiskNotApplied || record.disk == mutationDiskFailed ||
+		(record.graphRecorded && (record.graph == mutationGraphFresh || record.graph == mutationGraphFailed)))
+	record.mu.RUnlock()
+	if retire {
+		// Reuse the commit-order watermark rules when retiring a fresh commit;
+		// removing it alone would lose evidence for older pending versions.
+		s.pendingSourceFiles.paths("", "")
 	}
 }
 

@@ -206,7 +206,12 @@ func (r *mutationCommitRecord) diskStatus() string {
 
 func (r *mutationCommitRecord) markNotApplied(err error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer func() {
+		r.mu.Unlock()
+		if r.owner != nil {
+			r.owner.retireCanonicalPendingSource(r)
+		}
+	}()
 	r.disk = mutationDiskNotApplied
 	r.graph = mutationGraphStale
 	r.graphRecorded = true
@@ -217,7 +222,12 @@ func (r *mutationCommitRecord) markNotApplied(err error) {
 
 func (r *mutationCommitRecord) markFailed(err error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer func() {
+		r.mu.Unlock()
+		if r.owner != nil {
+			r.owner.retireCanonicalPendingSource(r)
+		}
+	}()
 	r.disk = mutationDiskFailed
 	r.graph = mutationGraphStale
 	r.graphRecorded = true
