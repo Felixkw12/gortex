@@ -332,8 +332,10 @@ func (f *issue767Fixture) stop() {
 	}
 	select {
 	case err := <-done:
-		if err != nil {
-			f.t.Errorf("isolated child %d did not exit cleanly: %v", cmd.Process.Pid, err)
+		clean := issue767CleanChildExit(err, cmd.ProcessState)
+		f.t.Logf("private daemon exit: pid=%d graceful=%t state=%v wait_error=%v", cmd.Process.Pid, clean, cmd.ProcessState, err)
+		if !clean {
+			f.t.Errorf("isolated child %d did not exit cleanly: %v (state=%v)", cmd.Process.Pid, err, cmd.ProcessState)
 		}
 	case <-time.After(30 * time.Second):
 		_ = cmd.Process.Kill()
@@ -347,6 +349,15 @@ func (f *issue767Fixture) stop() {
 	if log != nil {
 		_ = log.Close()
 	}
+}
+
+func issue767CleanChildExit(err error, state *os.ProcessState) bool {
+	if state == nil || !state.Success() {
+		return false // a killed/nonzero child never becomes a graceful stop
+	}
+	// testing cancels t.Context before Cleanup. CommandContext then returns
+	// that cancellation even if Cancel requested a graceful, zero-code exit.
+	return err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // requestGracefulStop is shared by explicit cleanup and CommandContext.Cancel.
