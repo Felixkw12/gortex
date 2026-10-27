@@ -383,23 +383,7 @@ func checkoutAdmissionMetadataMethod(method string) bool {
 }
 
 func checkoutAdmissionFailure(err error) (code string, retryable bool) {
-	var committed interface{ Committed() bool }
-	if errors.As(err, &committed) && committed.Committed() {
-		return "checkout_inaccessible", false
-	}
-	if errors.Is(err, indexer.ErrCheckoutMutationBusy) || errors.Is(err, context.DeadlineExceeded) {
-		return "view_building", true
-	}
-	// Catalog readers can surface SQLite contention directly, including an
-	// extended result code. Only BUSY/LOCKED are safe retry classifications.
-	var coded interface{ Code() int }
-	if errors.As(err, &coded) {
-		switch coded.Code() & 0xff {
-		case 5, 6: // SQLITE_BUSY, SQLITE_LOCKED
-			return "view_building", true
-		}
-	}
-	return "checkout_inaccessible", false
+	return gortexmcp.CheckoutAdmissionFailure(err)
 }
 
 func checkoutAdmissionError(cwd string, inbound []byte, err error) []byte {
@@ -436,11 +420,7 @@ func rewriteCheckoutAdmissionResponse(method string, out []byte, cwd string, err
 	if !ok {
 		return out
 	}
-	code, retryable := checkoutAdmissionFailure(err)
-	result["instructions"] = fmt.Sprintf(
-		"Gortex checkout discovery is unavailable for %s (%s, retryable=%t): %v. "+
-			"No graph access has been granted. Retry after discovery can complete; do not change tracking configuration to resolve this admission error.",
-		cwd, code, retryable, err)
+	result["instructions"] = gortexmcp.CheckoutAdmissionInstructions(cwd, err)
 	updated, marshalErr := json.Marshal(reply)
 	if marshalErr != nil {
 		return out

@@ -3,11 +3,34 @@ package agents
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/pathkey"
 )
+
+// PendingAutomaticCheckoutGuidance is shared by initialize and lifecycle hooks.
+// Family recognition does not grant access, and retrying frames rechecks
+// admission without requiring a new MCP session.
+const PendingAutomaticCheckoutGuidance = "This checkout belongs to an already tracked or configured Git family; Gortex is identifying it. " +
+	"Graph calls return `view_building` until discovery completes; retry them, no reconnect is needed. Do not run `gortex track`. " +
+	"Use `gortex repos explain-view` for discovery details; explicit tracking is only for a user-requested separate graph."
+
+// FamilyRepoRoots unions declarations with the live registry without treating
+// either list as an admission decision. The caller supplies its own config.
+func FamilyRepoRoots(registered, configured []string) []string {
+	roots := make([]string, 0, len(registered)+len(configured))
+	for _, group := range [][]string{registered, configured} {
+		for _, root := range group {
+			if root = strings.TrimSpace(root); root != "" {
+				roots = append(roots, root)
+			}
+		}
+	}
+	slices.Sort(roots)
+	return slices.Compact(roots)
+}
 
 // PendingAutomaticCheckout reports whether cwd is inside a Git checkout whose
 // family is already represented by one of trackedRoots, but the checkout

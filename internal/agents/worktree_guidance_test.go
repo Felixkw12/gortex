@@ -5,8 +5,24 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
+
+func TestFamilyRepoRootsAndPendingText(t *testing.T) {
+	registered := []string{"/registered", "/shared"}
+	configured := []string{"/unloaded", "/shared", " "}
+	got := FamilyRepoRoots(registered, configured)
+	want := []string{"/registered", "/shared", "/unloaded"}
+	if !reflect.DeepEqual(got, want) || registered[0] != "/registered" || configured[0] != "/unloaded" {
+		t.Fatalf("root union changed inputs or lost declaration: %v", got)
+	}
+	text := strings.ReplaceAll(PendingAutomaticCheckoutGuidance, "no reconnect is needed", "")
+	if strings.Contains(strings.ToLower(text), "reconnect") || !strings.Contains(text, "view_building") || strings.Contains(text, "repo_not_tracked") {
+		t.Fatalf("pending guidance gave a reconnect/untracked remedy: %s", text)
+	}
+}
 
 func worktreeGuidanceGit(t testing.TB, dir string, args ...string) {
 	t.Helper()
