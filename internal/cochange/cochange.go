@@ -308,6 +308,11 @@ func AddEdges(g graph.Store, pairs []Pair, repoPrefix string) int {
 func AddEdgesContext(ctx context.Context, g graph.Store, pairs []Pair, repoPrefix string) (int, error) {
 	return addEdges(ctx, g, pairs, repoPrefix, func(edges []*graph.Edge) error {
 		if checked, ok := g.(interface {
+			AddBatchCheckedContext(context.Context, []*graph.Node, []*graph.Edge) error
+		}); ok {
+			return checked.AddBatchCheckedContext(ctx, nil, edges)
+		}
+		if checked, ok := g.(interface {
 			AddBatchChecked([]*graph.Node, []*graph.Edge) error
 		}); ok {
 			return checked.AddBatchChecked(nil, edges)
