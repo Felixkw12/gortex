@@ -42,18 +42,6 @@
         }
       },
       {
-        "tool": "search",
-        "operation": "files",
-        "arguments": {
-          "operation": "files",
-          "output": {
-            "format": "json",
-            "max_bytes": 0
-          },
-          "query": "sample.go"
-        }
-      },
-      {
         "tool": "read",
         "operation": "source",
         "arguments": {
@@ -138,61 +126,10 @@
         }
       },
       {
-        "tool": "relations",
-        "operation": "dependents",
-        "arguments": {
-          "operation": "dependents",
-          "output": {
-            "format": "json",
-            "max_bytes": 0
-          },
-          "target": {
-            "symbol": "sample.go::Example"
-          }
-        }
-      },
-      {
-        "tool": "relations",
-        "operation": "implementations",
-        "arguments": {
-          "operation": "implementations",
-          "output": {
-            "format": "json",
-            "max_bytes": 0
-          },
-          "target": {
-            "symbol": "sample.go::Example"
-          }
-        }
-      },
-      {
         "tool": "explore",
         "operation": "context",
         "arguments": {
           "operation": "context",
-          "output": {
-            "format": "json",
-            "max_bytes": 0
-          },
-          "task": "Example"
-        }
-      },
-      {
-        "tool": "explore",
-        "operation": "outline",
-        "arguments": {
-          "operation": "outline",
-          "output": {
-            "format": "json",
-            "max_bytes": 0
-          }
-        }
-      },
-      {
-        "tool": "explore",
-        "operation": "localize",
-        "arguments": {
-          "operation": "localize",
           "output": {
             "format": "json",
             "max_bytes": 0
@@ -213,97 +150,15 @@
             "symbol": "sample.go::Example"
           }
         }
-      },
-      {
-        "tool": "change",
-        "operation": "verify",
-        "arguments": {
-          "operation": "verify",
-          "output": {
-            "format": "json",
-            "max_bytes": 0
-          },
-          "source": {
-            "changes": [
-              {
-                "new_signature": "func Example() int",
-                "symbol_id": "sample.go::Example"
-              }
-            ]
-          }
-        }
-      },
-      {
-        "tool": "change",
-        "operation": "tests",
-        "arguments": {
-          "operation": "tests",
-          "output": {
-            "format": "json",
-            "max_bytes": 0
-          },
-          "target": {
-            "symbols": [
-              "sample.go::Example"
-            ]
-          }
-        }
-      },
-      {
-        "tool": "change",
-        "operation": "detect",
-        "arguments": {
-          "operation": "detect",
-          "output": {
-            "format": "json",
-            "max_bytes": 0
-          },
-          "source": {
-            "scope": "unstaged"
-          }
-        }
-      },
-      {
-        "tool": "trace",
-        "operation": "call_chain",
-        "arguments": {
-          "operation": "call_chain",
-          "output": {
-            "format": "json",
-            "max_bytes": 0
-          },
-          "target": {
-            "symbol": "sample.go::Example"
-          }
-        }
-      },
-      {
-        "tool": "analyze",
-        "operation": "hotspots",
-        "arguments": {
-          "kind": "hotspots",
-          "output": {
-            "format": "json",
-            "max_bytes": 0
-          }
-        }
-      },
-      {
-        "tool": "analyze",
-        "operation": "dead_code",
-        "arguments": {
-          "kind": "dead_code",
-          "output": {
-            "format": "json",
-            "max_bytes": 0
-          }
-        }
       }
     ],
     "cpu_profile_seconds": 0,
     "warm_timeout_seconds": 0,
     "stop_timeout_seconds": 0,
-    "keep_state": false
+    "keep_state": false,
+    "session_model": "per_agent",
+    "sweep_repetitions": 0,
+    "sweep_budget_seconds": 0
   },
   "host": {
     "machine": "sample-host",
@@ -334,9 +189,10 @@
       "proposed_signature": "func Example() int"
     }
   ],
-  "request_plan_sha256": "fb510994f978a408e000b36d7d54c90cf49e7ddb0e96a89896893bb5b4302c6d",
+  "request_plan_sha256": "c09f35245571114fb5ad710327db2f3b2b6d6934a0d6a22dc400022dc6370f81",
   "phases": [
     {
+      "session_model": "per_agent",
       "operations": [
         {
           "tool": "search",
@@ -360,18 +216,6 @@
               "max_bytes": 0
             },
             "query": "Example"
-          }
-        },
-        {
-          "tool": "search",
-          "operation": "files",
-          "arguments": {
-            "operation": "files",
-            "output": {
-              "format": "json",
-              "max_bytes": 0
-            },
-            "query": "sample.go"
           }
         },
         {
@@ -459,61 +303,10 @@
           }
         },
         {
-          "tool": "relations",
-          "operation": "dependents",
-          "arguments": {
-            "operation": "dependents",
-            "output": {
-              "format": "json",
-              "max_bytes": 0
-            },
-            "target": {
-              "symbol": "sample.go::Example"
-            }
-          }
-        },
-        {
-          "tool": "relations",
-          "operation": "implementations",
-          "arguments": {
-            "operation": "implementations",
-            "output": {
-              "format": "json",
-              "max_bytes": 0
-            },
-            "target": {
-              "symbol": "sample.go::Example"
-            }
-          }
-        },
-        {
           "tool": "explore",
           "operation": "context",
           "arguments": {
             "operation": "context",
-            "output": {
-              "format": "json",
-              "max_bytes": 0
-            },
-            "task": "Example"
-          }
-        },
-        {
-          "tool": "explore",
-          "operation": "outline",
-          "arguments": {
-            "operation": "outline",
-            "output": {
-              "format": "json",
-              "max_bytes": 0
-            }
-          }
-        },
-        {
-          "tool": "explore",
-          "operation": "localize",
-          "arguments": {
-            "operation": "localize",
             "output": {
               "format": "json",
               "max_bytes": 0
@@ -532,91 +325,6 @@
             },
             "target": {
               "symbol": "sample.go::Example"
-            }
-          }
-        },
-        {
-          "tool": "change",
-          "operation": "verify",
-          "arguments": {
-            "operation": "verify",
-            "output": {
-              "format": "json",
-              "max_bytes": 0
-            },
-            "source": {
-              "changes": [
-                {
-                  "new_signature": "func Example() int",
-                  "symbol_id": "sample.go::Example"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "tool": "change",
-          "operation": "tests",
-          "arguments": {
-            "operation": "tests",
-            "output": {
-              "format": "json",
-              "max_bytes": 0
-            },
-            "target": {
-              "symbols": [
-                "sample.go::Example"
-              ]
-            }
-          }
-        },
-        {
-          "tool": "change",
-          "operation": "detect",
-          "arguments": {
-            "operation": "detect",
-            "output": {
-              "format": "json",
-              "max_bytes": 0
-            },
-            "source": {
-              "scope": "unstaged"
-            }
-          }
-        },
-        {
-          "tool": "trace",
-          "operation": "call_chain",
-          "arguments": {
-            "operation": "call_chain",
-            "output": {
-              "format": "json",
-              "max_bytes": 0
-            },
-            "target": {
-              "symbol": "sample.go::Example"
-            }
-          }
-        },
-        {
-          "tool": "analyze",
-          "operation": "hotspots",
-          "arguments": {
-            "kind": "hotspots",
-            "output": {
-              "format": "json",
-              "max_bytes": 0
-            }
-          }
-        },
-        {
-          "tool": "analyze",
-          "operation": "dead_code",
-          "arguments": {
-            "kind": "dead_code",
-            "output": {
-              "format": "json",
-              "max_bytes": 0
             }
           }
         }

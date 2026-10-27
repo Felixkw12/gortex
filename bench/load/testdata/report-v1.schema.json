@@ -756,6 +756,9 @@
               "null"
             ]
           },
+          "session_model": {
+            "type": "string"
+          },
           "started": {
             "format": "date-time",
             "type": "string"
@@ -1082,6 +1085,7 @@
           }
         },
         "required": [
+          "session_model",
           "operations",
           "name",
           "started",
@@ -1219,8 +1223,17 @@
         "seed": {
           "type": "integer"
         },
+        "session_model": {
+          "type": "string"
+        },
         "stop_timeout_seconds": {
           "type": "number"
+        },
+        "sweep_budget_seconds": {
+          "type": "number"
+        },
+        "sweep_repetitions": {
+          "type": "integer"
         },
         "warm_timeout_seconds": {
           "type": "number"
@@ -1239,7 +1252,10 @@
         "cpu_profile_seconds",
         "warm_timeout_seconds",
         "stop_timeout_seconds",
-        "keep_state"
+        "keep_state",
+        "session_model",
+        "sweep_repetitions",
+        "sweep_budget_seconds"
       ],
       "type": "object"
     }

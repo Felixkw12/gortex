@@ -66,7 +66,7 @@ func TestVisibilityRequiresActualIndexedIdentity(t *testing.T) {
 func TestRunOptionsFloorAndExplicitSaturation(t *testing.T) {
 	base := []string{"--binary", "unused", "--manifest", "unused", "--scratch", t.TempDir()}
 	options, err := parseRun(base)
-	if err != nil || options.Profile != "agent" {
+	if err != nil || options.Profile != "agent" || options.SweepRepetitions != 15 || options.SweepBudget != 10*time.Minute {
 		t.Fatalf("defaults: %+v %v", options, err)
 	}
 	if _, err := parseRun(append(base, "--profile", "saturation")); err != nil {

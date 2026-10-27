@@ -62,19 +62,22 @@ type request struct {
 // Workload is the complete normalized offered load. Binary paths, private
 // clone paths and revisions belong to the run identity, never the plan hash.
 type Workload struct {
-	Scenario        string    `json:"scenario"`
-	Agents          int       `json:"agents"`
-	EditAgents      int       `json:"edit_agents"`
-	LinkedWorktrees int       `json:"linked_worktrees"`
-	DurationSec     float64   `json:"duration_seconds"`
-	DeadlineSec     float64   `json:"product_deadline_seconds"`
-	Seed            int64     `json:"seed"`
-	Profile         string    `json:"profile"`
-	Operations      []request `json:"operations"`
-	CPUProfileSec   float64   `json:"cpu_profile_seconds"`
-	WarmTimeoutSec  float64   `json:"warm_timeout_seconds"`
-	StopTimeoutSec  float64   `json:"stop_timeout_seconds"`
-	KeepState       bool      `json:"keep_state"`
+	Scenario         string    `json:"scenario"`
+	Agents           int       `json:"agents"`
+	EditAgents       int       `json:"edit_agents"`
+	LinkedWorktrees  int       `json:"linked_worktrees"`
+	DurationSec      float64   `json:"duration_seconds"`
+	DeadlineSec      float64   `json:"product_deadline_seconds"`
+	Seed             int64     `json:"seed"`
+	Profile          string    `json:"profile"`
+	Operations       []request `json:"operations"`
+	CPUProfileSec    float64   `json:"cpu_profile_seconds"`
+	WarmTimeoutSec   float64   `json:"warm_timeout_seconds"`
+	StopTimeoutSec   float64   `json:"stop_timeout_seconds"`
+	KeepState        bool      `json:"keep_state"`
+	SessionModel     string    `json:"session_model"`
+	SweepRepetitions int       `json:"sweep_repetitions"`
+	SweepBudgetSec   float64   `json:"sweep_budget_seconds"`
 }
 
 func (r request) name() string {
@@ -95,7 +98,7 @@ func hashJSON(value any) (string, error) {
 
 // These are logical, repo-relative targets. Expansion to a private clone's
 // absolute path happens only at dispatch; the plan hash is identical per build.
-func readingPlan(c Corpus) ([]request, error) {
+func benchmarkPlan(c Corpus) ([]request, error) {
 	if err := validateCorpus(c); err != nil {
 		return nil, err
 	}
@@ -115,7 +118,7 @@ func readingPlan(c Corpus) ([]request, error) {
 		{Tool: "relations", Operation: "implementations", Arguments: map[string]any{"operation": "implementations", "target": symbol}},
 		{Tool: "explore", Operation: "context", Arguments: map[string]any{"operation": "context", "task": c.Query}},
 		{Tool: "explore", Operation: "outline", Arguments: map[string]any{"operation": "outline"}},
-		{Tool: "explore", Operation: "localize", Arguments: map[string]any{"operation": "localize", "task": c.Query}},
+		{Tool: "explore", Operation: "localize", Arguments: map[string]any{"operation": "localize", "task": c.Query, "options": map[string]any{"new_user_task": true}}},
 		{Tool: "change", Operation: "impact", Arguments: map[string]any{"operation": "impact", "target": symbol}},
 		{Tool: "change", Operation: "verify", Arguments: map[string]any{"operation": "verify", "source": map[string]any{"changes": []map[string]any{{"symbol_id": c.Symbol, "new_signature": c.ProposedSignature}}}}},
 		{Tool: "change", Operation: "tests", Arguments: map[string]any{"operation": "tests", "target": map[string]any{"symbols": []string{c.Symbol}}}},
@@ -128,6 +131,23 @@ func readingPlan(c Corpus) ([]request, error) {
 		requests[i].Arguments["output"] = map[string]any{"format": "json", "max_bytes": 0}
 	}
 	return requests, nil
+}
+
+// Sustained navigation excludes terminal localization and mutually-exclusive
+// audits. The isolated sweep still measures the complete 21-operation set.
+func readingPlan(c Corpus) ([]request, error) {
+	all, err := benchmarkPlan(c)
+	if err != nil {
+		return nil, err
+	}
+	allowed := map[string]bool{"search.symbols": true, "search.text": true, "read.source": true, "read.file": true, "read.editing_context": true, "read.summary": true, "relations.callers": true, "relations.usages": true, "explore.context": true, "change.impact": true}
+	var selected []request
+	for _, r := range all {
+		if allowed[r.name()] {
+			selected = append(selected, r)
+		}
+	}
+	return selected, nil
 }
 
 var commitPattern = regexp.MustCompile(`^[a-fA-F0-9]{40}$`)

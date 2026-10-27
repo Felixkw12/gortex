@@ -142,8 +142,8 @@ func comparable(a, b Report) error {
 		reasons = append(reasons, "phase census differs")
 	} else {
 		for i := range a.Phases {
-			if a.Phases[i].Name != b.Phases[i].Name {
-				reasons = append(reasons, "phase order differs")
+			if a.Phases[i].Name != b.Phases[i].Name || a.Phases[i].SessionModel != b.Phases[i].SessionModel {
+				reasons = append(reasons, "phase order/session model differs")
 				break
 			}
 		}

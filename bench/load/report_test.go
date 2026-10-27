@@ -18,18 +18,20 @@ func sampleReport(t *testing.T) Report {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := Workload{Scenario: "read", Agents: 8, DurationSec: 60, DeadlineSec: 120, Seed: 42, Profile: "agent", Operations: operations}
+	w := Workload{Scenario: "read", SessionModel: "per_agent", Agents: 8, DurationSec: 60, DeadlineSec: 120, Seed: 42, Profile: "agent", Operations: operations}
 	hash, err := hashJSON(w)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Report{
+	r := Report{
 		SchemaVersion: reportVersion, RunID: "sample-run", GitSHA: strings.Repeat("b", 40), Binary: "/private/gortex", DaemonVersion: "sample", Started: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		Profile: "agent", Seed: 42, Workload: w, Corpus: []Corpus{c}, RequestPlan: hash,
 		Host:    Host{Machine: "sample-host", OS: "linux", Arch: "amd64", Kernel: "sample", Profile: "native", Limits: map[string]Metric{"cpu": measured(8, "cores")}},
 		Phases:  []Phase{{Name: "read", Operations: operations, Gate: map[string]json.RawMessage{"readiness": json.RawMessage(`{"ready":true,"enriched":true}`)}, Status: []json.RawMessage{json.RawMessage(`{"views":{},"storage":{"wal_pending_frames":0}}`)}, Stats: []json.RawMessage{json.RawMessage(`{"total_nodes":2,"total_edges":1}`)}, Tools: summarize([]Attempt{{Tool: "search.symbols", Role: "workload", Outcome: "success", LogicalMS: 1}}, 60, "workload"), Started: time.Date(2026, 1, 1, 0, 0, 1, 0, time.UTC), DurationSec: 60, EditLatency: distribution(nil, "ms"), Visibility: distribution(nil, "ms")}},
 		Metrics: map[string]Metric{"stop_seconds": measured(1, "s"), "daemon_cpu_cores": measured(2, "cores"), "pss": unavailable("bytes", "not available on this OS")}, Complete: true,
 	}
+	r.Phases[0].SessionModel = "per_agent"
+	return r
 }
 
 func TestReportSchemaGolden(t *testing.T) {
@@ -107,6 +109,8 @@ func TestDeltaRejectsIncomparableOfferedLoads(t *testing.T) {
 		{"target", func(r *Report) { r.Corpus[0].Symbol = "other.go::Other" }},
 		{"host", func(r *Report) { r.Host.Machine = "other-host" }},
 		{"limits", func(r *Report) { r.Host.Limits["cpu"] = measured(4, "cores") }},
+		{"session model", func(r *Report) { r.Phases[0].SessionModel = "per_operation_isolated" }},
+		{"sweep repetition count", func(r *Report) { r.Workload.SweepRepetitions++ }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			a, b := sampleReport(t), sampleReport(t)

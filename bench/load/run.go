@@ -14,24 +14,26 @@ import (
 )
 
 type runOptions struct {
-	Binary      string
-	Manifest    string
-	Scratch     string
-	Output      string
-	GitSHA      string
-	Profile     string
-	Host        string
-	Scenario    string
-	Agents      int
-	Editors     int
-	Worktrees   int
-	Seed        int64
-	Duration    time.Duration
-	Deadline    time.Duration
-	WarmTimeout time.Duration
-	StopTimeout time.Duration
-	CPUProfile  time.Duration
-	KeepState   bool
+	Binary           string
+	Manifest         string
+	Scratch          string
+	Output           string
+	GitSHA           string
+	Profile          string
+	Host             string
+	Scenario         string
+	Agents           int
+	Editors          int
+	Worktrees        int
+	Seed             int64
+	Duration         time.Duration
+	Deadline         time.Duration
+	WarmTimeout      time.Duration
+	StopTimeout      time.Duration
+	CPUProfile       time.Duration
+	KeepState        bool
+	SweepRepetitions int
+	SweepBudget      time.Duration
 }
 
 func parseRun(args []string) (runOptions, error) {
@@ -55,6 +57,8 @@ func parseRun(args []string) (runOptions, error) {
 	f.DurationVar(&o.StopTimeout, "stop-timeout", 30*time.Second, "graceful owned-daemon shutdown budget before force kill")
 	f.DurationVar(&o.CPUProfile, "cpu-profile", 0, "CPU profile duration during eligible 8-reader or primary+4-worktree phase")
 	f.BoolVar(&o.KeepState, "keep-state", false, "retain private corpus/store for native diagnostics only (default removes completed scenario state)")
+	f.IntVar(&o.SweepRepetitions, "sweep-repetitions", 15, "samples per benchmark operation (smoke may explicitly use 1)")
+	f.DurationVar(&o.SweepBudget, "sweep-duration", 10*time.Minute, "separate total budget for the repeated paced sweep")
 	if err := f.Parse(args); err != nil {
 		return o, err
 	}
@@ -63,6 +67,9 @@ func parseRun(args []string) (runOptions, error) {
 	}
 	if _, err := parseProfile(o.Profile); err != nil {
 		return o, err
+	}
+	if o.SweepRepetitions < 1 || o.SweepBudget <= 0 {
+		return o, errors.New("sweep repetitions and duration must be positive")
 	}
 	if o.KeepState && o.Host != "native" {
 		return o, errors.New("reference/floor runs clean completed scenario stores; --keep-state is native diagnostics only")
@@ -188,6 +195,14 @@ func runCommand(ctx context.Context, args []string) error {
 	report.Workload.Scenario, report.Workload.Agents, report.Workload.EditAgents, report.Workload.LinkedWorktrees = o.Scenario, o.Agents, o.Editors, o.Worktrees
 	report.Workload.DurationSec, report.Workload.DeadlineSec, report.Workload.Seed, report.Workload.Profile = o.Duration.Seconds(), o.Deadline.Seconds(), o.Seed, o.Profile
 	report.Workload.CPUProfileSec, report.Workload.WarmTimeoutSec, report.Workload.StopTimeoutSec, report.Workload.KeepState = o.CPUProfile.Seconds(), o.WarmTimeout.Seconds(), o.StopTimeout.Seconds(), o.KeepState
+	report.Workload.SessionModel = "per_agent"
+	report.Workload.SweepRepetitions, report.Workload.SweepBudgetSec = o.SweepRepetitions, o.SweepBudget.Seconds()
+	if o.Scenario == "sweep" {
+		report.Workload.SessionModel = "per_operation_isolated"
+	}
+	if o.Scenario == "all" {
+		report.Workload.SessionModel = "per_agent_load_and_per_operation_isolated_sweep"
+	}
 	report.RequestPlan, err = hashJSON(report.Workload)
 	if err != nil {
 		return err

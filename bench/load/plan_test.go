@@ -42,7 +42,7 @@ func TestAgentPacingAndBusyBackoff(t *testing.T) {
 
 func TestSourceTargetsAndStablePlan(t *testing.T) {
 	c := sampleCorpus()
-	plan, err := readingPlan(c)
+	plan, err := benchmarkPlan(c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestSourceTargetsAndStablePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Source = "/other/private/clone"
-	other, err := readingPlan(c)
+	other, err := benchmarkPlan(c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +98,26 @@ func TestSourceTargetsAndStablePlan(t *testing.T) {
 		if _, err := readingPlan(c); err == nil {
 			t.Fatalf("unsafe file %q accepted", path)
 		}
+	}
+}
+
+func TestSustainedReadPlanIsNonterminalNavigation(t *testing.T) {
+	plan, err := readingPlan(sampleCorpus())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"search.symbols": true, "search.text": true, "read.source": true, "read.file": true, "read.editing_context": true, "read.summary": true, "relations.callers": true, "relations.usages": true, "explore.context": true, "change.impact": true}
+	if len(plan) != len(want) {
+		t.Fatalf("sustained operation census=%d", len(plan))
+	}
+	for _, r := range plan {
+		if !want[r.name()] {
+			t.Fatalf("terminal/audit operation in sustained load: %s", r.name())
+		}
+		delete(want, r.name())
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing sustained operations: %v", want)
 	}
 }
 

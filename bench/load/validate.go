@@ -49,6 +49,9 @@ func validateReport(data []byte, r Report) error {
 	if _, err := parseProfile(r.Profile); err != nil {
 		return err
 	}
+	if r.Workload.SessionModel == "" {
+		return errors.New("offered workload is missing its session model")
+	}
 	if r.Workload.Profile != r.Profile || r.Workload.Seed != r.Seed || r.Workload.Scenario == "" || r.Workload.Agents < 1 || r.Workload.EditAgents < 0 || r.Workload.LinkedWorktrees < 0 || r.Workload.DurationSec <= 0 || r.Workload.DeadlineSec <= 0 || len(r.Workload.Operations) == 0 {
 		return errors.New("invalid or incomplete offered workload")
 	}
@@ -94,6 +97,9 @@ func validateReport(data []byte, r Report) error {
 		}
 		seen[phase.Name] = true
 		if r.Complete {
+			if phase.SessionModel == "" {
+				return errors.New("complete phase is missing its session model")
+			}
 			if len(phase.Operations) == 0 || len(phase.Gate) == 0 || len(phase.Status) == 0 || len(phase.Stats) == 0 {
 				return errors.New("complete phase is missing plan/gate/status/stats observations")
 			}

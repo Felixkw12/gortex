@@ -14,7 +14,7 @@ import (
 )
 
 func runPhase(ctx context.Context, o runOptions, scenario string, corpora []Corpus, group, outputRoot string) (phase Phase, sweep []SweepEntry, artifacts map[string]string, crashes map[string]int, version string, resultErr error) {
-	phase = Phase{Name: scenario, Started: time.Now().UTC(), Gate: make(map[string]json.RawMessage), Metrics: make(map[string]Metric), EditLatency: distribution(nil, "ms"), Visibility: distribution(nil, "ms")}
+	phase = Phase{Name: scenario, SessionModel: "per_agent", Started: time.Now().UTC(), Gate: make(map[string]json.RawMessage), Metrics: make(map[string]Metric), EditLatency: distribution(nil, "ms"), Visibility: distribution(nil, "ms")}
 	artifacts, crashes = make(map[string]string), make(map[string]int)
 	var scenarioGroupStart map[string]Metric
 	if group != "" {
@@ -251,6 +251,26 @@ func runPhase(ctx context.Context, o runOptions, scenario string, corpora []Corp
 			return phase, nil, artifacts, crashes, version, err
 		}
 	}
+	var sweepRequests []request
+	var sweepClients []*socketClient
+	if scenario == "sweep" {
+		phase.SessionModel = "per_operation_isolated"
+		sweepRequests, sweep, err = discoverSweep(warmCtx, clients[0], p.Repos[0].Corpus)
+		if err != nil {
+			return phase, sweep, artifacts, crashes, version, err
+		}
+		phase.Operations = sweepRequests
+		for range sweepRequests {
+			client, err := openMCP(warmCtx, p.Socket, p.Repos[0].Path)
+			if err != nil {
+				return phase, sweep, artifacts, crashes, version, err
+			}
+			clients = append(clients, client)
+			sweepClients = append(sweepClients, client)
+		}
+		phase.Metrics["sweep_operation_sessions"] = measured(float64(len(sweepClients)), "sessions")
+	}
+	phase.Metrics["mcp_sessions"] = measured(float64(len(clients)), "sessions")
 	captureReceipt(ctx, p, clients[0], &phase)
 	phase.Started = time.Now().UTC()
 	sampler := newProcessSampler()
@@ -268,13 +288,10 @@ func runPhase(ctx context.Context, o runOptions, scenario string, corpora []Corp
 		}
 	}
 	if scenario == "sweep" {
-		sweepCtx, cancelSweep := context.WithTimeout(ctx, o.Duration)
+		sweepCtx, cancelSweep := context.WithTimeout(ctx, o.SweepBudget)
 		defer cancelSweep()
-		var requests []request
-		requests, sweep, err = discoverSweep(sweepCtx, clients[0], p.Repos[0].Corpus)
-		phase.Operations = requests
 		if err == nil {
-			err = runSweep(sweepCtx, o, clients[0], p.Repos[0], requests, sweep, &phase, waitContext)
+			err = runSweep(sweepCtx, o, sweepClients, p.Repos[0], sweepRequests, sweep, &phase, waitContext)
 			for _, entry := range sweep {
 				if entry.Status != "measured" && entry.Status != "outside_scope" {
 					phase.Errors = append(phase.Errors, "tool sweep "+entry.Tool+"."+entry.Operation+": "+entry.Status+": "+entry.Reason)

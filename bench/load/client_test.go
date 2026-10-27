@@ -17,10 +17,11 @@ import (
 )
 
 type stubFrame struct {
-	ID     int64          `json:"id"`
-	Method string         `json:"method"`
-	Params map[string]any `json:"params"`
-	Kind   string         `json:"kind"`
+	ID         int64          `json:"id"`
+	Method     string         `json:"method"`
+	Params     map[string]any `json:"params"`
+	Kind       string         `json:"kind"`
+	Connection int            `json:"-"`
 }
 
 // A real newline-framed daemon stub exercises the public CLI's transport;
@@ -53,6 +54,7 @@ func startStub(t *testing.T, handle func(stubFrame) (any, *rpcError)) string {
 			}
 			mu.Lock()
 			connections = append(connections, conn)
+			connectionID := len(connections)
 			mu.Unlock()
 			workers.Add(1)
 			go func() {
@@ -75,6 +77,7 @@ func startStub(t *testing.T, handle func(stubFrame) (any, *rpcError)) string {
 					if decoder.Decode(&frame) != nil {
 						return
 					}
+					frame.Connection = connectionID
 					if frame.Kind != "" {
 						result, _ := handle(frame)
 						encode(map[string]any{"ok": true, "result": result})
@@ -154,7 +157,7 @@ func TestStubDaemonSweepTargetsBusyAndMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	plan, err := readingPlan(sampleCorpus())
+	plan, err := benchmarkPlan(sampleCorpus())
 	if err != nil {
 		t.Fatal(err)
 	}

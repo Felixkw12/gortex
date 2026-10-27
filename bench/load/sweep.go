@@ -12,7 +12,7 @@ import (
 // Sweep every advertised domain/operation explicitly. Unsupported prerequisites
 // are evidence, not successful measurements or a claim of complete coverage.
 func discoverSweep(ctx context.Context, client *socketClient, corpus Corpus) ([]request, []SweepEntry, error) {
-	known, err := readingPlan(corpus)
+	known, err := benchmarkPlan(corpus)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -124,34 +124,50 @@ func sweepBurst(remaining int, p *pacing) int {
 	return size
 }
 
-func runSweep(ctx context.Context, o runOptions, client *socketClient, repo privateRepo, requests []request, inventory []SweepEntry, phase *Phase, sleep func(context.Context, time.Duration) error) error {
+func runSweep(ctx context.Context, o runOptions, clients []*socketClient, repo privateRepo, requests []request, inventory []SweepEntry, phase *Phase, sleep func(context.Context, time.Duration) error) error {
+	if len(clients) != len(requests) {
+		return errors.New("sweep requires one preopened isolated session per operation")
+	}
+	if o.SweepRepetitions < 1 {
+		return errors.New("sweep requires a positive repetition count")
+	}
 	pace := newPacing(profile(o.Profile), uint64(o.Seed))
 	var mu sync.Mutex
-	for index, step := 0, 0; index < len(requests); step++ {
-		if err := sleep(ctx, pace.think()); err != nil {
-			return err
-		}
-		size := sweepBurst(len(requests)-index, pace)
-		var burst sync.WaitGroup
-		for slot := range size {
-			r := requests[index+slot]
-			burst.Go(func() {
-				_, rows, err := callTool(ctx, client, r, dispatchArgs(r, repo), "workload", 0, step, slot, o.Deadline, sleep)
-				mu.Lock()
-				defer mu.Unlock()
-				phase.Attempts = append(phase.Attempts, rows...)
-				for i := range inventory {
-					if inventory[i].Tool == r.Tool && inventory[i].Operation == r.Operation {
-						inventory[i].Status = "measured"
-						if err != nil {
-							inventory[i].Status, inventory[i].Reason = "error", err.Error()
+	step := 0
+	for range o.SweepRepetitions {
+		for index := 0; index < len(requests); step++ {
+			if err := sleep(ctx, pace.think()); err != nil {
+				return err
+			}
+			size := sweepBurst(len(requests)-index, pace)
+			var burst sync.WaitGroup
+			for slot := range size {
+				r := requests[index+slot]
+				client := clients[index+slot]
+				burst.Go(func() {
+					_, rows, err := callTool(ctx, client, r, dispatchArgs(r, repo), "workload", 0, step, slot, o.Deadline, sleep)
+					mu.Lock()
+					defer mu.Unlock()
+					phase.Attempts = append(phase.Attempts, rows...)
+					for i := range inventory {
+						if inventory[i].Tool == r.Tool && inventory[i].Operation == r.Operation {
+							if inventory[i].Status != "error" {
+								inventory[i].Status = "measured"
+							}
+							if err != nil {
+								inventory[i].Status = "error"
+								if inventory[i].Reason != "" {
+									inventory[i].Reason += "; "
+								}
+								inventory[i].Reason += err.Error()
+							}
 						}
 					}
-				}
-			})
+				})
+			}
+			burst.Wait()
+			index += size
 		}
-		burst.Wait()
-		index += size
 	}
 	return nil
 }

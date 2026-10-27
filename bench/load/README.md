@@ -77,6 +77,19 @@ visibility separately. `saturation` is an explicit closed-loop opt-in.
 Both profiles back off on busy refusal `-32002`: 50, 100, 200, 400, 800 ms,
 then at most 1 second. Busy refusals never cause an immediate retry loop.
 
+Sustained reading uses ten operations: search symbols/text; read source/file/
+editing_context/summary; relations callers/usages; explore context; change
+impact. It omits terminal localization and mutually exclusive audits. Each
+load agent owns its session. The sweep instead preopens one independent session
+per operation, before timing, so one terminal localization cannot invalidate
+another tool's probe. Its two expensive analyses also occupy different bursts.
+Both the actual operation subset and session model are recorded and compared.
+The sweep defaults to 15 repetitions per operation and a separate explicit
+10-minute `--sweep-duration` budget. `--sweep-repetitions 1` is available for
+short wire smoke tests. Each localization repetition starts a new logical task;
+session creation is excluded from call timing. Every failed/censored repetition
+is retained, and the repetition count/budget are part of the workload hash.
+
 The typed workload records scenario, reader/editor counts, linked checkouts,
 duration, product deadline, seed, profile and normalized operation plans.
 Absolute clone paths and binary revisions are excluded from its hash. Attempts

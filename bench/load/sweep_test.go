@@ -8,7 +8,7 @@ import (
 )
 
 func TestSweepCensusPacingAndOutsideScopeInventory(t *testing.T) {
-	plan, err := readingPlan(sampleCorpus())
+	plan, err := benchmarkPlan(sampleCorpus())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,10 +25,15 @@ func TestSweepCensusPacingAndOutsideScopeInventory(t *testing.T) {
 		advertised = append(advertised, map[string]any{"name": domain, "inputSchema": map[string]any{"properties": map[string]any{key: map[string]any{"enum": ops}}}})
 	}
 	advertised = append(advertised, map[string]any{"name": "publish_review", "inputSchema": map[string]any{"properties": map[string]any{"operation": map[string]any{"enum": []string{"post"}}}}})
+	var mu sync.Mutex
+	usedConnections := make(map[int]bool)
 	socket := startStub(t, func(frame stubFrame) (any, *rpcError) {
 		if frame.Method == "tools/list" {
 			return map[string]any{"tools": advertised}, nil
 		}
+		mu.Lock()
+		usedConnections[frame.Connection] = true
+		mu.Unlock()
 		return stubContent(map[string]any{"ok": true}), nil
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -45,10 +50,18 @@ func TestSweepCensusPacingAndOutsideScopeInventory(t *testing.T) {
 	if len(requests) != 21 || len(inventory) != 22 {
 		t.Fatalf("sweep census selected=%d inventory=%d", len(requests), len(inventory))
 	}
-	var mu sync.Mutex
+	var isolated []*socketClient
+	for range requests {
+		operationClient, err := openMCP(ctx, socket, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		isolated = append(isolated, operationClient)
+		defer operationClient.Close()
+	}
 	var waits []time.Duration
 	phase := Phase{}
-	err = runSweep(ctx, runOptions{Profile: "agent", Seed: 42, Deadline: time.Second}, client, privateRepo{Prefix: "sample"}, requests, inventory, &phase, func(_ context.Context, delay time.Duration) error {
+	err = runSweep(ctx, runOptions{Profile: "agent", Seed: 42, Deadline: time.Second, SweepRepetitions: 1}, isolated, privateRepo{Prefix: "sample"}, requests, inventory, &phase, func(_ context.Context, delay time.Duration) error {
 		mu.Lock()
 		defer mu.Unlock()
 		waits = append(waits, delay)
@@ -56,6 +69,12 @@ func TestSweepCensusPacingAndOutsideScopeInventory(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	mu.Lock()
+	connectionCount := len(usedConnections)
+	mu.Unlock()
+	if connectionCount != 21 {
+		t.Fatalf("sweep shared session state: %d independent connections", connectionCount)
 	}
 	for _, wait := range waits {
 		if wait < 2*time.Second || wait > 5*time.Second {
@@ -110,5 +129,52 @@ func TestSweepBurstPartitionNeverLeavesOneOrTwo(t *testing.T) {
 				remaining -= size
 			}
 		}
+	}
+}
+
+func TestRepeatedSweepRetainsFirstFailureAndSampleCounts(t *testing.T) {
+	plan, err := readingPlan(sampleCorpus())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := plan[2:5]
+	var mu sync.Mutex
+	sourceCalls := 0
+	socket := startStub(t, func(frame stubFrame) (any, *rpcError) {
+		args, _ := frame.Params["arguments"].(map[string]any)
+		if args["operation"] == "source" {
+			mu.Lock()
+			sourceCalls++
+			fail := sourceCalls == 1
+			mu.Unlock()
+			if fail {
+				return map[string]any{"isError": true, "content": []any{map[string]any{"text": "first attempt fixture failure"}}}, nil
+			}
+		}
+		return stubContent(map[string]any{"ok": true}), nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var clients []*socketClient
+	var inventory []SweepEntry
+	for _, r := range requests {
+		client, err := openMCP(ctx, socket, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients = append(clients, client)
+		defer client.Close()
+		inventory = append(inventory, SweepEntry{Tool: r.Tool, Operation: r.Operation, Status: "planned"})
+	}
+	phase := Phase{}
+	if err := runSweep(ctx, runOptions{Profile: "agent", Seed: 42, Deadline: time.Second, SweepRepetitions: 15}, clients, privateRepo{Prefix: "sample"}, requests, inventory, &phase, func(context.Context, time.Duration) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	metrics := summarize(phase.Attempts, 1, "workload")
+	if len(phase.Attempts) != 45 || metrics["read.source"].Successes != 14 || len(metrics["read.source"].Errors) != 1 || metrics["read.file"].Latency.Count != 15 {
+		t.Fatalf("repetition results lost: %d %+v", len(phase.Attempts), metrics)
+	}
+	if inventory[0].Status != "error" || inventory[0].Reason == "" {
+		t.Fatalf("later success erased first failure: %+v", inventory[0])
 	}
 }

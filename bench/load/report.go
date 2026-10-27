@@ -116,23 +116,24 @@ type EditObservation struct {
 }
 
 type Phase struct {
-	Operations  []request                  `json:"operations"`
-	Name        string                     `json:"name"`
-	Started     time.Time                  `json:"started"`
-	DurationSec float64                    `json:"duration_seconds"`
-	Gate        map[string]json.RawMessage `json:"gate"`
-	Tools       map[string]ToolMetrics     `json:"tools"`
-	Probes      map[string]ToolMetrics     `json:"probes"`
-	Attempts    []Attempt                  `json:"attempts"`
-	Edits       []EditObservation          `json:"edits"`
-	EditLatency Distribution               `json:"edit_latency_ms"`
-	Visibility  Distribution               `json:"visible_latency_ms"`
-	NeverSeen   int                        `json:"never_visible"`
-	Censored    int                        `json:"visibility_censored"`
-	Metrics     map[string]Metric          `json:"metrics"`
-	Status      []json.RawMessage          `json:"daemon_status"`
-	Stats       []json.RawMessage          `json:"graph_stats"`
-	Errors      []string                   `json:"errors"`
+	SessionModel string                     `json:"session_model"`
+	Operations   []request                  `json:"operations"`
+	Name         string                     `json:"name"`
+	Started      time.Time                  `json:"started"`
+	DurationSec  float64                    `json:"duration_seconds"`
+	Gate         map[string]json.RawMessage `json:"gate"`
+	Tools        map[string]ToolMetrics     `json:"tools"`
+	Probes       map[string]ToolMetrics     `json:"probes"`
+	Attempts     []Attempt                  `json:"attempts"`
+	Edits        []EditObservation          `json:"edits"`
+	EditLatency  Distribution               `json:"edit_latency_ms"`
+	Visibility   Distribution               `json:"visible_latency_ms"`
+	NeverSeen    int                        `json:"never_visible"`
+	Censored     int                        `json:"visibility_censored"`
+	Metrics      map[string]Metric          `json:"metrics"`
+	Status       []json.RawMessage          `json:"daemon_status"`
+	Stats        []json.RawMessage          `json:"graph_stats"`
+	Errors       []string                   `json:"errors"`
 }
 
 type Report struct {
