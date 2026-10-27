@@ -12,6 +12,45 @@ const mutationRefusalFallbackTTL = 10 * time.Minute
 
 type fileScopeProbe func(cwd, path string) fileIndexStatus
 
+// The config registry names family primaries, not every automatic linked
+// checkout. Its outside-root gate must not hide an authoritative refusal for
+// the exact file being opened. This branch can only add recovery context;
+// ready/unknown/outside answers keep their previous silent behavior.
+func outsideConfiguredReadOnlyRecovery(input HookInput, probe fileScopeProbe) enrichResult {
+	path := ""
+	writing := false
+	switch input.ToolName {
+	case "Read", "Edit", "Write":
+		path, _ = input.ToolInput["file_path"].(string)
+		writing = input.ToolName != "Read"
+	case "Bash":
+		command, _ := input.ToolInput["command"].(string)
+		c := classifyBashCommand(command)
+		if c.Action != BashActionReadSource {
+			return enrichResult{}
+		}
+		path = c.Path
+	default:
+		return enrichResult{}
+	}
+	if !looksLikeSourceFile(path) || probe == nil {
+		return enrichResult{}
+	}
+	abs, ok := hookAbsScopePath(path, input.CWD)
+	// Local linked metadata only chooses a candidate. It never establishes
+	// membership or permission: the existing exact path probe does that.
+	if !ok || linkedWorktreeRoot(abs) == "" {
+		return enrichResult{}
+	}
+	// Preserve the original pair so Codex's rewrite/advisory decision can
+	// reuse its already-observed result instead of issuing a second probe.
+	st := probe(input.CWD, path)
+	if !st.ProbeOK || st.Unreached || !st.ReadOnly {
+		return enrichResult{}
+	}
+	return readOnlyNativeAllowance(writing)
+}
+
 // One real coverage probe remains authoritative. An unreached probe cannot be
 // turned into a fallback allowance; an explicit modern ready/read_only answer
 // wins over old local state without a PreToolUse session-state write.

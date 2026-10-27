@@ -534,13 +534,13 @@ func enrich(input HookInput, port int) enrichResult {
 }
 
 func enrichWithProbe(input HookInput, port int, probe fileScopeProbe) enrichResult {
-	// A call that touches no tracked repo has no graph to redirect to, so the
-	// access policy has nothing true to say about it. Checked once here rather
-	// than per-enrichment so every host tool the policy covers is gated the
-	// same way, and so a Gortex MCP call — which is not repo-scoped — is not.
+	// The configured registry bounds normal redirects. It does not enumerate
+	// automatic linked checkouts, so an outside-root candidate may still
+	// establish recovery from its exact file probe, without expanding ordinary
+	// enforcement. Gortex MCP calls are not repo-scoped by this gate.
 	if !isGortexMCPToolName(input.ToolName) &&
 		!hookCallTargetsTrackedRepo(input.ToolName, input.ToolInput, input.CWD) {
-		return enrichResult{}
+		return outsideConfiguredReadOnlyRecovery(input, probe)
 	}
 	switch input.ToolName {
 	case "Read":
