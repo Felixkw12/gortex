@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"go.uber.org/zap"
 	"sort"
 	"strings"
@@ -135,8 +137,15 @@ func (s *Server) handleFindCoChangingSymbols(ctx context.Context, req mcp.CallTo
 	// a fresh daemon on a disk backend takes tens of seconds before the cache is
 	// populated.
 	if len(rows) == 0 && !s.coChangeReady() {
-		result["mining_in_progress"] = true
-		result["note"] = "co-change graph is still being mined; retry shortly"
+		if err := s.coChangeFailure(); err != nil {
+			result["mining_in_progress"] = false
+			result["mining_failed"] = true
+			result["mining_error"] = err.Error()
+			result["note"] = "co-change mining failed; the automatic mine stopped. See mining_error instead of waiting for completion"
+		} else {
+			result["mining_in_progress"] = true
+			result["note"] = "co-change graph is still being mined; retry shortly"
+		}
 	}
 	return s.respondJSONOrTOON(ctx, req, result)
 }
@@ -248,6 +257,12 @@ func (s *Server) coChangeReady() bool {
 	return s.cochangeByFile != nil
 }
 
+func (s *Server) coChangeFailure() error {
+	s.cochangeMu.RLock()
+	defer s.cochangeMu.RUnlock()
+	return s.cochangeErr
+}
+
 // mineCoChange populates the co-change caches. It prefers EdgeCoChange
 // edges already present in the graph (an enriched snapshot); only when
 // none exist does it mine `git log`.
@@ -284,6 +299,16 @@ func (s *Server) mineCoChange() {
 }
 
 func (s *Server) mineCoChangeContext(ctx context.Context) {
+	var mineErr error
+	defer func() {
+		if err := errors.Join(mineErr, ctx.Err()); err != nil {
+			s.cochangeMu.Lock()
+			if s.cochangeByFile == nil {
+				s.cochangeErr = err
+			}
+			s.cochangeMu.Unlock()
+		}
+	}()
 	if ctx.Err() != nil {
 		return
 	}
@@ -334,6 +359,7 @@ func (s *Server) mineCoChangeContext(ctx context.Context) {
 		// this write is named against rather than whatever was swept.
 		out, err := s.beginEnrichmentOutput(ctx, EnrichProducerCochange, prefix, root)
 		if err != nil {
+			mineErr = errors.Join(mineErr, fmt.Errorf("admit cochange %q: %w", prefix, err))
 			if s.logger != nil {
 				s.logger.Debug("co-change mine: no output generation admitted",
 					zap.String("prefix", prefix), zap.Error(err))
@@ -343,10 +369,14 @@ func (s *Server) mineCoChangeContext(ctx context.Context) {
 		res, err := cochange.MineContext(ctx, out.Root, cochange.Options{})
 		if err != nil {
 			out.Abandon()
+			mineErr = errors.Join(mineErr, fmt.Errorf("mine cochange %q: %w", prefix, err))
 			if s.logger != nil && ctx.Err() == nil {
 				s.logger.Warn("co-change mine failed; cache not published", zap.String("prefix", prefix), zap.Error(err))
 			}
-			return
+			if ctx.Err() != nil {
+				return
+			}
+			continue
 		}
 		if len(res.Pairs) == 0 {
 			out.Abandon()
@@ -380,26 +410,31 @@ func (s *Server) mineCoChangeContext(ctx context.Context) {
 		}
 		if _, err := cochange.AddEdgesContext(ctx, out.Store, res.Pairs, prefix); err != nil {
 			out.Abandon()
+			mineErr = errors.Join(mineErr, fmt.Errorf("write cochange %q: %w", prefix, err))
 			if s.logger != nil && ctx.Err() == nil {
 				s.logger.Warn("co-change write failed; cache not published", zap.String("prefix", prefix), zap.Error(err))
 			}
-			return
+			if ctx.Err() != nil {
+				return
+			}
+			continue
 		}
 		// A supersession here is an ordering statement, not a failure: the
 		// edges above are already persisted, and a later run of the same
 		// producer over the same corpus is entitled to the authority.
 		if superseded, err := out.Settle(); err != nil {
+			mineErr = errors.Join(mineErr, fmt.Errorf("settle cochange %q: %w", prefix, err))
 			if s.logger != nil {
 				s.logger.Warn("co-change mine: output generation not settled",
 					zap.String("prefix", prefix), zap.Error(err))
 			}
-			return
+			continue
 		} else if superseded && s.logger != nil {
 			s.logger.Debug("co-change mine superseded by a newer run; its edges are persisted",
 				zap.String("prefix", prefix))
 		}
 	}
-	if ctx.Err() == nil {
+	if ctx.Err() == nil && mineErr == nil {
 		s.storeCoChange(scores, counts)
 	}
 }
@@ -518,6 +553,7 @@ func (s *Server) storeCoChange(scores map[string]map[string]float64, counts map[
 	s.cochangeMu.Lock()
 	s.cochangeByFile = scores
 	s.cochangeCount = counts
+	s.cochangeErr = nil
 	s.cochangeMu.Unlock()
 }
 

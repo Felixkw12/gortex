@@ -295,6 +295,7 @@ type Server struct {
 	cochangeMu     sync.RWMutex
 	cochangeByFile map[string]map[string]float64
 	cochangeCount  map[string]map[string]int
+	cochangeErr    error // terminal mine failure, guarded by cochangeMu
 
 	// autoIndexOnce guards the opt-in (GORTEX_AUTOINDEX=1) zero-config
 	// background index of an untracked cwd, fired at most once per session
