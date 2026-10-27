@@ -46,6 +46,9 @@ func DialTo(socketPath string, h Handshake) (*Client, error) {
 		return nil, err
 	}
 
+	// Capture the connected endpoint before a rejecting peer writes its ack
+	// and immediately closes; the kernel identity belongs to this connection.
+	peerPID := peerProcessID(conn)
 	if h.Version == 0 {
 		h.Version = ProtocolVersion
 	}
@@ -79,7 +82,6 @@ func DialTo(socketPath string, h Handshake) (*Client, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("parse handshake ack: %w", err)
 	}
-	peerPID := peerProcessID(conn)
 	if !ack.OK {
 		_ = conn.Close()
 		// Preserve mismatch identity for direction-aware startup handoff. It is
