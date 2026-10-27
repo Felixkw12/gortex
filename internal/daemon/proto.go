@@ -1013,6 +1013,11 @@ type FileCoverageResult struct {
 	// tool: the agent would have no read path at all. Repo names it.
 	RepoState string `json:"repo_state,omitempty"`
 	Repo      string `json:"repo,omitempty"`
+	// MutationState is read_only only while the current checkout's exact
+	// route has refused a stale source mutation. It is independent of read
+	// coverage: indexed reads can remain available while writes are refused.
+	MutationState  string `json:"mutation_state,omitempty"`
+	MutationReason string `json:"mutation_reason,omitempty"`
 }
 
 // DirCoverageParams is the payload for ControlDirCoverage. Path is the
