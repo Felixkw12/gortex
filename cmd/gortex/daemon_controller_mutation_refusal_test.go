@@ -3,17 +3,18 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/stretchr/testify/require"
-	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/graphview"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/graphview"
 	"github.com/zzet/gortex/internal/indexer"
 )
 

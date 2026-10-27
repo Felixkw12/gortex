@@ -3,13 +3,16 @@ package hooks
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/zzet/gortex/internal/daemon"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/zzet/gortex/internal/daemon"
 )
 
 const legacyStaleRefusal = "view_read_only: checkout mutation was not admitted; no files were changed: indexer: checkout mutation view is stale: checkout disk changed"
@@ -197,13 +200,18 @@ func TestReadOnlyFallbackCheckoutBoundaryAndSymlinkIsolation(t *testing.T) {
 	if mutationFallbackLive(st, root, time.Now()) || !mutationFallbackLive(st, other, time.Now()) {
 		t.Fatal("explicit selected checkout inherited caller CWD")
 	}
-	link := filepath.Join(root, "elsewhere")
-	if err := os.Symlink(other, link); err != nil {
-		t.Fatal(err)
-	}
-	if got := mutationCheckoutRoot(root, filepath.Join(link, "new.go"), false); got != other {
-		t.Fatalf("new file through symlink borrowed wrong checkout: %s", got)
-	}
+	t.Run("symlinked new-file parent", func(t *testing.T) {
+		link := filepath.Join(root, "elsewhere")
+		if err := os.Symlink(other, link); err != nil {
+			if runtime.GOOS == "windows" && (errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.Errno(1314))) {
+				t.Skipf("Windows account lacks symlink privilege: %v", err)
+			}
+			t.Fatal(err)
+		}
+		if got := mutationCheckoutRoot(root, filepath.Join(link, "new.go"), false); got != other {
+			t.Fatalf("new file through symlink borrowed wrong checkout: %s", got)
+		}
+	})
 }
 
 func TestReadOnlyFallbackUncertainGitBoundaryCannotBorrowParent(t *testing.T) {
