@@ -405,6 +405,9 @@ type Server struct {
 	mutationReceipts    sync.Map
 	mutationReindexWait time.Duration
 	mutationSafetyWait  time.Duration
+	// mutationReceiptAfterFunc replaces retention scheduling in deterministic
+	// tests. Nil uses time.AfterFunc with the unchanged retention windows.
+	mutationReceiptAfterFunc func(time.Duration, func())
 	// mutationRouteWaitEntered observes a real pending source-mutation route
 	// after selection and before polling. Nil outside deterministic tests.
 	mutationRouteWaitEntered func(context.Context)

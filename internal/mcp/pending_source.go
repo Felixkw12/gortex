@@ -136,16 +136,19 @@ func (s *Server) refreshPendingSourceRecord(record *mutationCommitRecord) {
 				return
 			}
 			outcome := receipt.outcome(true)
-			if !outcome.Pending && outcome.Reindexed && outcome.Err == nil && snap.GraphStatus != mutationGraphPending {
+			unsettled := snap.GraphStatus == mutationGraphPending || (snap.GraphStatus == mutationGraphStale && !snap.GraphRecorded)
+			if !outcome.Pending && outcome.Reindexed && outcome.Err == nil && !unsettled {
 				record.mu.Lock()
 				record.pendingSourceRecovered = true
 				record.mu.Unlock()
 				return
 			}
-			if !outcome.Pending && snap.GraphStatus == mutationGraphPending {
+			if !outcome.Pending && unsettled {
 				record.recordGraph(outcome)
 			}
 		}
+	} else {
+		record.markReceiptLost(snap.ReindexReceipt)
 	}
 }
 

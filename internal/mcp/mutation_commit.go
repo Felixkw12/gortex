@@ -133,6 +133,7 @@ type mutationCommitRecord struct {
 	checkoutID          string
 	checkoutIncarnation string
 	errText             string
+	graphReason         string
 
 	startedAt   time.Time
 	committedAt time.Time
@@ -159,6 +160,7 @@ type mutationCommitSnapshot struct {
 	NewSHA              string `json:"new_sha,omitempty"`
 	BytesWritten        int    `json:"bytes_written,omitempty"`
 	Error               string `json:"error,omitempty"`
+	Reason              string `json:"reason,omitempty"`
 	StartedAt           string `json:"started_at,omitempty"`
 	CommittedAt         string `json:"committed_at,omitempty"`
 	ReindexReceipt      string `json:"reindex_receipt,omitempty"`
@@ -183,6 +185,7 @@ func (r *mutationCommitRecord) snapshot() mutationCommitSnapshot {
 		NewSHA:              r.newSHA,
 		BytesWritten:        r.bytesWritten,
 		Error:               r.errText,
+		Reason:              r.graphReason,
 		ReindexReceipt:      r.reindexReceipt,
 		ReindexGeneration:   r.reindexGeneration,
 		AppliedGeneration:   r.appliedGeneration,
@@ -280,6 +283,7 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 	}
 	r.graph = graphStatusFor(outcome)
 	r.graphRecorded = true
+	r.graphReason = ""
 	if ledger != nil {
 		ledger.unbindFreshnessLocked(r)
 		// A detached completion must not resurrect an evicted commit.
@@ -300,6 +304,21 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 	} else if r.disk == mutationDiskCommitted {
 		r.errText = ""
 	}
+}
+
+// A missing bound ticket is terminal failure, never publication evidence. The
+// identity/state recheck avoids overriding a concurrent rebind or completion.
+func (r *mutationCommitRecord) markReceiptLost(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if id == "" || r.reindexReceipt != id ||
+		(r.graph != mutationGraphPending && (r.graph != mutationGraphStale || r.graphRecorded)) {
+		return
+	}
+	r.graph = mutationGraphFailed
+	r.graphRecorded = true
+	r.graphReason = "receipt_lost"
+	r.errText = "graph freshness receipt " + id + " is no longer retained"
 }
 
 // retainResponse stores the successful payload for idempotent replay. Only
@@ -331,15 +350,6 @@ func (r *mutationCommitRecord) replayResponse() (map[string]any, bool) {
 		clone[key] = value
 	}
 	return clone, true
-}
-
-func (r *mutationCommitRecord) pendingReindexReceipt() string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.graph != mutationGraphPending {
-		return ""
-	}
-	return r.reindexReceipt
 }
 
 // graphStatusFor collapses a reindex outcome into the graph half of a receipt.

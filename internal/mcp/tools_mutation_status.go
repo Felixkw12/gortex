@@ -80,6 +80,7 @@ func (s *Server) handleMutationStatus(ctx context.Context, req mcp.CallToolReque
 	var records []*mutationCommitRecord
 	for _, record := range s.mutationCommits.recent(maxMutationCommits) {
 		if mutationCommitInScope(ctx, record) {
+			s.refreshPendingSourceRecord(record)
 			records = append(records, record)
 			if len(records) == maxMutationCommitListing {
 				break
@@ -168,11 +169,7 @@ func (s *Server) recentMutationCommitInScope(ctx context.Context, path string) (
 // pending receipt would read as pending forever, which is precisely the stale
 // answer this tool exists to avoid.
 func (s *Server) mutationStatusPayload(record *mutationCommitRecord) map[string]any {
-	if pending := record.pendingReindexReceipt(); pending != "" {
-		if outcome, ok := s.mutationReceiptState(pending); ok {
-			record.recordGraph(outcome)
-		}
-	}
+	s.refreshPendingSourceRecord(record)
 	snap := record.snapshot()
 	payload := map[string]any{
 		"found":        true,
@@ -204,7 +201,9 @@ func (s *Server) mutationStatusPayload(record *mutationCommitRecord) map[string]
 	payload["retry_safe"] = snap.DiskStatus == mutationDiskNotApplied || snap.DiskStatus == mutationDiskFailed
 	payload["graph_status_terminal"] = graphStatusTerminal(snap.GraphStatus, snap.GraphRecorded)
 	s.attachRecordDerivedFanout(payload, record, snap)
-	if note := mutationGraphStatusNote(snap.GraphStatus, snap.GraphRecorded, snap.CheckoutID); note != "" {
+	if snap.Reason == "receipt_lost" {
+		payload["graph_note"] = "publication outcome is unavailable because its freshness receipt was lost; this does not establish graph freshness"
+	} else if note := mutationGraphStatusNote(snap.GraphStatus, snap.GraphRecorded, snap.CheckoutID); note != "" {
 		payload["graph_note"] = note
 	}
 	payload["guidance"] = mutationStatusGuidance(snap.DiskStatus)
@@ -261,6 +260,9 @@ func mutationGraphStatusNote(graph string, recorded bool, checkoutID string) str
 }
 
 func attachMutationRefreshSnapshot(payload map[string]any, snap mutationCommitSnapshot) {
+	if snap.Reason != "" {
+		payload["reason"] = snap.Reason
+	}
 	if snap.ReindexReceipt != "" {
 		payload["reindex_receipt"] = snap.ReindexReceipt
 	}
@@ -280,9 +282,8 @@ func attachMutationRefreshSnapshot(payload map[string]any, snap mutationCommitSn
 
 // graphStatusTerminal answers the only question a caller actually has about
 // the graph half: is it still worth waiting? Once an outcome is recorded only
-// "pending" resolves on its own — mutationStatusPayload refreshes a record
-// through pendingReindexReceipt, which returns nothing once the record left
-// that state, so every other value is frozen for the life of the entry.
+// "pending" can resolve on its own. A lost pending receipt settles as failed;
+// an explicitly recorded terminal stale outcome remains historical evidence.
 // Rendering the four values without this flag makes a terminal one look like a
 // stage in a progression, and a caller that waits on it waits forever.
 //
@@ -335,19 +336,8 @@ func mutationStatusGuidance(disk string) string {
 }
 
 // mutationCommitListingPayload renders the listing with the same graph
-// terminality the single-record payload carries. It deliberately does not
-// refresh pending records the way mutationStatusPayload does: a listing is a
-// survey, and a caller acting on one entry selects it by receipt, which takes
-// the refreshing path.
-//
-// Worth naming because it is surprising: a frozen graph_status is
-// observer-dependent. mutationStatusPayload only refreshes while the record is
-// pending, so if someone calls change.receipt in the window between an ingest
-// failure and a later mutation that supersedes it, the ledger reads "failed"
-// for the life of the entry; if nobody looks in that window, the same history
-// renders "fresh". The notes handle the consequence by pointing at the
-// freshness receipt rather than this ledger, which is the structure that
-// actually gates change.detect.
+// terminality the single-record payload carries. The listing handler refreshes
+// selected records first; this renderer only formats their current snapshots.
 func mutationCommitListingPayload(records []*mutationCommitRecord) []map[string]any {
 	snaps := mutationCommitListing(records)
 	out := make([]map[string]any, 0, len(snaps))

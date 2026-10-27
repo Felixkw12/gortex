@@ -279,16 +279,14 @@ func (s *Server) trackScopedMutationTicket(ticket *indexer.MutationTicket, repo,
 		// closes, so a caller that waited on the receipt observes a drained
 		// lease rather than racing this goroutine for it.
 		receipt.releaseViewPin()
-		close(receipt.done)
 		retention := mutationReceiptRetention
 		if receipt.checkoutScoped {
 			// A commit receipt can be queried long after publication finished.
 			// Its freshness ticket must outlive that ledger's polling window.
 			retention = mutationCommitRetention
 		}
-		time.AfterFunc(retention, func() {
-			s.mutationReceipts.Delete(receipt.id)
-		})
+		s.scheduleMutationReceiptExpiry(receipt, retention)
+		close(receipt.done)
 	}()
 	return receipt
 }
