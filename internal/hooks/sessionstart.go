@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/agents"
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/pathkey"
 	"github.com/zzet/gortex/internal/profiles"
@@ -162,6 +163,10 @@ func fetchDaemonProbeAsStatus() (*daemon.StatusResponse, error) {
 		return nil, err
 	}
 
+	return sessionStartStatusFromProbe(probe), nil
+}
+
+func sessionStartStatusFromProbe(probe daemon.ProbeResponse) *daemon.StatusResponse {
 	status := &daemon.StatusResponse{
 		Version:            probe.Version,
 		PID:                probe.PID,
@@ -178,9 +183,12 @@ func fetchDaemonProbeAsStatus() (*daemon.StatusResponse, error) {
 			Name:      r.Name,
 			Workspace: r.Workspace,
 			Project:   r.Project,
+			Loading:   r.State == daemon.RepoStateLoading,
+			Unloaded:  r.State == daemon.RepoStateLoading || r.State == daemon.RepoStateFailed || r.State == daemon.RepoStateMissing,
+			Missing:   r.State == daemon.RepoStateMissing,
 		})
 	}
-	return status, nil
+	return status
 }
 
 // sessionStartProbeBudget bounds the fallback. Probe touches no store, no
@@ -415,7 +423,7 @@ func renderCwdCoverage(cwd string, s *daemon.StatusResponse) string {
 			abs, len(contained), summary, len(contained), example)
 	default:
 		if pendingAutomaticCheckout(abs, s.TrackedRepos) {
-			return fmt.Sprintf("⏳ **cwd `%s` is a Git checkout awaiting automatic discovery.** Its Git family is already tracked, but the overlay route is not published yet. Do not run `gortex track`; wait for reconciliation and reconnect. Explicit tracking is only for a user-requested dedicated graph.\n", abs)
+			return fmt.Sprintf("⏳ **Checkout discovery is pending for cwd `%s`.** %s\n", abs, agents.PendingAutomaticCheckoutGuidance)
 		}
 		return fmt.Sprintf("⚠️  **cwd `%s` is not covered by any tracked repo.** Read/Grep/Glob/Bash will fall through to soft guidance only — graph tools won't be available for this directory.\n\nTo enable enforcement: `gortex track %s`\n",
 			abs, abs)
@@ -429,7 +437,17 @@ func pendingAutomaticCheckout(cwd string, repos []daemon.TrackedRepoStatus) bool
 			roots = append(roots, repo.Path)
 		}
 	}
-	return agents.PendingAutomaticCheckout(cwd, roots)
+	return agents.PendingAutomaticCheckout(cwd, agents.FamilyRepoRoots(roots, hookConfiguredRepoRoots()))
+}
+
+// Hooks read only declarations; an unavailable config does not invent family
+// membership. Tests can supply a private snapshot without reading user state.
+var hookConfiguredRepoRoots = func() []string {
+	gc, err := config.LoadGlobal()
+	if err != nil {
+		return nil
+	}
+	return gc.ConfiguredRepoRoots()
 }
 
 // classifyCwd partitions the relationship between cwd and the daemon's
@@ -442,6 +460,9 @@ func classifyCwd(cwd string, repos []daemon.TrackedRepoStatus) (exact *daemon.Tr
 	var enclosing *daemon.TrackedRepoStatus
 	for i := range repos {
 		repo := repos[i]
+		if repo.Unloaded && !repo.Loading {
+			continue // a terminal configured declaration is not live graph coverage
+		}
 		repoPath := filepath.Clean(repo.Path)
 		if pathkey.EqualPaths(repoPath, cwd) {
 			exact = &repos[i]
@@ -476,7 +497,7 @@ func hasPathPrefix(path, prefix string) bool {
 // — this is just enough that an agent in the very first turn knows
 // to reach for graph tools first.
 func rulePreamble() string {
-	return "**Rule:** For an explicitly named file that the user asks you to read, review, or summarize, on the first direct file read caused by a new user request call `read(operation:\"file\", target:{file:\"<path>\"}, options:{new_user_task:true})`; do not start localization. " +
+	return "**Rule:** When Gortex can serve the step: For an explicitly named file that the user asks you to read, review, or summarize, on the first direct file read caused by a new user request call `read(operation:\"file\", target:{file:\"<path>\"}, options:{new_user_task:true})`; do not start localization. " +
 		"Otherwise choose by requested output: when the requested output is files, symbols, or supporting evidence, call the mounted tool `mcp__gortex__explore` (never a bare `explore`) with `operation:\"localize\"`; it returns terminal evidence. " +
 		"Its localize task may be concise, but must faithfully preserve the issue title and every user-supplied technical identifier, path, literal, error, symptom, and stated hypothesis; never invent a causal hypothesis. " +
 		"A clearly framed problem section may be restored exactly at execution only for a clearly lossy model task, so evidence can reflect details beyond a concise tool argument. " +
@@ -484,7 +505,6 @@ func rulePreamble() string {
 		"After starting localization, obey `completion.required_action`. For `needs_recovery`, make one accepted, bounded Gortex MCP `search` or `read` call. If Gortex explicitly rejects an overbroad request and preserves the recovery allowance, correct it using only Gortex MCP `search` or `read`; the rejected request does not count as the accepted recovery. Do not call host Read, Grep, Glob, or Bash. At `answer_ready`, respond from `completion.final_response` and make no further tool calls. In that final response, each PRIMARY or SUPPORTING row is one aligned file/symbol tuple; preserve the PRIMARY file and symbol identities in the answer, while SUPPORTING rows are optional context. " +
 		"Any later Gortex navigation call for that same task is intentionally not executed and replays the same retained terminal payload; identical output is expected, not stale or canned output or an integration failure. " +
 		"Inspect indexed code with `search`, `read`, `relations`, or `trace`. " +
-		"Outside an active localization contract, use native read, search, or edit tools only when Gortex performance or integration is actually bad. " +
 		"Before mutation call `change(operation:\"impact\")`; " +
 		"for a signature change also call `change(operation:\"verify\")` with the proposed signature. " +
 		"Mutate with `edit` or `refactor`. After mutation call `change(operation:\"detect\")`; " +

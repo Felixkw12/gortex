@@ -910,6 +910,19 @@ func (dw *DeltaWriter) EvictFiles(filePaths []string) (int, int) {
 	return nodes, edges
 }
 
+// EvictFilesWithNodeIDs retains the bounded legacy identity frontier alongside
+// the ordinary covered files, including incoming sources the deletion affects.
+func (dw *DeltaWriter) EvictFilesWithNodeIDs(filePaths, nodeIDs []string) (int, int) {
+	dw.writeMu.Lock()
+	defer dw.writeMu.Unlock()
+	defer dw.claimingFor("EvictFilesWithNodeIDs")()
+	dw.prepareEviction(filePaths)
+	before := dw.prepareNodeEviction(nodeIDs)
+	nodes, edges := dw.work.EvictFilesWithNodeIDs(filePaths, nodeIDs)
+	dw.markEvicted(before)
+	return nodes, edges
+}
+
 // prepareEviction covers the paths and claims every edge outside them the
 // eviction removes: the store's eviction removes every edge into an evicted
 // node wherever it was recorded. An edge the working graph already holds (its

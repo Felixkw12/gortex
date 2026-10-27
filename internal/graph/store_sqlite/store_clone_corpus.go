@@ -172,7 +172,7 @@ WHERE view_gen = ? AND repo_prefix = ? AND node_id IN (` + placeholders + `)`
 SET clone_sig = NULLIF((SELECT signature FROM clone_shingles WHERE node_id = nodes.id AND view_gen = ?), '')
 WHERE id IN (` + placeholders + `) AND repo_prefix = ? AND view_gen = ?
   AND clone_sig IS NOT NULLIF((SELECT signature FROM clone_shingles WHERE node_id = nodes.id AND view_gen = ?), '')`
-		if _, err := tx.Exec(updateNodes, nodeArgs...); err != nil {
+		if _, err := countNodeWrite(tx.Exec(updateNodes, nodeArgs...)); err != nil {
 			return err
 		}
 	}
@@ -193,7 +193,7 @@ func (s *Store) ReplaceCloneCorpus(repoPrefix string, rows []graph.CloneCorpusRo
 	if _, err := tx.Exec(`DELETE FROM clone_shingles WHERE view_gen = ? AND repo_prefix = ?`, s.viewGen, repoPrefix); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE nodes SET clone_sig = NULL WHERE repo_prefix = ? AND view_gen = ? AND clone_sig IS NOT NULL`, repoPrefix, s.viewGen); err != nil {
+	if _, err := countNodeWrite(tx.Exec(`UPDATE nodes SET clone_sig = NULL WHERE repo_prefix = ? AND view_gen = ? AND clone_sig IS NOT NULL`, repoPrefix, s.viewGen)); err != nil {
 		return err
 	}
 	if err := upsertCloneCorpusTx(tx, s.viewGen, repoPrefix, rows); err != nil {
@@ -275,7 +275,7 @@ WHERE clone_shingles.repo_prefix IS NOT excluded.repo_prefix
 SET clone_sig = NULLIF((SELECT signature FROM clone_shingles WHERE node_id = nodes.id AND view_gen = ?), '')
 WHERE id IN (` + placeholders + `) AND view_gen = ?
   AND clone_sig IS NOT NULLIF((SELECT signature FROM clone_shingles WHERE node_id = nodes.id AND view_gen = ?), '')`
-		if _, err := tx.Exec(update, updateArgs...); err != nil {
+		if _, err := countNodeWrite(tx.Exec(update, updateArgs...)); err != nil {
 			return err
 		}
 	}

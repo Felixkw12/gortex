@@ -57,7 +57,7 @@ func (s *Store) ReplaceDerivedContracts(replacement graph.DerivedContractReplace
 			args = append(args, edge.From, edge.To, string(edge.Kind), edge.FilePath, edge.Line)
 		}
 		args = append(args, s.viewGen)
-		removed, execErr := tx.Exec(edgeExactDeleteByIdentitySQL(values.String()), args...)
+		removed, execErr := countEdgeWrite(tx.Exec(edgeExactDeleteByIdentitySQL(values.String()), args...))
 		if execErr != nil {
 			return graph.DerivedContractReplaceResult{}, execErr
 		}
@@ -85,9 +85,9 @@ WITH selected(id) AS (
 		}
 		result.EdgesRemoved += int(rows)
 
-		removed, execErr := tx.Exec(bridgeIDs+`
+		removed, execErr := countNodeWrite(tx.Exec(bridgeIDs+`
 DELETE FROM nodes WHERE id IN (SELECT id FROM bridges) AND view_gen = ?`,
-			bridgeJSON, s.viewGen, string(graph.KindContractBridge), s.viewGen)
+			bridgeJSON, s.viewGen, string(graph.KindContractBridge), s.viewGen))
 		if execErr != nil {
 			return graph.DerivedContractReplaceResult{}, execErr
 		}
@@ -142,11 +142,11 @@ WITH frozen(id) AS (SELECT CAST(value AS TEXT) FROM json_each(?))`, "frozen",
 		}
 		result.EdgesRemoved += int(rows)
 
-		removed, execErr := tx.Exec(orphanTopicIDs+`
+		removed, execErr := countNodeWrite(tx.Exec(orphanTopicIDs+`
 DELETE FROM nodes WHERE id IN (SELECT id FROM orphan) AND view_gen = ?`,
 			topicJSON, s.viewGen, string(graph.KindTopic),
 			string(graph.EdgeProducesTopic), string(graph.EdgeConsumesTopic),
-			s.viewGen, s.viewGen)
+			s.viewGen, s.viewGen))
 		if execErr != nil {
 			return graph.DerivedContractReplaceResult{}, execErr
 		}
@@ -181,8 +181,8 @@ func deleteEdgesIncidentToSetTx(tx *sql.Tx, cte, setName string, cteArgs []any, 
 	var total int64
 	for _, column := range []string{"from_id", "to_id"} {
 		args := append(append([]any(nil), cteArgs...), viewGen)
-		removed, err := tx.Exec(cte+`
-DELETE FROM edges WHERE `+column+` IN (SELECT id FROM `+setName+`) AND view_gen = ?`, args...)
+		removed, err := countEdgeWrite(tx.Exec(cte+`
+DELETE FROM edges WHERE `+column+` IN (SELECT id FROM `+setName+`) AND view_gen = ?`, args...))
 		if err != nil {
 			return total, err
 		}

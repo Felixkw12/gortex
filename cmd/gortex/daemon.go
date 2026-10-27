@@ -25,6 +25,7 @@ import (
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/llm/conversationlog"
 	"github.com/zzet/gortex/internal/platform"
+	"github.com/zzet/gortex/internal/profiles"
 	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/runtimeactivity"
 	"github.com/zzet/gortex/internal/server"
@@ -250,6 +251,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	if configErr != nil {
 		logger.Warn("daemon: could not read log policy — using defaults", zap.Error(configErr))
 	}
+	refreshInstructionProfilesOnStart(profiles.DefaultDir(), canonicalVersion(), logger)
 	startupReporter := newDaemonStartupReporter(logger)
 	defer startupReporter.Stop()
 
@@ -2549,3 +2551,13 @@ func formatBytes(n uint64) string {
 
 // stubController is a placeholder Controller so `gortex daemon start`
 // works end-to-end before the real MultiIndexer integration lands. It
+
+// A profile conflict must not prevent the daemon serving the user's task.
+func refreshInstructionProfilesOnStart(dir, binaryVersion string, logger *zap.Logger) {
+	updated, err := profiles.RegenerateIfNeeded(dir, binaryVersion)
+	if err != nil {
+		logger.Warn("daemon: could not refresh instruction profiles; custom files preserved", zap.String("directory", dir), zap.Error(err))
+	} else if updated {
+		logger.Info("daemon: regenerated instruction profiles", zap.String("directory", dir), zap.String("version", binaryVersion))
+	}
+}

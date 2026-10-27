@@ -41,6 +41,7 @@ import (
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/telemetry"
 	"github.com/zzet/gortex/internal/tokens"
+	"github.com/zzet/gortex/internal/toolref"
 )
 
 // Version is set at build time.
@@ -1520,16 +1521,16 @@ Worktree and branch routing:
 
 ` + profiles.WorktreeBranchRoutingPolicy + `
 
-` + sharedParamLegend
+` + sharedParamLegend + "\n\n" + toolref.TransportText + " " + toolref.DegradedModeText
 
 // codingAgentInstructions is intentionally terse because some MCP hosts repeat
 // initialize instructions beside every rendered tool. It describes what to do,
 // not how the server versions or implements its tool surface.
-const codingAgentInstructions = `MUST use Gortex MCP. First explicit-file read per new user request: read(operation:"file", target:{file:"<path>"}, options:{new_user_task:true}); do not localize. Unknown file/symbol/evidence: explore(operation:"localize"); obey completion.required_action; stop at answer_ready. Diagnosis/change: explore(operation:"task"); 1 follow-up. Pre-edit: change(operation:"impact"); signature: change(operation:"verify"). Mutate only via edit/refactor. Post-edit: change(operation:"detect"), tests/guards/contract. capabilities only if fields unknown.
+const codingAgentInstructions = `When Gortex can serve the step: MUST use Gortex MCP. First explicit-file read per new user request: read(operation:"file", target:{file:"<path>"}, options:{new_user_task:true}); do not localize. Unknown file/symbol/evidence: explore(operation:"localize"); obey completion.required_action; stop at answer_ready. Diagnosis/change: explore(operation:"task"); 1 follow-up. Pre-edit: change(operation:"impact"); signature: change(operation:"verify"). Mutate only via edit/refactor. Post-edit: change(operation:"detect"), tests/guards/contract. capabilities only if fields unknown.
 
 Worktree and branch routing:
 
-` + profiles.WorktreeBranchRoutingPolicy
+` + profiles.WorktreeBranchRoutingPolicy + "\n" + toolref.TransportText + " " + toolref.DegradedModeText
 
 // ServerInstructionsUntracked is the inactive-state `instructions` variant
 // returned when a session's cwd is not covered by any tracked repo. Rather than
@@ -1543,8 +1544,7 @@ func ServerInstructionsUntracked(cwd string, roots ...string) string {
 	}
 	msg := fmt.Sprintf("Gortex is connected but INACTIVE for this directory: %q is not covered by any tracked repository, "+
 		"so the graph tools have nothing to answer with yet.\n\n"+
-		"To activate: run `gortex track %s`, then reconnect — the full tool catalogue and the "+
-		"graph become available.\n\n"+
+		"To activate: run `gortex track %s`, then retry graph calls; no reconnect is needed.\n\n"+
 		"Until then only capabilities and workspace_admin(operation:\"track\") will answer; every other call "+
 		"returns repo_not_tracked, so fall back to your own file reads and text search.", target, target)
 	// Append the tracked roots so the mismatch is self-diagnosing: a
@@ -1570,11 +1570,18 @@ func ServerInstructionsPendingAutomaticCheckout(cwd string, roots ...string) str
 	if target == "" {
 		target = "."
 	}
-	msg := fmt.Sprintf("Gortex is connected but this Git checkout is still awaiting automatic discovery: %q belongs to an already tracked Git family, but its overlay route is not published yet.\n\n"+
-		"Do not run `gortex track` for this state: implicit/session checkouts are automatic overlays. Wait for reconciliation and reconnect; if it remains unavailable, report the discovery lag. Explicit tracking is only for a user-requested dedicated graph.\n\n"+
-		"Until its route is published, graph calls may return repo_not_tracked rather than silently reading another checkout.\n\n"+
-		"Worktree and branch routing:\n\n%s", target, profiles.WorktreeBranchRoutingPolicy)
-	return appendTrackedRootsDiagnostic(msg, roots)
+	msg := fmt.Sprintf("Gortex is connected; checkout discovery is pending for %q.\n\n%s\n\n"+
+		"Retry after other work; if discovery is still pending after a few attempts, continue natively for this step and report the discovery lag.\n\n"+
+		"Worktree and branch routing:\n\n%s", target, agents.PendingAutomaticCheckoutGuidance, profiles.WorktreeBranchRoutingPolicy)
+	return appendTrackedRootsDiagnostic(msg+"\n\n"+toolref.TransportClause()+" "+toolref.DegradedModeLine(), roots)
+}
+
+// ServerInstructionsPendingFamilyLoad retains the terminal load failure as
+// context, without suggesting a second track operation for a declared family.
+func ServerInstructionsPendingFamilyLoad(cwd string, load indexer.RepoLoad, roots ...string) string {
+	return ServerInstructionsPendingAutomaticCheckout(cwd, roots...) + fmt.Sprintf(
+		"\n\nConfigured repository %q finished loading without registration (state=%s). Load diagnostic: %s",
+		load.Root, load.State, load.Reason)
 }
 
 func appendTrackedRootsDiagnostic(msg string, roots []string) string {
@@ -1585,7 +1592,7 @@ func appendTrackedRootsDiagnostic(msg string, roots []string) string {
 	for i, root := range roots {
 		quoted[i] = fmt.Sprintf("%q", root)
 	}
-	return msg + fmt.Sprintf("\n\nTracked repository roots: [%s]. The worktree shares a Git common directory with one of these roots.",
+	return msg + fmt.Sprintf("\n\nKnown repository roots (registered or configured): [%s]. The checkout shares a Git common directory with one of these roots.",
 		strings.Join(quoted, ", "))
 }
 
@@ -1605,7 +1612,21 @@ func (s *Server) afterInitializeInstructions(ctx context.Context, _ any, req *mc
 		return
 	}
 	result.Instructions = s.stateAwareInstructionsForPolicy(
-		SessionCWDFromContext(ctx), s.effectiveSessionPolicy(ctx))
+		ctx, SessionCWDFromContext(ctx), s.effectiveSessionPolicy(ctx))
+}
+
+// Modern clients discover the server without an initialize handshake. Apply
+// the same per-session instructions, including loading and pending-checkout
+// guidance, and read their identity from the SDK's parsed request metadata.
+func (s *Server) afterDiscoverInstructions(ctx context.Context, _ any, _ *mcp.DiscoverRequest, result *mcp.DiscoverResult) {
+	if s == nil || result == nil {
+		return
+	}
+	if info := server.RequestProtocolInfoFromContext(ctx); info != nil && info.Modern && info.ClientInfo != nil {
+		s.sessionFor(ctx).recordClientName(info.ClientInfo.Name)
+	}
+	result.Instructions = s.stateAwareInstructionsForPolicy(
+		ctx, SessionCWDFromContext(ctx), s.effectiveSessionPolicy(ctx))
 }
 
 // stateAwareInstructions chooses the initialize `instructions` text for a
@@ -1634,18 +1655,22 @@ func (s *Server) stateAwareInstructions(cwd string) string {
 }
 
 func (s *Server) stateAwareInstructionsForClient(cwd, client string) string {
-	return s.stateAwareInstructionsForPolicy(cwd, s.clientDefaultPolicy(client))
+	return s.stateAwareInstructionsForPolicy(context.Background(), cwd, s.clientDefaultPolicy(client))
 }
 
-func (s *Server) stateAwareInstructionsForPolicy(cwd string, policy *toolPolicy) string {
+func (s *Server) stateAwareInstructionsForPolicy(ctx context.Context, cwd string, policy *toolPolicy) string {
 	base := serverInstructions
 	if policy != nil && policy.preset == FacadeSurfaceVersion {
 		base = codingAgentInstructions
 	}
-	return s.stateAwareInstructionsWithBase(cwd, base)
+	return s.stateAwareInstructionsContext(ctx, cwd, base)
 }
 
 func (s *Server) stateAwareInstructionsWithBase(cwd, base string) string {
+	return s.stateAwareInstructionsContext(context.Background(), cwd, base)
+}
+
+func (s *Server) stateAwareInstructionsContext(ctx context.Context, cwd, base string) string {
 	// The reachability test must match the dispatcher's gate exactly.
 	// Telling a session it is INACTIVE while every call succeeds is the
 	// same divergence as the reverse, just quieter.
@@ -1658,6 +1683,10 @@ func (s *Server) stateAwareInstructionsWithBase(cwd, base string) string {
 			// advice that made agents re-track or stop on every restart.
 			if rec, pending := s.multiIndexer.PendingRepoForPath(cwd); pending {
 				if !rec.State.Loading() {
+					roots := agents.FamilyRepoRoots(s.trackedRepoRoots(), s.multiIndexer.ConfiguredRepoRoots())
+					if agents.PendingAutomaticCheckout(cwd, roots) {
+						return ServerInstructionsPendingFamilyLoad(cwd, rec, roots...)
+					}
 					return ServerInstructionsUnavailable(rec.Root, rec.Reason)
 				}
 				// The ordinary instructions follow the loading preamble: the
@@ -1666,13 +1695,22 @@ func (s *Server) stateAwareInstructionsWithBase(cwd, base string) string {
 				phase, percent := s.WarmupProgress()
 				return ServerInstructionsLoading(rec.Label(), phase, percent) + "\n\n" + base
 			}
-			roots := s.trackedRepoRoots()
+			if serves, err := s.CheckoutServesCWDChecked(ctx, cwd); err != nil {
+				return CheckoutAdmissionInstructions(cwd, err)
+			} else if serves {
+				return s.appendLiveInstructions(cwd, base)
+			}
+			roots := agents.FamilyRepoRoots(s.trackedRepoRoots(), s.multiIndexer.ConfiguredRepoRoots())
 			if agents.PendingAutomaticCheckout(cwd, roots) {
 				return ServerInstructionsPendingAutomaticCheckout(cwd, roots...)
 			}
 			return ServerInstructionsUntracked(cwd, roots...)
 		}
 	}
+	return s.appendLiveInstructions(cwd, base)
+}
+
+func (s *Server) appendLiveInstructions(cwd, base string) string {
 	if facts := s.liveInstructionFacts(cwd); facts != "" {
 		base = base + "\n\n" + facts
 	}
@@ -1822,8 +1860,8 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	// Wire the process-wide tokenStats as the parent of every
 	// per-session counter so record() fanout aggregates daemon-wide.
 	s.sessions.setParentTokenStats(s.tokenStats)
-	// Per-connection state-aware initialize instructions: the after-init
-	// hook rewrites result.Instructions for THIS session's cwd — the terse
+	// Per-connection state-aware instructions: initialize and discovery
+	// hooks rewrite result.Instructions for THIS session's cwd — the terse
 	// activation affordance for an uncovered cwd, or the base guidance plus
 	// live workspace + warmup facts for a covered one. It fires for every
 	// MCP client straight from the handshake, including non-Claude-Code
@@ -1831,6 +1869,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	// rewrite for the proxy path would not reach the embedded stdio server).
 	initHooks := &server.Hooks{}
 	initHooks.AddAfterInitialize(s.afterInitializeInstructions)
+	initHooks.AddAfterDiscover(s.afterDiscoverInstructions)
 
 	// mcpServer is constructed after s exists so the per-session tool
 	// filter can close over s — toolSurfaceFilter varies the tools/list

@@ -419,7 +419,7 @@ func (s *Store) payloadSweepSteps(generationID int64) []payloadSweepStep {
 				if err != nil {
 					return fmt.Errorf("payload generation gc: %s: %w", table, err)
 				}
-				return base.deletePayloadChunks(ctx, generationID, deleteGenerationRowsChunk(query, generationID), pass)
+				return base.deletePayloadChunks(ctx, generationID, deleteGenerationRowsChunk(table, query, generationID), pass)
 			},
 		})
 	}
@@ -433,7 +433,7 @@ func (s *Store) payloadSweepSteps(generationID int64) []payloadSweepStep {
 		steps = append(steps, payloadSweepStep{
 			name: spec.name,
 			run: func(ctx context.Context, pass *payloadSweepPass) error {
-				return base.deletePayloadChunks(ctx, generationID, deleteGenerationRowsChunk(spec.query, generationID), pass)
+				return base.deletePayloadChunks(ctx, generationID, deleteGenerationRowsChunk(spec.name, spec.query, generationID), pass)
 			},
 		})
 	}

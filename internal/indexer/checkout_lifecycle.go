@@ -151,7 +151,10 @@ type checkoutHeadIdentity struct {
 	commit string
 }
 type CheckoutLifecycle struct {
-	contractCoreRuntime atomic.Pointer[ContractCoreRuntimeHooks]
+	mutationRefusalMu    sync.Mutex
+	mutationRefusals     map[string]*checkoutMutationRefusalSlot
+	mutationRefusalEpoch uint64
+	contractCoreRuntime  atomic.Pointer[ContractCoreRuntimeHooks]
 	// routePrewarm is the prewarmer every coordinator calls before a route
 	// flip (SetRoutePrewarmer).
 	routePrewarm routePrewarmerSlot
@@ -3165,6 +3168,7 @@ func (l *CheckoutLifecycle) dropCoordinator(checkoutID string) {
 	// or an untracked checkout's reason would outlive it for the life of the
 	// process.
 	l.clearCoordinatorStartFailure(checkoutID)
+	l.forgetMutationRefusal(checkoutID)
 	if coordinator != nil {
 		_ = coordinator.Close()
 		l.oweRetirement(coordinator.DrainRetirements()...)

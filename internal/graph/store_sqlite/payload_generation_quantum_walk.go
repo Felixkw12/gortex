@@ -171,11 +171,11 @@ walk:
 			if e != nil {
 				return e
 			}
-			chunk = deleteGenerationRowsChunk(query, generationID)
+			chunk = deleteGenerationRowsChunk(table, query, generationID)
 		case hints.step == totalSteps-2:
-			chunk = deleteGenerationRowsChunk(deleteGenerationEdgesSQL, generationID)
+			chunk = deleteGenerationRowsChunk("edges", deleteGenerationEdgesSQL, generationID)
 		default:
-			chunk = deleteGenerationRowsChunk(deleteGenerationNodesSQL, generationID)
+			chunk = deleteGenerationRowsChunk("nodes", deleteGenerationNodesSQL, generationID)
 		}
 		if err := payloadQuantumStatementGuard(ctx); err != nil {
 			if s.commitsThroughWALPause(wide, removed, err) {

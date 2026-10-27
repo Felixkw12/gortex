@@ -334,7 +334,7 @@ func updateSQLiteUnresolvedTargetsTxLimited(
 			AND e.file_path = p.file_path
 			AND e.line = p.line
 			AND e.view_gen = ?`
-		result, execErr := tx.Exec(query, args...)
+		result, execErr := countEdgeWrite(tx.Exec(query, args...))
 		if tooManySQLVariables(execErr) && rowCount > 1 {
 			rowLimit = lowerBatchVariableLimit(variableLimit, unresolvedTargetUpdateParamsPerRow, rowCount)
 			pos = chunkStart

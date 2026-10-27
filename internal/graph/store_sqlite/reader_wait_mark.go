@@ -85,7 +85,7 @@ func (s *Store) ReaderWaitMark() ReaderWaitMark {
 	m.WriterCacheMisses = s.writerCache.misses.Load()
 	m.WriterCacheSpills = s.writerCache.spills.Load()
 	m.WriterCacheSkipped = s.writerCache.skipped.Load()
-	m.VFS = vfsIOMark()
+	m.VFS = s.WriteMark()
 	return m
 }
 

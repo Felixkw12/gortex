@@ -180,7 +180,7 @@ func (s *Store) EvictRepoForShadowReplacement(ctx context.Context, repo string) 
 				if err != nil {
 					return 0, nil, err
 				}
-				result, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE id IN (SELECT CAST(value AS INTEGER) FROM json_each(?)) AND view_gen=?`, string(keys), s.viewGen)
+				result, err := countEdgeWrite(tx.ExecContext(ctx, `DELETE FROM edges WHERE id IN (SELECT CAST(value AS INTEGER) FROM json_each(?)) AND view_gen=?`, string(keys), s.viewGen))
 				if err != nil {
 					return 0, nil, err
 				}
@@ -195,7 +195,7 @@ func (s *Store) EvictRepoForShadowReplacement(ctx context.Context, repo string) 
 				if err != nil {
 					return 0, nil, err
 				}
-				result, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) AND view_gen=? AND repo_prefix=?`, string(keys), s.viewGen, repo)
+				result, err := countNodeWrite(tx.ExecContext(ctx, `DELETE FROM nodes WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) AND view_gen=? AND repo_prefix=?`, string(keys), s.viewGen, repo))
 				if err != nil {
 					return 0, nil, err
 				}
