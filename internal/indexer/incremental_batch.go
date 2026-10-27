@@ -34,6 +34,8 @@ type incrementalBatchStage struct {
 	rawSHA256              string
 	relPath                string
 	graphPath              string
+	legacyIDs              []string
+	legacyPath             string
 	src                    []byte
 	result                 *parser.ExtractionResult
 	prepared               *preparedExtraction
@@ -258,6 +260,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 		graphPaths[i] = idx.prefixPath(idx.relKey(filePath))
 	}
 	priorByFile := idx.graph.GetFileNodesByPaths(graphPaths)
+	legacyByFile := idx.legacyNodesByPath(graphPaths)
 	priorTiming.complete(nil)
 	parseTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "chunk_parse",
 		zap.Int("candidate_files", len(files)), zap.Bool("includes_admission_wait", true))
@@ -283,6 +286,8 @@ func (idx *Indexer) reindexIncrementalChunk(
 	for i, filePath := range files {
 		graphPath := graphPaths[i]
 		priorNodes := priorByFile[graphPath]
+		nativePath := idx.legacyFilePath(graphPath)
+		priorNodes, legacyIDs, legacyPath := mergeLegacyFilePrior(nativePath, priorNodes, legacyByFile[nativePath])
 		storedGraph := storedExtractionGraphFingerprints(priorNodes)
 		storedDerived := storedDerivedFingerprints(priorNodes)
 		// A prior row stamped before derived fingerprints existed is given
@@ -320,7 +325,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 		// An importer of a deleted file is re-derived from source as a
 		// structural stage whatever its fingerprints say
 		// (deletion_importers.go).
-		forced := idx.forceReparse(filePath)
+		forced := idx.forceReparse(filePath) || len(legacyIDs) > 0
 		inert := probeOK && storedGraph.semantic != "" &&
 			probe.fingerprints.semantic == storedGraph.semantic &&
 			probe.fingerprints.metadata == storedGraph.metadata &&
@@ -396,6 +401,7 @@ func (idx *Indexer) reindexIncrementalChunk(
 			readVersion: prepared.readVersion,
 			rawSHA256:   prepared.rawSHA256,
 			relPath:     prepared.relPath, graphPath: graphPath,
+			legacyIDs: legacyIDs, legacyPath: legacyPath,
 			src: prepared.src, result: prepared.result, prepared: prepared, priorNodes: priorNodes,
 			storedGraph: storedGraph, storedDerived: storedDerived, probe: probe,
 			metadataOnly: !forced && storedGraph.semantic != "" &&
@@ -685,6 +691,10 @@ func (idx *Indexer) commitIncrementalStages(
 		// The importer of a deleted file is re-derived because what its
 		// references bind to changed: neither the prior resolutions nor the
 		// references the deletion just parked may short-cut its resolution.
+		if len(stage.legacyIDs) > 0 {
+			stage.reuse, stage.priorPending = nil, nil
+			stage.metadataOnly = false
+		}
 		if idx.forceReparse(stage.absPath) {
 			if idx.forceReparseDropsResolutions(stage.absPath) {
 				stage.reuse, stage.priorPending = nil, nil
@@ -1064,6 +1074,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 ) {
 	deferResolverCatchup := markerBatch != nil && markerBatch.deferResolverCatchup
 	paths := make([]string, 0, len(stages))
+	var legacyIDs, legacyPaths []string
 	oldFTSNodeIDs := make([]string, 0)
 	oldFuncIDs := make([]string, 0)
 	var nodes []*graph.Node
@@ -1071,6 +1082,10 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 	var priorPending []*graph.Edge
 	for _, stage := range stages {
 		paths = append(paths, stage.graphPath)
+		legacyIDs = append(legacyIDs, stage.legacyIDs...)
+		if stage.legacyPath != "" {
+			legacyPaths = append(legacyPaths, stage.legacyPath)
+		}
 		nodes = append(nodes, stage.result.Nodes...)
 		edges = append(edges, stage.result.Edges...)
 		priorPending = append(priorPending, stage.priorPending...)
@@ -1109,7 +1124,7 @@ func (idx *Indexer) commitStructuralIncrementalBatch(
 	// Retained contracts keep existing rows; actual orphans are deleted there.
 	idx.deleteSymbolFTS(oldFTSNodeIDs)
 	idx.applyLap("fts_delete")
-	evictFilesBatched(idx.graph, paths)
+	idx.evictFileIdentities(paths, legacyIDs, legacyPaths)
 	idx.applyLap("evict")
 	// The carried in-edges ride the same AddBatch as the fresh payload: the
 	// eviction above deletes every edge incident to a doomed node, including
@@ -1364,6 +1379,13 @@ func restubIncomingRefsFromView(
 	carriedSeen := make(map[*graph.Edge]struct{})
 	for _, stage := range stages {
 		frontier := restubFrontierForStage(stage, view)
+		// Separator repair changes identity, not the declaration contract.
+		// The normal shape/visibility/parameter gates still decide every carry.
+		if !frontier.conservative {
+			for legacyID := range legacyReplacements(stage) {
+				frontier.survivingIDs[legacyID] = struct{}{}
+			}
+		}
 		for _, node := range stage.priorNodes {
 			if node != nil && node.Kind == graph.KindFile {
 				// Another file's import of this one is recorded in the
@@ -1515,7 +1537,7 @@ func restubIncomingRefsFromView(
 	if len(reindexes) > 0 {
 		g.ReindexEdges(reindexes)
 	}
-	return carried, npmConsumers
+	return canonicalizeLegacyCarried(stages, evicted, carried), npmConsumers
 }
 
 // dataflowSourceSite is a reference's site: the file that records it and its
