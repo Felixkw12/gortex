@@ -673,10 +673,11 @@ func (s *Server) serveControl(conn net.Conn, reader *bufio.Reader, sess *Session
 			// would strand the listener/runtime after an accepted shutdown.
 			// Cleanup errors remain warnings, never proof of store-close success.
 			//
-			// The short delay gives a client that IS still listening a moment
-			// to read the ack before the listener goes away.
+			// WriteJSONLine writes directly to the connection, without a
+			// userspace buffer. A successful write has submitted the whole
+			// response; closing the stream does not require a fixed delay for
+			// the peer to consume it. Failed writes still schedule shutdown.
 			go func() {
-				time.Sleep(100 * time.Millisecond)
 				_ = s.Shutdown()
 			}()
 			return
@@ -1032,7 +1033,7 @@ func (s *Server) writePIDFile() error {
 // RunningPID reports the PID of a live daemon recorded in the PID file, or
 // (0, false) when none is. Unlike IsRunning — which only probes the control
 // socket — this still reports a daemon that is *mid-shutdown*: the
-// ControlShutdown handler tears the listener down ~100ms after acking, but
+// ControlShutdown handler tears the listener down after writing its ack, but
 // the process stays alive while it flushes and closes the store, and it
 // holds the store's on-disk lock until it exits. That window is exactly what
 // turned a quick restart into a "failed to open database" lock conflict, so

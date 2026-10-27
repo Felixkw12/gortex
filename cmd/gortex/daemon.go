@@ -1216,7 +1216,7 @@ func stopRunningDaemon(w io.Writer) error {
 	uptime := pre.uptime
 	// Capture the PID too. ControlShutdown only *acks* — the daemon then
 	// flushes and closes the store (releasing its on-disk lock) and exits
-	// asynchronously (see server.go: the handler Shutdown()s ~100ms later in
+	// asynchronously (see server.go: the handler schedules Shutdown() in
 	// a goroutine). We must block until that process is gone, or a following
 	// `daemon start` races the still-held lock and dies with the opaque
 	// "failed to open database with status 1".

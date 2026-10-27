@@ -5,11 +5,35 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestShutdownAckRemainsReadableAfterOwnedRuntimeIsRemoved(t *testing.T) {
+	t.Setenv("GORTEX_DAEMON_STATEFILE", filepath.Join(t.TempDir(), "runtime.json"))
+	_, socket := newDaemon(t, &fakeController{})
+	require.NoError(t, WriteRuntimeState(RuntimeState{BackendPath: filepath.Join(t.TempDir(), "store.sqlite")}))
+	c, err := DialTo(socket, Handshake{Mode: ModeControl})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.Conn.SetDeadline(time.Now().Add(3*time.Second)))
+	require.NoError(t, WriteJSONLine(c.Conn, ControlRequest{Kind: ControlShutdown}))
+	// Deliberately do not read the response until the daemon has closed the
+	// stream and removed its runtime. This tests submitted ACK delivery,
+	// rather than relying on a delay to let a fast client read first.
+	require.Eventually(t, func() bool {
+		return !fileExists(socket) && !fileExists(PIDFilePath()) && !fileExists(RuntimeStatePath())
+	}, 3*time.Second, time.Millisecond)
+	line, err := c.reader.ReadBytes('\n')
+	require.NoError(t, err)
+	var ack ControlResponse
+	require.NoError(t, json.Unmarshal(line, &ack))
+	require.True(t, ack.OK)
+	require.Empty(t, ack.ErrorCode)
+}
 
 func TestDaemonShutdownCleanupFailureIsWarningAndRemovesRuntime(t *testing.T) {
 	ctrl := &fakeController{shutdownErr: errors.New("backend close failed")}
