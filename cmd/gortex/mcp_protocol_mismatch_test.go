@@ -204,6 +204,7 @@ func TestRunMCPHandoffMismatchSurvivesUnavailableProxy(t *testing.T) {
 			tmp := redirectTempRoot(t)
 			t.Chdir(tmp)
 			stubUnavailableMCPDaemon(t)
+			t.Setenv("GORTEX_AUTOSTART", "1")
 			t.Cleanup(restoreSeams)
 			zero := 0
 			socket := serveMismatchAck(t, daemon.HandshakeAck{ErrorCode: daemon.ErrProtocolMismatch, ErrorMsg: "daemon expects protocol 0, client sent 1", DaemonVersion: "v0.64.10", DaemonProtocol: &zero})
