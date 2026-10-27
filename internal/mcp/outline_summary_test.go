@@ -120,7 +120,9 @@ func TestOutlineSummaryOwnsSmallSubstringsFromLargeCandidates(t *testing.T) {
 	require.True(t, ok)
 	retained := cache.summaries[outlineResponseKey{}]
 	for key := range retained.counts.ByLanguage {
+		require.Equal(t, language, key)
 		require.True(t, unsafe.StringData(language) != unsafe.StringData(key))
 	}
+	require.Equal(t, path, retained.imports[0]["path"])
 	require.True(t, unsafe.StringData(path) != unsafe.StringData(retained.imports[0]["path"].(string)))
 }
