@@ -705,25 +705,29 @@ waitLoop:
 	issues := make([]string, 0, len(receipts))
 	hasTerminalFailure := false
 	for _, receipt := range receipts {
+		issue := ""
 		select {
 		case <-receipt.done:
 			outcome := receipt.outcome(false)
 			switch {
 			case outcome.Err != nil:
 				hasTerminalFailure = true
-				issues = append(issues, fmt.Sprintf(
+				issue = fmt.Sprintf(
 					"failed receipt=%s repo=%q path=%q generation=%d error=%q",
-					receipt.id, receipt.repo, receipt.path, receipt.generation, outcome.Err.Error()))
+					receipt.id, receipt.repo, receipt.path, receipt.generation, outcome.Err.Error())
 			case !outcome.Reindexed:
 				hasTerminalFailure = true
-				issues = append(issues, fmt.Sprintf(
+				issue = fmt.Sprintf(
 					"failed receipt=%s repo=%q path=%q generation=%d error=%q",
-					receipt.id, receipt.repo, receipt.path, receipt.generation, "reindex not confirmed"))
+					receipt.id, receipt.repo, receipt.path, receipt.generation, "reindex not confirmed")
 			}
 		default:
-			issues = append(issues, fmt.Sprintf(
+			issue = fmt.Sprintf(
 				"pending receipt=%s repo=%q path=%q generation=%d",
-				receipt.id, receipt.repo, receipt.path, receipt.generation))
+				receipt.id, receipt.repo, receipt.path, receipt.generation)
+		}
+		if issue != "" {
+			issues = append(issues, issue+s.mutationFreshnessReceiptHint(ctx, receipt.id))
 		}
 	}
 	if len(issues) == 0 {
@@ -746,9 +750,7 @@ waitLoop:
 		message += issue
 	}
 	if hasTerminalFailure {
-		message += "; terminally failed generations do not recover by waiting — " +
-			"they clear when a later mutation of the same path succeeds or when " +
-			"the receipt retention lapses"
+		message += "; " + mutationFreshnessRecoveryHint()
 	}
 	return fmt.Errorf("%s", message)
 }
