@@ -397,6 +397,9 @@ func persistAnalysisGenerationContext(
 		if len(relations) == 0 {
 			return true, nil
 		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		ok, flushErr := writer.AppendAnalysisConcepts(expectedRevision, generationID, nil, relations)
 		relations = relations[:0]
 		return ok, flushErr

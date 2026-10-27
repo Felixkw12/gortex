@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graphview"
+	"github.com/zzet/gortex/internal/search"
 	"go.uber.org/zap"
 )
 
@@ -292,4 +294,55 @@ func TestBackgroundCloseJoinsAdmittedFTSReaderBeforeDrainReturns(t *testing.T) {
 	running := s.routeFTSWarm.running
 	s.routeFTSWarm.mu.Unlock()
 	require.False(t, running)
+}
+
+// relationCancelWriter isolates save-chunk admission, not SQLite cancellation.
+// Earlier components are accepted; cancellation follows the first actual
+// relation flush, so an outer-loop-only check cannot pass this regression.
+type relationCancelWriter struct {
+	canceledGenerationWriter
+	relationChunks, relationRows int
+}
+
+func (*relationCancelWriter) AppendAnalysisCommunities(uint64, int64, []graph.AnalysisCommunitySummary) (bool, error) {
+	return true, nil
+}
+func (*relationCancelWriter) AppendAnalysisNodes(uint64, int64, []graph.AnalysisNodeMetric) (bool, error) {
+	return true, nil
+}
+func (*relationCancelWriter) AppendAnalysisProcesses(uint64, int64, []graph.AnalysisProcessSummary, []graph.AnalysisProcessStep) (bool, error) {
+	return true, nil
+}
+func (*relationCancelWriter) SealAnalysisComponent(uint64, int64, graph.AnalysisComponent, int) (bool, error) {
+	return true, nil
+}
+func (w *relationCancelWriter) AppendAnalysisConcepts(_ uint64, _ int64, _ []graph.AnalysisConcept, relations []graph.AnalysisConceptRelation) (bool, error) {
+	if len(relations) > 0 {
+		w.relationChunks++
+		w.relationRows += len(relations)
+		w.cancel()
+	}
+	return true, nil
+}
+func TestCanceledAnalysisSaveStopsAfterFirstRelationChunk(t *testing.T) {
+	g := graph.New()
+	g.AddBatch([]*graph.Node{{ID: "a", Kind: graph.KindFunction, Name: "Alpha", FilePath: "a.go"}, {ID: "b", Kind: graph.KindFunction, Name: "Beta", FilePath: "a.go"}}, []*graph.Edge{{From: "a", To: "b", Kind: graph.EdgeCalls}})
+	s := &Server{graph: g, logger: zap.NewNop()}
+	t.Cleanup(s.DrainBackground)
+	s.populateAnalysis(false, false)
+	siblings := make([]string, 3*analysisGenerationWriteChunk)
+	for i := range siblings {
+		siblings[i] = fmt.Sprintf("relation-%04d", i)
+	}
+	candidate := persistedAnalysis{communities: s.communities, leiden: s.leidenCache, processes: s.processes, pageRank: s.pageRank, adjacency: s.adjacency, hits: s.hits, autoConcepts: search.RestoreAutoConcepts(search.AutoConceptsPersistenceSnapshot{Related: map[string][]string{"head": siblings}})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &relationCancelWriter{canceledGenerationWriter: canceledGenerationWriter{cancel: cancel}}
+	_, accepted, err := persistAnalysisGenerationContext(ctx, w, 0, candidate)
+	require.False(t, accepted)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, w.relationChunks, "relations continued flushing after cancellation")
+	require.Equal(t, analysisGenerationWriteChunk, w.relationRows)
+	require.Equal(t, 1, w.aborts)
+	require.Zero(t, w.activations)
 }
