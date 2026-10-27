@@ -212,11 +212,12 @@ type Server struct {
 	// analysis epoch. Reads/cache state are guarded by analysisMu; the separate
 	// build mutex coalesces concurrent first requests without blocking unrelated
 	// analysis snapshots while betweenness runs.
-	hotspots        []analysis.HotspotEntry
-	hotspotsReady   bool
-	hotspotsOwned   bool // compact slice and cloned strings, guarded by analysisMu
-	hotspotsBuildMu sync.Mutex
-	analysisEpoch   uint64
+	hotspots         []analysis.HotspotEntry
+	hotspotsReady    bool
+	hotspotsOwned    bool // compact slice and cloned strings, guarded by analysisMu
+	hotspotsBuildMu  sync.Mutex
+	outlineResponses outlineResponseCache
+	analysisEpoch    uint64
 	// analysisRun tracks the background on-demand analysis pass so a tool
 	// call can report "running, retry in Ns" instead of blocking for
 	// minutes on a whole-graph computation.
@@ -2494,6 +2495,7 @@ func (s *Server) InvalidateSessionScopes() {
 		ss.resetScopeLocked()
 		ss.mu.Unlock()
 	}
+	s.outlineResponses.clear()
 	s.retireDeadPendingSourceIncarnations()
 }
 

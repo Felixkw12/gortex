@@ -10,6 +10,7 @@ import (
 
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/query"
 )
 
 // handleGetRepoOutline returns a single-call narrative overview of the
@@ -24,13 +25,6 @@ import (
 // follows up with smart_context, find_usages, etc. on specific symbols
 // surfaced here.
 func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	const (
-		topCommunitiesN  = 5
-		topHotspotsN     = 5
-		topMostImportedN = 10
-		topEntryPointsN  = 10
-		topLanguagesN    = 5
-	)
 
 	// Bound sessions aggregate the request reader's scope in the backend.
 	// Keep unbound sessions on the cached Stats / EdgeCount path.
@@ -43,6 +37,44 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	// an overlay-active caller sees its own buffers. Hoisted once: the
 	// outline touches the reader from several sections.
 	reader := s.readerFor(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	key, cacheable := s.outlineCacheKey(reader, graph.NodeScope{WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow}, bound)
+	if cacheable {
+		if payload, ok := s.outlineResponses.get(key); ok {
+			if after, valid := s.outlineCacheKey(reader, graph.NodeScope{WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow}, bound); valid && after == key && ctx.Err() == nil {
+				return s.respondJSONOrTOON(ctx, req, payload)
+			}
+		}
+	}
+	payload, err := s.buildRepoOutline(ctx, reader, opts, bound)
+	if err != nil {
+		return nil, err
+	}
+	if cacheable {
+		if after, valid := s.outlineCacheKey(reader, graph.NodeScope{WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow}, bound); valid && after == key && ctx.Err() == nil && contractCoreReadError(ctx) == nil {
+			s.outlineResponses.put(key, payload)
+		}
+	}
+	return s.respondJSONOrTOON(ctx, req, payload)
+}
+
+type outlineLanguage struct {
+	Name  string `json:"name"`
+	Nodes int    `json:"nodes"`
+}
+
+func (s *Server) buildRepoOutline(ctx context.Context, reader graph.Reader, opts query.QueryOptions, bound bool) (map[string]any, error) {
+	reader = graph.BindReadContext(reader, ctx)
+	const (
+		topCommunitiesN  = 5
+		topHotspotsN     = 5
+		topMostImportedN = 10
+		topEntryPointsN  = 10
+		topLanguagesN    = 5
+	)
+
 	scope := graph.NodeScope{WorkspaceID: opts.WorkspaceID, ProjectID: opts.ProjectID, RepoAllow: opts.RepoAllow}
 	scopedNodes, _ := graph.BindReadContext(contractCoreSelectedReader(reader), ctx).(graph.ScopedOutlineNodeReader)
 	var candidateErr error
@@ -115,10 +147,7 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 
 	// Language breakdown — computed from the scoped node set so the
 	// counts reflect only the session's workspace.
-	type langEntry struct {
-		Name  string `json:"name"`
-		Nodes int    `json:"nodes"`
-	}
+
 	langCounts := make(map[string]int)
 	totalScopedNodes := 0
 	if aggregated != nil {
@@ -138,9 +167,9 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 		maps.Copy(langCounts, stats.ByLanguage)
 		totalScopedNodes = stats.TotalNodes
 	}
-	var languages []langEntry
+	var languages []outlineLanguage
 	for name, n := range langCounts {
-		languages = append(languages, langEntry{Name: name, Nodes: n})
+		languages = append(languages, outlineLanguage{Name: name, Nodes: n})
 	}
 	sort.Slice(languages, func(i, j int) bool {
 		if languages[i].Nodes != languages[j].Nodes {
@@ -295,13 +324,13 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	return map[string]any{
 		"summary":             summary,
 		"communities":         communitiesSection,
 		"hotspots":            hotspotsSection,
 		"most_imported_files": imported,
 		"entry_points":        entries,
-	})
+	}, nil
 }
 
 // topCommunitiesSummary shapes a subset of communities for the outline.
