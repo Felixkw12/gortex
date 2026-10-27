@@ -126,29 +126,29 @@ func (s *Server) refreshPendingSourceRecord(record *mutationCommitRecord) {
 	}
 	if value, ok := s.mutationReceipts.Load(snap.ReindexReceipt); ok {
 		if receipt, ok := value.(*mutationReceipt); ok {
-			receipt.mu.RLock()
-			recovered := receipt.barrierRecoveredGeneration > 0 && receipt.checkoutID == snap.CheckoutID && receipt.checkoutIncarnation == snap.CheckoutIncarnation
-			receipt.mu.RUnlock()
-			if recovered {
-				record.mu.Lock()
-				record.pendingSourceRecovered = true
-				record.mu.Unlock()
-				return
-			}
-			outcome := receipt.outcome(true)
-			unsettled := snap.GraphStatus == mutationGraphPending || (snap.GraphStatus == mutationGraphStale && !snap.GraphRecorded)
-			if !outcome.Pending && outcome.Reindexed && outcome.Err == nil && !unsettled {
-				record.mu.Lock()
-				record.pendingSourceRecovered = true
-				record.mu.Unlock()
-				return
-			}
-			if !outcome.Pending && unsettled {
-				record.recordGraph(outcome)
-			}
+			s.applyPendingSourceReceipt(record, snap, receipt)
 		}
 	} else {
 		record.markReceiptLost(snap.ReindexReceipt)
+	}
+}
+
+func (s *Server) applyPendingSourceReceipt(record *mutationCommitRecord, snap mutationCommitSnapshot, receipt *mutationReceipt) {
+	receipt.mu.RLock()
+	recovered := receipt.barrierRecoveredGeneration > 0 && receipt.checkoutID == snap.CheckoutID && receipt.checkoutIncarnation == snap.CheckoutIncarnation
+	receipt.mu.RUnlock()
+	if recovered {
+		record.markSourceRecoveredForReceipt(snap.ReindexReceipt)
+		return
+	}
+	outcome := receipt.outcome(true)
+	unsettled := snap.GraphStatus == mutationGraphPending || (snap.GraphStatus == mutationGraphStale && !snap.GraphRecorded)
+	if !outcome.Pending && outcome.Reindexed && outcome.Err == nil && !unsettled {
+		record.markSourceRecoveredForReceipt(snap.ReindexReceipt)
+		return
+	}
+	if !outcome.Pending && unsettled {
+		record.recordGraphForReceipt(snap.ReindexReceipt, outcome)
 	}
 }
 

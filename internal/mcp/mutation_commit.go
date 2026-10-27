@@ -256,6 +256,12 @@ func (r *mutationCommitRecord) markCommitted(newSHA string, bytesWritten int) {
 // does not un-write a committed file, and conflating the two is the reporting
 // bug this ledger exists to fix.
 func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
+	r.recordGraphForReceipt("", outcome)
+}
+
+// An asynchronous observer may apply only to the receipt it sampled. Empty
+// expectedReceipt is reserved for the mutation handler binding its outcome.
+func (r *mutationCommitRecord) recordGraphForReceipt(expectedReceipt string, outcome mutationReindexOutcome) {
 	if r == nil {
 		return
 	}
@@ -276,6 +282,10 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 			r.owner.refreshPendingSourceRecord(r)
 		}
 	}()
+	if expectedReceipt != "" && (r.reindexReceipt != expectedReceipt ||
+		(r.graphRecorded && r.graph != mutationGraphPending)) {
+		return
+	}
 	// Concurrent pollers can hold an earlier pending snapshot after another
 	// poller observed completion. Never regress that same ticket to pending.
 	if outcome.Pending && r.graphRecorded && r.graph != mutationGraphPending && r.reindexReceipt != "" && r.reindexReceipt == outcome.Receipt {
@@ -303,6 +313,14 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 		r.errText = outcome.Err.Error()
 	} else if r.disk == mutationDiskCommitted {
 		r.errText = ""
+	}
+}
+
+func (r *mutationCommitRecord) markSourceRecoveredForReceipt(expectedReceipt string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if expectedReceipt != "" && r.reindexReceipt == expectedReceipt {
+		r.pendingSourceRecovered = true
 	}
 }
 
