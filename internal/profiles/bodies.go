@@ -57,7 +57,7 @@ var sectionCompactWorkflow = bt(`For every coding task:
 
 Example: §search(operation:"symbols", query:"<name>")§.
 
-If the Gortex server is configured but these tools are missing from the callable MCP tools, report a Gortex MCP integration failure and stop. Do not start a daemon or fall back to a CLI/shell. `) + toolref.MCPMissingToolsException + `
+`) + toolref.TransportClause() + " " + toolref.DegradedModeLine() + `
 
 `
 
@@ -119,7 +119,7 @@ var sectionFullRuleTable = bt(`| Instead of...                       | Use...   
 
 // sectionMCPRequired keeps the legacy/full MCP profile from silently changing
 // transports when a host bridge fails to expose a configured tool.
-var sectionMCPRequired = bt(`**Native MCP required:** if a configured Gortex tool is missing from the callable MCP tools, report a Gortex MCP integration failure and stop. Do not start a daemon or use a CLI/shell fallback. `) + toolref.MCPMissingToolsException + `
+var sectionMCPRequired = "**Native MCP required:** " + toolref.TransportClause() + " " + toolref.DegradedModeLine() + `
 
 `
 

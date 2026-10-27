@@ -9,6 +9,7 @@ package agents
 
 import (
 	"github.com/zzet/gortex/internal/profiles"
+	"github.com/zzet/gortex/internal/toolref"
 )
 
 // worktreeBranchRoutingRules is appended to every slash-command and skill
@@ -23,7 +24,7 @@ const worktreeBranchRoutingRules = `
 const nativeMCPRules = `
 ## Required behavior
 
-- Native Gortex MCP is mandatory for this MCP-configured workflow. If its callable tools are missing, report a Gortex MCP integration failure and stop; do not start a daemon or switch to a CLI/shell fallback.
+- ` + toolref.TransportText + " " + toolref.DegradedModeText + `
 - Do not substitute shell reads, file search, or Git plumbing.
 - Start task-shaped work with ` + "`explore`" + `. For one already-known symbol, start with ` + "`search`" + `.
 - Use ` + "`change`" + ` before a mutation and again after it. Write only through ` + "`edit`" + ` or ` + "`refactor`" + `.

@@ -484,7 +484,6 @@ func rulePreamble() string {
 		"After starting localization, obey `completion.required_action`. For `needs_recovery`, make one accepted, bounded Gortex MCP `search` or `read` call. If Gortex explicitly rejects an overbroad request and preserves the recovery allowance, correct it using only Gortex MCP `search` or `read`; the rejected request does not count as the accepted recovery. Do not call host Read, Grep, Glob, or Bash. At `answer_ready`, respond from `completion.final_response` and make no further tool calls. In that final response, each PRIMARY or SUPPORTING row is one aligned file/symbol tuple; preserve the PRIMARY file and symbol identities in the answer, while SUPPORTING rows are optional context. " +
 		"Any later Gortex navigation call for that same task is intentionally not executed and replays the same retained terminal payload; identical output is expected, not stale or canned output or an integration failure. " +
 		"Inspect indexed code with `search`, `read`, `relations`, or `trace`. " +
-		"Outside an active localization contract, use native read, search, or edit tools only when Gortex performance or integration is actually bad. " +
 		"Before mutation call `change(operation:\"impact\")`; " +
 		"for a signature change also call `change(operation:\"verify\")` with the proposed signature. " +
 		"Mutate with `edit` or `refactor`. After mutation call `change(operation:\"detect\")`; " +

@@ -41,6 +41,7 @@ import (
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/telemetry"
 	"github.com/zzet/gortex/internal/tokens"
+	"github.com/zzet/gortex/internal/toolref"
 )
 
 // Version is set at build time.
@@ -1520,7 +1521,7 @@ Worktree and branch routing:
 
 ` + profiles.WorktreeBranchRoutingPolicy + `
 
-` + sharedParamLegend
+` + sharedParamLegend + "\n\n" + toolref.TransportText + " " + toolref.DegradedModeText
 
 // codingAgentInstructions is intentionally terse because some MCP hosts repeat
 // initialize instructions beside every rendered tool. It describes what to do,
@@ -1529,7 +1530,7 @@ const codingAgentInstructions = `MUST use Gortex MCP. First explicit-file read p
 
 Worktree and branch routing:
 
-` + profiles.WorktreeBranchRoutingPolicy
+` + profiles.WorktreeBranchRoutingPolicy + "\n" + toolref.TransportText + " " + toolref.DegradedModeText
 
 // ServerInstructionsUntracked is the inactive-state `instructions` variant
 // returned when a session's cwd is not covered by any tracked repo. Rather than
@@ -1571,10 +1572,10 @@ func ServerInstructionsPendingAutomaticCheckout(cwd string, roots ...string) str
 		target = "."
 	}
 	msg := fmt.Sprintf("Gortex is connected but this Git checkout is still awaiting automatic discovery: %q belongs to an already tracked Git family, but its overlay route is not published yet.\n\n"+
-		"Do not run `gortex track` for this state: implicit/session checkouts are automatic overlays. Wait for reconciliation and reconnect; if it remains unavailable, report the discovery lag. Explicit tracking is only for a user-requested dedicated graph.\n\n"+
+		"Do not run `gortex track` for this state: implicit/session checkouts are automatic overlays. Retry after other work; if the route is still pending after a few attempts, continue natively for this step and report the discovery lag. Reconnecting or requesting reconciliation is a user action. Explicit tracking is only for a user-requested dedicated graph.\n\n"+
 		"Until its route is published, graph calls may return repo_not_tracked rather than silently reading another checkout.\n\n"+
 		"Worktree and branch routing:\n\n%s", target, profiles.WorktreeBranchRoutingPolicy)
-	return appendTrackedRootsDiagnostic(msg, roots)
+	return appendTrackedRootsDiagnostic(msg+"\n\n"+toolref.TransportClause()+" "+toolref.DegradedModeLine(), roots)
 }
 
 func appendTrackedRootsDiagnostic(msg string, roots []string) string {

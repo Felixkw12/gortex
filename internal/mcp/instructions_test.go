@@ -21,6 +21,7 @@ import (
 	"github.com/zzet/gortex/internal/profiles"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/search"
+	"github.com/zzet/gortex/internal/toolref"
 )
 
 // TestInitialize_ReturnsInstructions drives a real `initialize`
@@ -186,4 +187,27 @@ func TestStateAwareInstructionsVariants(t *testing.T) {
 		require.Contains(t, instr, "INACTIVE")
 		require.Contains(t, instr, "gortex track "+stranger)
 	})
+}
+
+func TestInitializeSharedTransientGuidanceAcrossStates(t *testing.T) {
+	loading, _, repo := newLoadingServer(t)
+	main := filepath.Join(t.TempDir(), "main")
+	gitInitWorktreeRepo(t, main)
+	linked := filepath.Join(t.TempDir(), "linked")
+	gitInit(t, main, "worktree", "add", "-q", "-b", "feature", linked)
+	routed, _ := newWorktreeMCPServer(t, config.RepoEntry{Path: main, Name: "main"})
+	for _, base := range []string{serverInstructions, codingAgentInstructions} {
+		for name, instructions := range map[string]string{
+			"ready":             routed.stateAwareInstructionsWithBase(main, base),
+			"repo-loading":      loading.stateAwareInstructionsWithBase(repo, base),
+			"pending-discovery": routed.stateAwareInstructionsWithBase(linked, base),
+		} {
+			for _, sentence := range []string{toolref.TransportClause(), toolref.DegradedModeLine()} {
+				require.Contains(t, instructions, sentence, name)
+			}
+			for _, stop := range []string{"integration failure and stop", "integration failure, stop", "Wait for reconciliation and reconnect", "To activate: run"} {
+				require.NotContains(t, instructions, stop, name)
+			}
+		}
+	}
 }

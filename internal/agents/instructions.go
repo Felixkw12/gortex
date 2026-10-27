@@ -144,7 +144,7 @@ Common calls:
 ` + profiles.WorktreeBranchRoutingPolicy + `
 Never restart the daemon, delete its store, or re-track merely to expose a worktree.
 
-If the Gortex server is configured but these tools are missing from the callable MCP tools, report a Gortex MCP integration failure and stop. Do not start a daemon or switch to a CLI/shell fallback. ` + toolref.MCPMissingToolsException + `
+` + toolref.TransportText + " " + toolref.DegradedModeText + `
 
 Use ` + "`" + `recall` + "`" + ` before revisiting prior work and ` + "`" + `remember` + "`" + ` immediately for durable decisions, invariants, or gotchas.
 `
