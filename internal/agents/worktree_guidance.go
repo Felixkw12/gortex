@@ -27,16 +27,25 @@ import (
 // entry, then reuses the indexer's canonical worktree resolver; it never runs
 // Git, starts a daemon, or mutates configuration.
 func PendingAutomaticCheckout(cwd string, trackedRoots []string) bool {
+	_, represented := AutomaticCheckoutFamily(cwd, trackedRoots)
+	return represented != ""
+}
+
+// AutomaticCheckoutFamily returns the nearest Git checkout and the first
+// configured or registered root representing its family. A nonempty second
+// result proves only family identity; callers still decide admission using
+// the registry/catalog. No Git process or configuration write is involved.
+func AutomaticCheckoutFamily(cwd string, knownRoots []string) (checkout, represented string) {
 	root := nearestGitRoot(cwd)
 	if root == "" {
-		return false
+		return "", ""
 	}
 	candidate := indexer.ResolveWorktree(root)
 	if candidate.GitCommonDir == "" {
-		return false
+		return root, ""
 	}
 	candidateCommon := canonicalFamilyPath(candidate.GitCommonDir)
-	for _, trackedRoot := range trackedRoots {
+	for _, trackedRoot := range knownRoots {
 		trackedRoot = strings.TrimSpace(trackedRoot)
 		if trackedRoot == "" {
 			continue
@@ -46,10 +55,10 @@ func PendingAutomaticCheckout(cwd string, trackedRoots []string) bool {
 			continue
 		}
 		if pathkey.EqualPaths(candidateCommon, canonicalFamilyPath(tracked.GitCommonDir)) {
-			return true
+			return root, trackedRoot
 		}
 	}
-	return false
+	return root, ""
 }
 
 func nearestGitRoot(path string) string {

@@ -452,6 +452,29 @@ func (gc *GlobalConfig) ReposSnapshot() []RepoEntry {
 	return append([]RepoEntry(nil), gc.Repos...)
 }
 
+// ConfiguredRepoRoots snapshots every configured repository root, including
+// project entries and roots not yet registered by warmup. It is a declaration
+// inventory for guidance, not evidence that a graph or checkout is admitted.
+func (gc *GlobalConfig) ConfiguredRepoRoots() []string {
+	if gc == nil {
+		return nil
+	}
+	globalConfigMu.Lock()
+	entries := gc.repoEntriesLocked()
+	globalConfigMu.Unlock()
+	seen := make(map[string]bool, len(entries))
+	var roots []string
+	for _, entry := range entries {
+		root := strings.TrimSpace(entry.Path)
+		if root != "" && !seen[root] {
+			roots = append(roots, root)
+			seen[root] = true
+		}
+	}
+	sort.Strings(roots)
+	return roots
+}
+
 // FindRepoByPrefix searches top-level Repos and all Projects for an entry
 // whose ResolvePrefix matches. Returns nil when no entry matches.
 func (gc *GlobalConfig) FindRepoByPrefix(prefix string) *RepoEntry {

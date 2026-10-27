@@ -10,7 +10,8 @@ import (
 
 func worktreeGuidanceGit(t testing.TB, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	gitArgs := append([]string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)
+	cmd := exec.Command("git", gitArgs...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_CONFIG_GLOBAL=/dev/null",
@@ -112,6 +113,10 @@ func TestPendingAutomaticCheckoutMatchesBothFamilyDirections(t *testing.T) {
 
 	if !PendingAutomaticCheckout(nested, []string{main}) {
 		t.Fatal("linked worktree of a tracked family was not recognized as pending automatic discovery")
+	}
+	checkout, represented := AutomaticCheckoutFamily(nested, []string{"", main})
+	if checkout != linked || represented != main {
+		t.Fatalf("family lookup lost checkout or configured representative: %q %q", checkout, represented)
 	}
 	if !PendingAutomaticCheckout(main, []string{linked}) {
 		t.Fatal("primary checkout was not recognized when a linked checkout is the tracked family member")
