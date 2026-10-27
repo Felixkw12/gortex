@@ -256,7 +256,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	// identical from a terminal or a pipe given the same daemon state. The
 	// legacy --no-daemon flag is an inert no-op (warned above); embedded mode
 	// is available only through the machine-global opt-in checked below.
-	decision, startupErr := ensureDaemonReadyWithError(daemon.ParseAutostart())
+	decision, observedMismatch, startupErr := ensureDaemonReadyWithError(daemon.ParseAutostart())
 	if startupErr != nil {
 		return startupErr
 	}
@@ -305,6 +305,9 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	// must not turn a live-daemon protocol refusal into embedded startup.
 	if errors.Is(availabilityErr, daemon.ErrProtocolVersionMismatch) {
 		return daemonMismatchError(daemonIdentityFromMismatch(availabilityErr))
+	}
+	if observedMismatch.mismatch() {
+		return daemonMismatchError(observedMismatch)
 	}
 	if mcpForceProxy {
 		return fmt.Errorf("gortex daemon is unavailable and --proxy requires it; start the daemon with `gortex daemon start`")

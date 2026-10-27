@@ -158,32 +158,43 @@ func resolveDaemonDecision() daemonDecision {
 // ensureDaemonReady is the lock-protected single-flight critical section,
 // shared by `gortex mcp` and `gortex track`.
 func ensureDaemonReady(autostart bool) daemonDecision {
-	decision, _ := ensureDaemonReadyWithError(autostart)
+	decision, _, _ := ensureDaemonReadyWithError(autostart)
 	return decision
 }
 
 // MCP must retain a failed mismatch handoff as an error, even if the old
 // daemon disappeared: it must never turn that failure into embedded startup.
-func ensureDaemonReadyWithError(autostart bool) (daemonDecision, error) {
+func ensureDaemonReadyWithError(autostart bool) (daemonDecision, daemonIdentity, error) {
 	if isDaemonRunning() {
 		identity := runningDaemonInfo()
 		if autostart && identity.olderThan(binaryVersion()) {
-			return replaceStaleDaemon(identity)
+			decision, err := replaceStaleDaemon(identity)
+			if identity.mismatch() {
+				return decision, identity, err
+			}
+			// Compatible release handoffs retain the existing policy: a
+			// failed stop can continue using the old compatible daemon, and
+			// a failed absent spawn can use the configured fallback. A new
+			// protocol refusal observed during replacement stays terminal.
+			if !errors.Is(err, daemon.ErrProtocolVersionMismatch) {
+				err = nil
+			}
+			return decision, daemonIdentity{}, err
 		}
 		if identity.mismatch() {
-			return daemonReady, daemonMismatchError(identity)
+			return daemonReady, identity, daemonMismatchError(identity)
 		}
-		return daemonReady, nil
+		return daemonReady, daemonIdentity{}, nil
 	}
 	if !autostart {
-		return daemonUnavailable, nil
+		return daemonUnavailable, daemonIdentity{}, nil
 	}
 	// Respect an explicit `daemon stop`: do not resurrect a daemon the user
 	// deliberately stopped. The mark is cleared by `daemon start` / `restart`.
 	// A suppressed `gortex mcp` either uses an explicitly allowed embedded
 	// server or exits, so this never overrides the user's stay-down intent.
 	if stopIntentActive() {
-		return daemonUnavailable, nil
+		return daemonUnavailable, daemonIdentity{}, nil
 	}
 
 	lockPath := daemon.SpawnLockPath()
@@ -198,27 +209,27 @@ func ensureDaemonReadyWithError(autostart bool) (daemonDecision, error) {
 		// Couldn't acquire the lock in time. The winner may have brought
 		// the socket up while we waited — re-probe before giving up.
 		if isDaemonRunning() {
-			return daemonReady, nil
+			return daemonReady, daemonIdentity{}, nil
 		}
-		return daemonUnavailable, nil
+		return daemonUnavailable, daemonIdentity{}, nil
 	}
 	defer func() { _ = lock.Unlock() }()
 
 	// Re-probe inside the lock: a peer may have won the race while we
 	// blocked on the lock.
 	if isDaemonRunning() {
-		return daemonReady, nil
+		return daemonReady, daemonIdentity{}, nil
 	}
 	// A recent failed spawn within the cooldown — skip our own attempt so
 	// K callers don't serially retry a broken spawn.
 	if spawnFailedRecently() {
-		return daemonUnavailable, nil
+		return daemonUnavailable, daemonIdentity{}, nil
 	}
 	if err := spawnDaemon(); err != nil {
 		stampSpawnFailure()
-		return daemonUnavailable, nil
+		return daemonUnavailable, daemonIdentity{}, nil
 	}
-	return daemonAutostarted, nil
+	return daemonAutostarted, daemonIdentity{}, nil
 }
 
 // replaceStaleDaemon swaps a live daemon that is older than this binary for

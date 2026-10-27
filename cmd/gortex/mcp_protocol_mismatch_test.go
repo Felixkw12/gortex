@@ -192,3 +192,66 @@ func TestRunMCPObservedMismatchSurvivesReadyThenUnavailableProxy(t *testing.T) {
 		})
 	}
 }
+
+func TestRunMCPHandoffMismatchSurvivesUnavailableProxy(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		name := "deny"
+		if allow {
+			name = "allow"
+		}
+		t.Run(name, func(t *testing.T) {
+			testenv.Sandbox(t)
+			tmp := redirectTempRoot(t)
+			t.Chdir(tmp)
+			stubUnavailableMCPDaemon(t)
+			t.Cleanup(restoreSeams)
+			zero := 0
+			socket := serveMismatchAck(t, daemon.HandshakeAck{ErrorCode: daemon.ErrProtocolMismatch, ErrorMsg: "daemon expects protocol 0, client sent 1", DaemonVersion: "v0.64.10", DaemonProtocol: &zero})
+			_, wireErr := daemon.DialTo(socket, daemon.Handshake{Mode: daemon.ModeControl})
+			old := daemonIdentityFromMismatch(wireErr)
+			if !old.mismatch() {
+				t.Fatalf("initial wire refusal = %v", wireErr)
+			}
+			probeDaemonAvailability = func() error { return nil } // actual availability is socket-only
+			binaryVersion = func() string { return "v0.64.12" }
+			alive, replaced := true, false
+			isDaemonRunning = func() bool { return alive }
+			runningDaemonInfo = func() daemonIdentity {
+				if !alive {
+					return daemonIdentity{err: daemon.ErrDaemonUnavailable}
+				}
+				if replaced {
+					return daemonIdentity{version: "v0.64.12", protocol: daemon.ProtocolVersion, protocolKnown: true}
+				}
+				return old
+			}
+			serviceActive = func() bool { return false }
+			stopStaleDaemon = func(daemonIdentity) error { alive = false; return nil }
+			spawnDaemon = func() error { alive, replaced = true, true; return nil }
+			withFastDialRetry(t, 5*time.Millisecond)
+			proxyCalls := 0
+			dialDaemon = func(daemon.Handshake) (*daemon.Client, error) { proxyCalls++; return nil, daemon.ErrDaemonUnavailable }
+			path := config.DefaultGlobalConfigPath()
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			value := "false"
+			if allow {
+				value = "true"
+			}
+			if err := os.WriteFile(path, []byte("mcp:\n  allow_embedded: "+value+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := &cobra.Command{}
+			cmd.SetContext(t.Context())
+			err := runMCP(cmd, nil)
+			if !errors.Is(err, daemon.ErrProtocolVersionMismatch) || !replaced || proxyCalls == 0 {
+				t.Fatalf("post-handoff proxy disappearance = %v (replaced=%v, dials=%d)", err, replaced, proxyCalls)
+			}
+			matches, globErr := filepath.Glob(filepath.Join(tmp, embeddedStoreDirPattern))
+			if globErr != nil || len(matches) != 0 {
+				t.Fatalf("handoff mismatch allocated embedded store: %v (%v)", matches, globErr)
+			}
+		})
+	}
+}

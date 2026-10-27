@@ -56,3 +56,23 @@ func TestDaemonMismatchDiagnosticNamesBothIdentitiesAndDirection(t *testing.T) {
 		}
 	}
 }
+
+func TestEnsureDaemonCompatibleStopFailureKeepsMCPPolicy(t *testing.T) {
+	f := installStaleDaemonFixture(t, "v0.64.10", "v0.64.12")
+	stopStaleDaemon = func(daemonIdentity) error { return errors.New("controlled compatible stop failure") }
+	decision, observed, err := ensureDaemonReadyWithError(true)
+	if decision != daemonReady || err != nil || observed.mismatch() || f.spawns.Load() != 0 {
+		t.Fatalf("compatible failure changed startup policy: %d, %+v, %v", decision, observed, err)
+	}
+}
+
+func TestEnsureDaemonMismatchStopFailureRemainsTerminal(t *testing.T) {
+	f := installStaleDaemonFixture(t, "v0.64.10", "v0.64.12")
+	old := daemonIdentity{version: "v0.64.10", protocol: 0, protocolKnown: true, err: &daemon.ProtocolMismatchError{DaemonVersion: "v0.64.10", DaemonProtocolKnown: true, ClientProtocol: daemon.ProtocolVersion}}
+	runningDaemonInfo = func() daemonIdentity { return old }
+	stopStaleDaemon = func(daemonIdentity) error { return errors.New("controlled mismatch stop failure") }
+	_, observed, err := ensureDaemonReadyWithError(true)
+	if !errors.Is(err, daemon.ErrProtocolVersionMismatch) || !observed.mismatch() || f.spawns.Load() != 0 {
+		t.Fatalf("mismatch stop failure lost refusal: %+v, %v", observed, err)
+	}
+}

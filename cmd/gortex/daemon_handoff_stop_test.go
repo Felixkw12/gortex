@@ -342,7 +342,7 @@ func TestEnsureDaemonMismatchedHandoffConcurrentClientsReachPublicTools(t *testi
 			stderr, _ := captureLegacyStderr(t, func() {
 				for range 4 {
 					wg.Go(func() {
-						if _, err := ensureDaemonReadyWithError(true); err != nil {
+						if _, _, err := ensureDaemonReadyWithError(true); err != nil {
 							errs <- err
 							return
 						}
