@@ -21,7 +21,12 @@ func staleMutationRefusal(t *testing.T, f *coordinatorFixture, c *CheckoutCoordi
 	if err != nil {
 		t.Fatal(err)
 	}
-	forceSampledMutationAdmission(t, f, c)
+	// Reused fixtures may already be on the sampled path. Forcing it again
+	// recreates the existing helper's reftable sentinel; natural unsupported
+	// HEAD layouts likewise already exercise the checked fallback.
+	if c.sampler.CaptureHeadEvidence().Usable() {
+		forceSampledMutationAdmission(t, f, c)
+	}
 	builderWriteFile(t, f.worktree, "helper.go", "package fixture\n\nfunc ExternalRefusalChange() {}\n")
 	lease, err := l.BeginCheckoutMutation(t.Context(), f.checkoutID, f.worktree, f.route().RouteEpoch)
 	if lease != nil {
