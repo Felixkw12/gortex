@@ -108,9 +108,11 @@ func (s *Server) prepareRoutedViewMutation(
 		release = reselected.close
 	}
 	if err != nil {
+		s.lifecycle.RecordCheckoutMutationRefusal(ctx, err)
 		s.activateSelectedCheckout(view.rider.CheckoutID, "source mutation needs a fresh checkout view")
-		return ctx, noop, mcp.NewToolResultError(fmt.Sprintf(
-			"%s: checkout mutation was not admitted; no files were changed: %v", graphview.CodeViewReadOnly, err))
+		message := fmt.Sprintf("%s: checkout mutation was not admitted; no files were changed: %v", graphview.CodeViewReadOnly, err)
+		message = checkoutMutationRecoveryMessage(message, err)
+		return ctx, noop, mcp.NewToolResultError(message)
 	}
 	return withCheckoutMutation(ctx, mutation, view.viewRoot), func() {
 		mutation.Close()
@@ -191,4 +193,14 @@ func (s *Server) reselectMutationView(
 		return nil, fmt.Errorf("the reselected view is not the same exact checkout")
 	}
 	return view, nil
+}
+
+// Busy/Pending retain their retry semantics; only stale refusal opens the
+// checkout's native recovery path. Reconnecting is a user action, not a hook
+// daemon restart or an instruction to change configuration.
+func checkoutMutationRecoveryMessage(message string, err error) string {
+	if errors.Is(err, indexer.ErrCheckoutMutationStale) && !errors.Is(err, indexer.ErrCheckoutMutationBusy) && !errors.Is(err, indexer.ErrCheckoutMutationPending) {
+		message += ". Native read/edit is allowed for this checkout until a fresh view is ready; wait for that view and retry the Gortex edit, or reconnect the MCP session."
+	}
+	return message
 }

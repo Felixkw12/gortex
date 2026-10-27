@@ -95,7 +95,9 @@ func (s *Server) prepareByteEditAuthority(ctx context.Context, req *mcp.CallTool
 		return ctx, nil, noop, nil
 	}
 	if err != nil {
-		return ctx, nil, noop, mcp.NewToolResultError(fmt.Sprintf("%s: byte mutation admission refused; no files were changed: %v", graphview.CodeViewReadOnly, err))
+		s.lifecycle.RecordCheckoutMutationRefusal(ctx, err)
+		message := fmt.Sprintf("%s: byte mutation admission refused; no files were changed: %v", graphview.CodeViewReadOnly, err)
+		return ctx, nil, noop, mcp.NewToolResultError(checkoutMutationRecoveryMessage(message, err))
 	}
 	root := control.Checkout.RootPath
 	info, err := indexer.SourceRootFileInfo(root)

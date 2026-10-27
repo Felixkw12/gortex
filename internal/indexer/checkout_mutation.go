@@ -115,7 +115,7 @@ func lifecycleOutputAuthority(l *CheckoutLifecycle) *OutputGenerationAuthority {
 // registered yet (a daemon still activating it, or a rehome in flight) is
 // waited for, bounded (awaitMutationCoordinator), and refused only if none
 // appears.
-func (l *CheckoutLifecycle) BeginCheckoutMutation(ctx context.Context, checkoutID, expectedRoot string, expectedRouteEpoch int64) (*CheckoutMutation, error) {
+func (l *CheckoutLifecycle) BeginCheckoutMutation(ctx context.Context, checkoutID, expectedRoot string, expectedRouteEpoch int64) (_ *CheckoutMutation, resultErr error) {
 	if l == nil || l.catalog == nil || checkoutID == "" || expectedRoot == "" || expectedRouteEpoch <= 0 {
 		return nil, fmt.Errorf("%w: exact checkout identity and route epoch are required", ErrCheckoutMutationStale)
 	}
@@ -129,6 +129,8 @@ func (l *CheckoutLifecycle) BeginCheckoutMutation(ctx context.Context, checkoutI
 	if !found || !sameMutationRoot(checkout.RootPath, expectedRoot) {
 		return nil, fmt.Errorf("%w: checkout root changed", ErrCheckoutMutationStale)
 	}
+	witness := l.mutationRefusalWitness(checkout, expectedRouteEpoch)
+	defer func() { resultErr = l.captureMutationRefusalError(ctx, resultErr, witness) }()
 	rootInfo, err := checkoutRootFileInfo(checkout.RootPath)
 	if err != nil || !rootInfo.IsDir() {
 		return nil, fmt.Errorf("%w: checkout root is unavailable", ErrCheckoutMutationStale)
@@ -178,6 +180,7 @@ func (l *CheckoutLifecycle) BeginCheckoutMutation(ctx context.Context, checkoutI
 		return nil, err
 	}
 	admitted, cycleOwned = false, false // Close now owns every acquired resource.
+	l.clearMutationRefusalOnAdmission(witness)
 	return m, nil
 }
 

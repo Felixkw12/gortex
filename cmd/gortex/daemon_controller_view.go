@@ -322,6 +322,11 @@ func (c *realController) FileCoverage(ctx context.Context, p daemon.FileCoverage
 	defer view.release()
 
 	out := daemon.FileCoverageResult{View: view.answer, Tracked: c.pathTracked(abs, view)}
+	if c.lifecycle != nil && view.answer != nil && view.root != "" {
+		if reason, refused := c.lifecycle.CheckoutMutationRefusal(ctx, view.answer.CheckoutID, view.root); refused {
+			out.MutationState, out.MutationReason = "read_only", reason
+		}
+	}
 	// On a warm restart the persisted catalog binds a configured repository
 	// before warmup registers it, so the coverage below reads its persisted
 	// rows and reports the file covered while every graph call refuses with
