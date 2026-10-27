@@ -246,9 +246,19 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 	if r == nil {
 		return
 	}
+	// Keep the binding and the outcome atomic with respect to ledger readers.
+	// Eviction already takes these locks in ledger -> record order.
+	var ledger *mutationCommitLedger
+	if r.owner != nil {
+		ledger = &r.owner.mutationCommits
+		ledger.mu.Lock()
+	}
 	r.mu.Lock()
 	defer func() {
 		r.mu.Unlock()
+		if ledger != nil {
+			ledger.mu.Unlock()
+		}
 		if r.owner != nil {
 			r.owner.refreshPendingSourceRecord(r)
 		}
@@ -260,6 +270,13 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 	}
 	r.graph = graphStatusFor(outcome)
 	r.graphRecorded = true
+	if ledger != nil {
+		ledger.unbindFreshnessLocked(r)
+		// A detached completion must not resurrect an evicted commit.
+		if outcome.Receipt != "" && ledger.byID[r.id] == r {
+			ledger.byReindexReceipt[outcome.Receipt] = r
+		}
+	}
 	r.reindexReceipt = outcome.Receipt
 	r.reindexGeneration = outcome.Generation
 	r.appliedGeneration = outcome.AppliedGeneration
@@ -334,10 +351,11 @@ func graphStatusFor(outcome mutationReindexOutcome) string {
 // bounding it matters more here than lock-free reads on a path that already
 // performs a filesystem write.
 type mutationCommitLedger struct {
-	mu      sync.Mutex
-	byID    map[string]*mutationCommitRecord
-	byKey   map[string]*mutationCommitRecord
-	ordered []*mutationCommitRecord
+	mu               sync.Mutex
+	byID             map[string]*mutationCommitRecord
+	byKey            map[string]*mutationCommitRecord
+	byReindexReceipt map[string]*mutationCommitRecord
+	ordered          []*mutationCommitRecord
 }
 
 func (l *mutationCommitLedger) put(record *mutationCommitRecord) {
@@ -346,13 +364,27 @@ func (l *mutationCommitLedger) put(record *mutationCommitRecord) {
 	if l.byID == nil {
 		l.byID = make(map[string]*mutationCommitRecord)
 		l.byKey = make(map[string]*mutationCommitRecord)
+		l.byReindexReceipt = make(map[string]*mutationCommitRecord)
 	}
 	l.evictLocked(time.Now())
 	l.byID[record.id] = record
 	if record.key != "" {
 		l.byKey[record.key] = record
 	}
+	record.mu.RLock()
+	if record.reindexReceipt != "" {
+		l.byReindexReceipt[record.reindexReceipt] = record
+	}
+	record.mu.RUnlock()
 	l.ordered = append(l.ordered, record)
+}
+
+// unbindFreshnessLocked requires the ledger lock and the record's read or
+// write lock. Another commit may have claimed the same receipt in the interim.
+func (l *mutationCommitLedger) unbindFreshnessLocked(record *mutationCommitRecord) {
+	if l.byReindexReceipt[record.reindexReceipt] == record {
+		delete(l.byReindexReceipt, record.reindexReceipt)
+	}
 }
 
 // evictLocked drops expired entries first, then the oldest survivors if the
@@ -362,6 +394,9 @@ func (l *mutationCommitLedger) evictLocked(now time.Time) {
 	for _, record := range l.ordered {
 		record.mu.RLock()
 		expired := now.Sub(record.startedAt) > mutationCommitRetention
+		if expired {
+			l.unbindFreshnessLocked(record)
+		}
 		record.mu.RUnlock()
 		if expired {
 			delete(l.byID, record.id)
@@ -376,6 +411,9 @@ func (l *mutationCommitLedger) evictLocked(now time.Time) {
 	for len(l.ordered) >= maxMutationCommits {
 		oldest := l.ordered[0]
 		l.ordered = l.ordered[1:]
+		oldest.mu.RLock()
+		l.unbindFreshnessLocked(oldest)
+		oldest.mu.RUnlock()
 		delete(l.byID, oldest.id)
 		if oldest.key != "" && l.byKey[oldest.key] == oldest {
 			delete(l.byKey, oldest.key)
@@ -394,6 +432,13 @@ func (l *mutationCommitLedger) byMutationID(key string) (*mutationCommitRecord, 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	record, ok := l.byKey[key]
+	return record, ok
+}
+
+func (l *mutationCommitLedger) byFreshnessReceipt(id string) (*mutationCommitRecord, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	record, ok := l.byReindexReceipt[id]
 	return record, ok
 }
 
