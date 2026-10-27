@@ -3448,7 +3448,7 @@ func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
 // reconcile against and a full index is the correct path.
 func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoEntry, priorMtimes map[string]int64) (*IndexResult, error) {
 	start := time.Now()
-	setupTiming := startReconcilePhase(mi.logger, entry.Name, "repository_setup",
+	setupTiming := mi.startReconcilePhase(mi.logger, entry.Name, "repository_setup",
 		zap.Int("prior_files", len(priorMtimes)))
 	defer setupTiming.abort()
 
@@ -3508,7 +3508,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	}
 
 	// Prefix unconditionally, as TrackRepoCtx does — see the note there.
-	restoreTiming := startReconcilePhase(mi.logger, prefix, "indexer_restore")
+	restoreTiming := mi.startReconcilePhase(mi.logger, prefix, "indexer_restore")
 	defer restoreTiming.abort()
 	idx := mi.newPerRepoIndexerForMutation(ctx, cfg.Index)
 	idx.SetRepoPrefix(prefix)
@@ -3521,11 +3521,11 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 
 	var result *IndexResult
 	installed := false
-	admissionTiming := startReconcilePhase(mi.logger, prefix, "topology_admission")
+	admissionTiming := mi.startReconcilePhase(mi.logger, prefix, "topology_admission")
 	defer admissionTiming.abort()
 	err = mi.coordinateRepositoryTopologyMutation(ctx, idx, func() error {
 		admissionTiming.complete(nil)
-		admittedSetupTiming := startReconcilePhase(mi.logger, prefix, "admitted_setup")
+		admittedSetupTiming := mi.startReconcilePhase(mi.logger, prefix, "admitted_setup")
 		defer admittedSetupTiming.abort()
 		// Construction can precede a queued batch transition. Once the stable
 		// lane and transition generation are held, reapply the authoritative mode.
@@ -3591,7 +3591,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 				break
 			}
 		}
-		applyTiming := startReconcilePhase(mi.logger, prefix, "apply",
+		applyTiming := mi.startReconcilePhase(mi.logger, prefix, "apply",
 			zap.Int("changed_files", len(changed)), zap.Int("deleted_files", len(deleted)),
 			zap.Bool("force_full", forceFull), zap.Bool("census_failed", censusErr != nil))
 		defer applyTiming.abort()
@@ -3643,7 +3643,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		if result == nil {
 			return fmt.Errorf("reconciling %s returned a nil result", absPath)
 		}
-		publishTiming := startReconcilePhase(mi.logger, prefix, "publish_and_catchup", zap.String("route", route))
+		publishTiming := mi.startReconcilePhase(mi.logger, prefix, "publish_and_catchup", zap.String("route", route))
 		defer publishTiming.abort()
 		// A scoped snapshot reconcile cannot derive its total from the walked
 		// scope. Its post-mutation tracked count is the repository-wide baseline.

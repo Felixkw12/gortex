@@ -67,7 +67,7 @@ func (s *Store) persistSemanticNodeStamps(stamps []graph.SemanticNodeStamp) (sem
 			stats.statements++
 			txEnriched += enriched
 
-			result, err := tx.Exec(updateQuery, args...)
+			result, err := countNodeWrite(tx.Exec(updateQuery, args...))
 			stats.statements++
 			if err != nil {
 				_ = tx.Rollback()

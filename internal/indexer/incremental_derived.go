@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/entrypoints"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/reach"
 	"github.com/zzet/gortex/internal/resolver"
 )
@@ -84,6 +85,7 @@ type IncrementalDerivedReport struct {
 	// set beside the pass's wall time, it says whether a slow pass worked or
 	// waited.
 	PassCPUMs       map[string]int64
+	PassWrites      map[string]store_sqlite.VFSIOSplit
 	FrameworkMs     int64
 	ExternalCallsMs int64
 	CrossRepoMs     int64
@@ -258,8 +260,13 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesWithPriorTopologyHeld(
 	// like the *_ms fields.
 	report.PassFaults = map[string]int64{}
 	faultsAt, cpuAt := editDeltaProcessIO(), processCPUTime()
+	writesAt := mi.writeCounterMark()
+	report.PassWrites = make(map[string]store_sqlite.VFSIOSplit)
 	notePassFaults := func(pass string) {
 		now, cpu := editDeltaProcessIO(), processCPUTime()
+		writes := mi.writeCounterMark()
+		report.PassWrites[pass] = addVFSIOSplit(report.PassWrites[pass], writes.Since(writesAt))
+		writesAt = writes
 		if f := now.since(faultsAt).majorFaults; f > 0 {
 			report.PassFaults[pass] += f
 		}
@@ -339,8 +346,8 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesWithPriorTopologyHeld(
 		report.Implements = r.InferImplementsForFrontier(typeFrontier)
 		report.Overrides = r.InferOverridesForFrontier(typeFrontier)
 		report.HierarchyMs += time.Since(phase).Milliseconds()
-		notePassFaults("hierarchy")
 	}
+	notePassFaults("hierarchy")
 
 	// The resolution step of this same apply may have bound pending calls
 	// whose TEST callers live outside merged.Files (the definition-side
@@ -495,7 +502,7 @@ func (mi *MultiIndexer) runIncrementalDerivedPassesWithPriorTopologyHeld(
 }
 
 func (mi *MultiIndexer) logIncrementalDerived(report IncrementalDerivedReport, plan DerivedInvalidationPlan) {
-	mi.logger.Info("incremental derived passes complete",
+	fields := []zap.Field{
 		zap.Int("repos", report.Repos),
 		zap.Int("files", report.Files),
 		zap.Int("type_ids", report.TypeIDs),
@@ -545,5 +552,9 @@ func (mi *MultiIndexer) logIncrementalDerived(report IncrementalDerivedReport, p
 		zap.Any("derived_faults", report.PassFaults),
 		zap.Any("derived_cpu_ms", report.PassCPUMs),
 		zap.Int("hierarchy_republished", report.HierarchyRepublished),
-		zap.Int64("duration_ms", report.DurationMs))
+		zap.Int64("duration_ms", report.DurationMs)}
+	for _, family := range []string{"prelude", "hierarchy", "tests", "capability", "framework", "external_calls", "cross_repo", "contracts"} {
+		fields = append(fields, writeCounterFields(family+"_", report.PassWrites[family])...)
+	}
+	mi.logger.Info("incremental derived passes complete", fields...)
 }

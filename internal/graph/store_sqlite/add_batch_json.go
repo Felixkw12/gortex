@@ -352,6 +352,7 @@ func insertNodeChunksJSONBTxWithBuffers(
 			continue
 		}
 		if returnChanged {
+			rowsAt := rowsChanged
 			returned, queryErr := stmt.Query(payload, blobs)
 			statements++
 			if queryErr != nil {
@@ -373,9 +374,10 @@ func insertNodeChunksJSONBTxWithBuffers(
 			if closeErr := returned.Close(); closeErr != nil {
 				return rowsChanged, statements, changedIDs, closeErr
 			}
+			nodeRowsWritten.Add(int64(rowsChanged - rowsAt))
 			continue
 		}
-		result, execErr := stmt.Exec(payload, blobs)
+		result, execErr := countNodeWrite(stmt.Exec(payload, blobs))
 		statements++
 		if execErr != nil {
 			return rowsChanged, statements, changedIDs, execErr
@@ -430,6 +432,7 @@ func insertEdgeChunksJSONBTxWithBuffers(
 			continue
 		}
 		if returnInserted {
+			rowsAt := rowsInserted
 			returned, queryErr := stmt.Query(payload, blobs)
 			statements++
 			if queryErr != nil {
@@ -451,9 +454,10 @@ func insertEdgeChunksJSONBTxWithBuffers(
 			if closeErr := returned.Close(); closeErr != nil {
 				return rowsInserted, statements, insertedKeys, closeErr
 			}
+			edgeRowsWritten.Add(int64(rowsInserted - rowsAt))
 			continue
 		}
-		result, execErr := stmt.Exec(payload, blobs)
+		result, execErr := countEdgeWrite(stmt.Exec(payload, blobs))
 		statements++
 		if execErr != nil {
 			return rowsInserted, statements, insertedKeys, execErr

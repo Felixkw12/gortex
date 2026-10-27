@@ -707,7 +707,8 @@ type Indexer struct {
 	// (store_sqlite.ReaderWaitMark: the read gate and pools, SQLite's own
 	// busy and WAL-retry sleeps, read-transaction time) for the apply steps'
 	// split.
-	storeWaits func() store_sqlite.ReaderWaitMark
+	storeWaits    func() store_sqlite.ReaderWaitMark
+	writeCounters func() store_sqlite.VFSIOMark
 }
 
 // contractCacheEntry is a cached contract-extraction result for one file.
@@ -752,6 +753,8 @@ func New(g graph.Store, reg *parser.Registry, cfg config.IndexConfig, logger *za
 	}
 	if store, ok := g.(*store_sqlite.Store); ok {
 		idx.primaryWatcherWriteIntent = store.AnnounceWrite
+		idx.writeCounters = store.WriteMark
+		idx.resolver.SetWriteCounterSource(store.WriteMark)
 	}
 	// Resolve JS/TS imports declared through an npm alias against the
 	// local index. The index is built lazily on first use — the repo
@@ -7149,14 +7152,14 @@ func (idx *Indexer) incrementalReindexPathsMode(
 	// Reconcile the complete durable corpus before any scoped mutation writes
 	// rows with this process's normalization mode. Doing this after a partial
 	// update would leave unchanged symbols in the previous mode.
-	normalizationTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "fts_normalization")
+	normalizationTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "fts_normalization")
 	defer normalizationTiming.abort()
 	if _, err := idx.reconcileSymbolFTSNormalization(nil); err != nil {
 		normalizationTiming.complete(err)
 		return nil, err
 	}
 	normalizationTiming.complete(nil)
-	discoveryTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "scoped_discovery",
+	discoveryTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "scoped_discovery",
 		zap.Int("requested_paths", len(paths)), zap.Bool("full_root", fullRoot))
 	defer discoveryTiming.abort()
 
@@ -7398,7 +7401,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 	discoveryTiming.complete(nil, zap.Int("detected_files", len(diskFiles)),
 		zap.Int("changed_files", len(staleFiles)), zap.Int("deleted_files", len(deletedFiles)),
 		zap.Int("failed_paths", len(discoveryFailed)))
-	dependencyTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "deletion_frontier",
+	dependencyTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "deletion_frontier",
 		zap.Int("deleted_files", len(deletedFiles)))
 	defer dependencyTiming.abort()
 
@@ -7436,7 +7439,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 	if idx.contractRestatementErr != nil {
 		return nil, idx.contractRestatementErr
 	}
-	finalizeTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "contracts_and_metadata",
+	finalizeTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "contracts_and_metadata",
 		zap.Int("manifest_files", len(manifestFiles)), zap.Int("reparsed_files", len(reparsedFiles)))
 	defer finalizeTiming.abort()
 	manifestPlan, manifestFailed := idx.refreshIncrementalContractManifests(manifestFiles)
@@ -10232,22 +10235,28 @@ func (idx *Indexer) ChangedSinceMtimes(root string) (changed []string, deleted [
 // return or panic from a successful completion. Do not share timers between
 // goroutines.
 type reconcilePhaseTiming struct {
-	logger   *zap.Logger
-	fields   []zap.Field
-	started  time.Time
-	finished bool
+	writes       store_sqlite.VFSIOMark
+	sampleWrites func() store_sqlite.VFSIOMark
+	logger       *zap.Logger
+	fields       []zap.Field
+	started      time.Time
+	finished     bool
 }
 
 func startReconcilePhase(logger *zap.Logger, repo, phase string, fields ...zap.Field) *reconcilePhaseTiming {
+	return startReconcilePhaseWithWrites(store_sqlite.WriteMark, logger, repo, phase, fields...)
+}
+func startReconcilePhaseWithWrites(sample func() store_sqlite.VFSIOMark, logger *zap.Logger, repo, phase string, fields ...zap.Field) *reconcilePhaseTiming {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	timer := &reconcilePhaseTiming{
+		writes: sample(), sampleWrites: sample,
 		logger:  logger,
 		fields:  append([]zap.Field{zap.String("repo", repo), zap.String("phase", phase)}, fields...),
 		started: time.Now(),
 	}
-	logger.Info("indexer: reconcile phase started", timer.fields...)
+	logger.Info("indexer: reconcile phase started", append(append([]zap.Field(nil), timer.fields...), writeCounterFields("phase_", store_sqlite.VFSIOSplit{})...)...)
 	return timer
 }
 
@@ -10272,6 +10281,7 @@ func (timer *reconcilePhaseTiming) finish(outcome string, fields ...zap.Field) {
 	all := append([]zap.Field(nil), timer.fields...)
 	all = append(all, zap.Duration("elapsed", time.Since(timer.started)), zap.String("outcome", outcome))
 	all = append(all, fields...)
+	all = append(all, writeCounterFields("phase_", timer.sampleWrites().Since(timer.writes))...)
 	timer.logger.Info("indexer: reconcile phase complete", all...)
 }
 
@@ -10284,7 +10294,7 @@ func (idx *Indexer) changedSinceMtimesCensus(root string) (
 	detected int,
 	err error,
 ) {
-	timing := startReconcilePhase(idx.logger, idx.repoPrefix, "census")
+	timing := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "census")
 	returned := false
 	defer func() {
 		if !returned {

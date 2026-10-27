@@ -62,7 +62,7 @@ func (s *Store) markEdgesCrossRepo(edges []*graph.Edge) (changed, statements int
 			if len(args) == 0 {
 				continue
 			}
-			result, execErr := tx.Exec(query, args...)
+			result, execErr := countEdgeWrite(tx.Exec(query, args...))
 			statements++
 			if execErr != nil {
 				_ = tx.Rollback()

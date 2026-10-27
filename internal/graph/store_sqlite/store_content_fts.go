@@ -64,10 +64,10 @@ const (
 // indexed sidecar, then deletes FTS rows by docid. Filtering the FTS5 table's
 // UNINDEXED repo/file columns directly would scan the entire virtual table.
 func deleteContentFTSByOwnershipTx(tx *sql.Tx, predicate string, args ...any) (int64, error) {
-	result, err := tx.Exec(`DELETE FROM content_fts
+	result, err := countContentFTSWrite(tx.Exec(`DELETE FROM content_fts
 WHERE rowid IN (
     SELECT fts_rowid FROM content_fts_rowid WHERE `+predicate+`
-)`, args...)
+)`, args...))
 	if err != nil {
 		return 0, err
 	}
@@ -360,7 +360,7 @@ AND file_path IN (SELECT CAST(value AS TEXT) FROM json_each(?))`
 				args = append(args, rowid, item.NodeID, repoPrefix, item.FilePath, item.Ordinal, item.Body)
 				ownerArgs = append(ownerArgs, s.viewGen, rowid, repoPrefix, item.FilePath)
 			}
-			if _, err := tx.Exec(insert.String(), args...); err != nil {
+			if _, err := countContentFTSWrite(tx.Exec(insert.String(), args...)); err != nil {
 				return err
 			}
 			stats.insertStatements++
@@ -437,7 +437,7 @@ func (s *Store) AppendContent(repoPrefix string, items []graph.ContentFTSItem) e
 		if len(args) == 0 {
 			continue
 		}
-		if _, err := tx.Exec(b.String(), args...); err != nil {
+		if _, err := countContentFTSWrite(tx.Exec(b.String(), args...)); err != nil {
 			return err
 		}
 		var owners strings.Builder

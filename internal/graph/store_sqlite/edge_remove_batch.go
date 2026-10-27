@@ -94,7 +94,7 @@ func (s *Store) RemoveEdgesExact(edges []*graph.Edge) int {
 			args = append(args, k.from, k.to, k.kind, k.file, k.line)
 		}
 		args = append(args, s.viewGen)
-		result, execErr := tx.Exec(edgeExactDeleteByIdentitySQL(values.String()), args...)
+		result, execErr := countEdgeWrite(tx.Exec(edgeExactDeleteByIdentitySQL(values.String()), args...))
 		if execErr != nil {
 			panicOnFatal(execErr)
 			return 0
