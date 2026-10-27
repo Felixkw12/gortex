@@ -20,6 +20,13 @@ func absentProcessMetrics(reason string) map[string]Metric {
 	return result
 }
 
+func machCPUSeconds(user, system uint64, numer, denom uint32) Metric {
+	if numer == 0 || denom == 0 {
+		return unavailable("s", "Mach timebase unavailable")
+	}
+	return measured((float64(user)+float64(system))*float64(numer)/float64(denom)/1e9, "s")
+}
+
 func counterDelta(before, after Metric) Metric {
 	if before.Value == nil || after.Value == nil {
 		return unavailable(after.Unit, "counter endpoint unavailable: "+before.Reason+" "+after.Reason)

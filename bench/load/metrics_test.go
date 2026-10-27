@@ -26,6 +26,16 @@ func TestProcessCollectorExplicitAvailability(t *testing.T) {
 	}
 }
 
+func TestMachCPUConvertsAbsoluteTicks(t *testing.T) {
+	m := machCPUSeconds(12_000_000, 12_000_000, 125, 3)
+	if m.Value == nil || *m.Value != 1 {
+		t.Fatalf("non-1:1 Mach timebase: %+v", m)
+	}
+	if m := machCPUSeconds(1, 2, 125, 0); m.Value != nil {
+		t.Fatal("unknown Mach timebase fabricated CPU")
+	}
+}
+
 func TestCgroupSwapIOUsesPagesAndRetainsUnavailable(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
