@@ -56,9 +56,9 @@ func TestContractCoreScopedDeadCodePreservesMaskAndSelectedView(t *testing.T) {
 			// The old consumer sees no optional shortcuts and must walk the same
 			// selected reader's filtered adjacency. It is independent of SQL predicates.
 			slow := legacyOutlineReader{newContractCoreEdges(legacyOutlineReader{store}, ctx, ids)}
-			opts := &analysis.FindDeadCodeOptions{RepoPrefixes: repos}
-			got := analysis.FindDeadCode(fast, nil, opts)
-			want := analysis.FindDeadCode(slow, nil, opts)
+			opts := analysis.FindDeadCodeOptions{RepoPrefixes: repos}
+			got := analysis.FindDeadCode(fast, nil, nil, opts)
+			want := analysis.FindDeadCode(slow, nil, nil, opts)
 			require.Equal(t, want, got, "scope=%v contract IDs=%v", repos, ids)
 			if len(repos) > 0 {
 				require.Positive(t, queries, "binding must keep indexed filtered queries")
@@ -67,7 +67,7 @@ func TestContractCoreScopedDeadCodePreservesMaskAndSelectedView(t *testing.T) {
 			// Also exercise a composed view that hides the backend capability. It
 			// must use its own nodes rather than tunnelling to the physical store.
 			fallback := newContractCoreEdges(legacyOutlineReader{store}, ctx, ids)
-			require.Equal(t, want, analysis.FindDeadCode(fallback, nil, opts))
+			require.Equal(t, want, analysis.FindDeadCode(fallback, nil, nil, opts))
 		}
 	}
 }

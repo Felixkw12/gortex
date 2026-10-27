@@ -13,6 +13,7 @@ import (
 
 func TestOutlineSummaryPreparationHasFixedScopesAndNoResponseWarmup(t *testing.T) {
 	v := newViewStack(t)
+	t.Cleanup(v.srv.DrainBackground)
 	installContractCoreKindTestRuntime(t, v.srv)
 	scopes := v.srv.knownOutlineScopes()
 	require.NotEmpty(t, scopes)
@@ -47,6 +48,7 @@ func TestOutlineSummaryPreparationHasFixedScopesAndNoResponseWarmup(t *testing.T
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 	require.Zero(t, v.srv.warmOutlineSummaries(cancelled).ready)
+	v.srv.DrainBackground()
 	previous := editLaneBusyForTest
 	editLaneBusyForTest = func() bool { return true }
 	t.Cleanup(func() { editLaneBusyForTest = previous })

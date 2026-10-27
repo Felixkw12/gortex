@@ -678,7 +678,7 @@ func (s *Store) NodesByKindsContext(ctx context.Context, kinds []graph.NodeKind)
 // cancelled ctx is returned as an error, never a panic; other failures go
 // through panicOnFatal like every node reader.
 func (s *Store) scanNodePage(ctx context.Context, q string, args ...any) ([]*graph.Node, int, string, error) {
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := outlineRows(ctx, s.db, outlineQuery{sql: q, args: args})
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, 0, "", ctx.Err()

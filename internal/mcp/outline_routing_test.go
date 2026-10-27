@@ -15,6 +15,7 @@ import (
 // scoped-query path; automatic sibling stacks retain their own exact fallback.
 func TestOutlinePrimaryRoutingPreservesStableCacheAndScopedQueries(t *testing.T) {
 	v := newViewStack(t)
+	t.Cleanup(v.srv.DrainBackground)
 	installContractCoreKindTestRuntime(t, v.srv)
 	v.srv.RunAnalysis()
 	var first outlineResponseKey

@@ -5,7 +5,6 @@ import (
 	"iter"
 	"slices"
 	"sort"
-	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -192,9 +191,6 @@ func (s *Store) NodesByKindInRepos(kind graph.NodeKind, prefixes []string) iter.
 			after := ""
 			for {
 				page, scanned, lastID, err := s.scanNodePage(ctx, deadCodeScopedFilesPageSQL, s.viewGen, prefix, after, string(kind), deadCodePageSize)
-				if isNoSuchIndexErr(err) {
-					page, scanned, lastID, err = s.scanNodePage(ctx, strings.ReplaceAll(deadCodeScopedFilesPageSQL, " INDEXED BY nodes_by_repo", ""), s.viewGen, prefix, after, string(kind), deadCodePageSize)
-				}
 				if err != nil {
 					return
 				}
