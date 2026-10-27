@@ -128,6 +128,9 @@ type realController struct {
 	// per-workspace learned-promotion count for `gortex daemon status`.
 	// Nil when the MCP server isn't wired (control-only daemon).
 	toolSurface func() (preset, mode string, learned int)
+	// Immutable before publication; production explicit cochange writes share
+	// MCP's cancellation/admission and actual terminal-write ownership.
+	maintenance *gortexmcp.Server
 
 	// ready flips to true once references are resolved and the graph is
 	// queryable — find_usages / get_callers return complete results from
@@ -530,6 +533,17 @@ func (c *realController) EnrichCochange(ctx context.Context, p daemon.EnrichCoch
 	started := time.Now()
 	var combined daemon.EnrichCochangeResult
 	for _, t := range targets {
+		if c.maintenance != nil {
+			count, superseded, err := c.maintenance.EnrichCochange(ctx, t.prefix, t.root)
+			if err != nil {
+				return daemon.EnrichCochangeResult{}, fmt.Errorf("enrich %s: %w", t.prefix, err)
+			}
+			combined.Edges += count
+			combined.Superseded = combined.Superseded || superseded
+			c.logSupersededEnrichment(gortexmcp.EnrichProducerCochange, t.prefix, superseded)
+			continue
+		}
+		// Control-only fixtures retain the historical context-free door.
 		out, err := c.beginBaseEnrichment(ctx, gortexmcp.EnrichProducerCochange, t.prefix, t.root)
 		if err != nil {
 			return daemon.EnrichCochangeResult{}, fmt.Errorf("enrich %s: %w", t.prefix, err)

@@ -321,6 +321,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	}
 	if state.mcpServer != nil {
 		srv := state.mcpServer
+		controller.maintenance = srv
 		controller.toolSurface = func() (string, string, int) {
 			preset, mode := srv.ActivePreset()
 			return preset, mode, srv.LearnedToolCount()
@@ -371,6 +372,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		warmupTask.cancel()
 		contractAnalysis.Cancel()
 		state.shared.BeginSemanticClose()
+		state.shared.BeginBackgroundClose()
 		state.lifecycle.Cancel()
 		// Revoke startup before any join. The completion boundary is also
 		// the watcher handoff barrier: startup cannot attach/publish another

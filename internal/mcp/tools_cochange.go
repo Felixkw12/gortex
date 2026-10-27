@@ -165,7 +165,11 @@ func (s *Server) handleFindCoChangingSymbols(ctx context.Context, req mcp.CallTo
 // genuinely uncoupled.
 func (s *Server) ensureCoChange() {
 	s.cochangeOnce.Do(func() {
-		go s.mineCoChange()
+		ctx, done, ok := s.admitBackground()
+		if !ok {
+			return
+		}
+		go func() { defer done(); s.mineCoChangeContext(ctx) }()
 	})
 }
 
@@ -199,7 +203,46 @@ func (s *Server) ensureCoChangeForRequest(ctx context.Context) bool {
 // Returns immediately whether mining is in progress, completed, or
 // freshly started.
 func (s *Server) PrewarmCoChange() {
-	go s.cochangeOnce.Do(s.mineCoChange)
+	s.ensureCoChange()
+}
+
+// EnrichCochange is the control socket's explicit corpus mine, owned by the
+// same terminal lifecycle as lazy mining. The caller resolves its target;
+// output admission, every physical write and receipt settlement stay inside
+// this owner's completion. It is not a general background-operation API.
+func (s *Server) EnrichCochange(parent context.Context, prefix, root string) (int, bool, error) {
+	lifetime, done, admitted := s.admitBackground()
+	if !admitted {
+		return 0, false, context.Canceled
+	}
+	defer done()
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(lifetime, cancel)
+	defer stop()
+	defer cancel()
+	if lifetime.Err() != nil {
+		cancel()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	out, err := s.beginEnrichmentOutput(ctx, EnrichProducerCochange, prefix, root)
+	if err != nil {
+		return 0, false, err
+	}
+	defer out.Abandon()
+	res := cochange.Mine(ctx, out.Root, cochange.Options{})
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	// This legacy batch call cannot yet cancel a queued writer. Keep its
+	// actual return inside the owner rather than detach it at cancellation.
+	count := cochange.AddEdges(out.Store, res.Pairs, prefix)
+	if err := ctx.Err(); err != nil {
+		return count, false, err
+	}
+	superseded, err := out.Settle()
+	return count, superseded, err
 }
 
 // coChangeReady reports whether the mine has completed and the cache
@@ -238,6 +281,18 @@ func (s *Server) coChangeReady() bool {
 // `gortex enrich cochange` (or a cold reindex) — the lazy path does not
 // auto-re-mine once edges exist.
 func (s *Server) mineCoChange() {
+	ctx, done, ok := s.admitBackground()
+	if !ok {
+		return
+	}
+	defer done()
+	s.mineCoChangeContext(ctx)
+}
+
+func (s *Server) mineCoChangeContext(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	runtimeactivity.Begin("cochange")
 	defer func() {
 		runtimeactivity.End("cochange")
@@ -247,7 +302,10 @@ func (s *Server) mineCoChange() {
 	scores := map[string]map[string]float64{}
 	counts := map[string]map[string]int{}
 
-	if s.coChangeFromEdges(scores, counts) {
+	if s.coChangeFromEdgesContext(ctx, scores, counts) {
+		if ctx.Err() != nil {
+			return
+		}
 		s.storeCoChange(scores, counts)
 		// The co-change graph COULD be refreshed by re-mining git log,
 		// but was NOT: persisted EdgeCoChange edges already exist, so the
@@ -269,8 +327,13 @@ func (s *Server) mineCoChange() {
 	// mutation raised lazily from a read path, which the authority could
 	// neither order against a live index mutation nor supersede with a later
 	// run of the same producer.
-	ctx := context.Background()
+	if ctx.Err() != nil {
+		return
+	}
 	for prefix, root := range s.enrichmentTargets(ctx, "") {
+		if ctx.Err() != nil {
+			return
+		}
 		// Admitted BEFORE the git history is read, for the same reason the
 		// coverage path admits before it resolves the profile: the working copy
 		// the mine reads is the INPUT, and it must be the root of the corpus
@@ -284,6 +347,10 @@ func (s *Server) mineCoChange() {
 			continue
 		}
 		res := cochange.Mine(ctx, out.Root, cochange.Options{})
+		if ctx.Err() != nil {
+			out.Abandon()
+			return
+		}
 		if len(res.Pairs) == 0 {
 			out.Abandon()
 			continue
@@ -306,7 +373,17 @@ func (s *Server) mineCoChange() {
 		//
 		// Through out.Store, the handle the admitted output names — not the
 		// server's un-selected graph field.
+		if ctx.Err() != nil {
+			out.Abandon()
+			return
+		}
+		// Legacy AddEdges remains physically owned until it returns. A later
+		// context-aware batch boundary can interrupt an in-flight writer gate.
 		cochange.AddEdges(out.Store, res.Pairs, prefix)
+		if ctx.Err() != nil {
+			out.Abandon()
+			return
+		}
 		// A supersession here is an ordering statement, not a failure: the
 		// edges above are already persisted, and a later run of the same
 		// producer over the same corpus is entitled to the authority.
@@ -320,7 +397,9 @@ func (s *Server) mineCoChange() {
 				zap.String("prefix", prefix))
 		}
 	}
-	s.storeCoChange(scores, counts)
+	if ctx.Err() == nil {
+		s.storeCoChange(scores, counts)
+	}
 }
 
 // coChangeFromEdges rebuilds the path-keyed caches from EdgeCoChange
@@ -338,6 +417,14 @@ func (s *Server) mineCoChange() {
 // whole-graph AllEdges materialisation plus the per-edge
 // GetNode trips that loaded the file paths.
 func (s *Server) coChangeFromEdges(scores map[string]map[string]float64, counts map[string]map[string]int) bool {
+	return s.coChangeFromEdgesContext(context.Background(), scores, counts)
+}
+
+func (s *Server) coChangeFromEdgesContext(ctx context.Context, scores map[string]map[string]float64, counts map[string]map[string]int) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	reader := graph.BindReadContext(s.graph, ctx)
 	// First pass: collect CoChange edges + the set of node IDs they
 	// reference. Both can stream from EdgesByKind in one
 	// round-trip on disk backends.
@@ -348,7 +435,10 @@ func (s *Server) coChangeFromEdges(scores map[string]map[string]float64, counts 
 	}
 	var edges []ccEdge
 	idSet := make(map[string]struct{})
-	for e := range s.graph.EdgesByKind(graph.EdgeCoChange) {
+	for e := range reader.EdgesByKind(graph.EdgeCoChange) {
+		if ctx.Err() != nil {
+			return false
+		}
 		if e == nil {
 			continue
 		}
@@ -384,9 +474,18 @@ func (s *Server) coChangeFromEdges(scores map[string]map[string]float64, counts 
 	for id := range idSet {
 		ids = append(ids, id)
 	}
-	nodes := s.graph.GetNodesByIDs(ids)
+	if ctx.Err() != nil {
+		return false
+	}
+	nodes := reader.GetNodesByIDs(ids)
+	if ctx.Err() != nil {
+		return false
+	}
 
 	for _, e := range edges {
+		if ctx.Err() != nil {
+			return false
+		}
 		from, ok := nodes[e.from]
 		if !ok || from == nil {
 			continue

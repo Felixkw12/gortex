@@ -203,6 +203,14 @@ func (s *SharedServer) BeginSemanticClose() {
 	}
 }
 
+// BeginBackgroundClose cancels the MCP notifier before lifecycle's analysis
+// lane is joined. Its actual completion remains the mcp_background step.
+func (s *SharedServer) BeginBackgroundClose() {
+	if s != nil && s.MCP != nil {
+		s.MCP.BeginBackgroundClose()
+	}
+}
+
 // Close runs the teardown chain LIFO, then releases every sidecar database
 // the stack opened.
 //
@@ -217,6 +225,7 @@ func (s *SharedServer) Close() error {
 	s.closeOnce.Do(func() {
 		// Standalone entrypoints share the same cancel-before-join contract.
 		s.BeginSemanticClose()
+		s.BeginBackgroundClose()
 		s.CheckoutLifecycle.Cancel()
 		var errs []error
 		run := func(name string, close func() error) {
