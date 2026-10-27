@@ -68,13 +68,14 @@ func (p sqliteResolvedConversionPlan) updateCandidate(mutation sqliteReindexMuta
 }
 
 type sqliteReindexSetStats struct {
-	selectStatements int
-	updateStatements int
-	deleteStatements int
-	insertStatements int
-	updatedRows      int
-	deletedRows      int
-	insertedRows     int
+	selectStatements                           int
+	updateStatements                           int
+	deleteStatements                           int
+	insertStatements                           int
+	updatedRows                                int
+	deletedRows                                int
+	insertedRows                               int
+	fastPath, genericFallback, receiptFallback int
 }
 
 func (s sqliteReindexSetStats) writeStatements() int {
@@ -89,6 +90,9 @@ func (s *sqliteReindexSetStats) add(other sqliteReindexSetStats) {
 	s.updatedRows += other.updatedRows
 	s.deletedRows += other.deletedRows
 	s.insertedRows += other.insertedRows
+	s.fastPath += other.fastPath
+	s.genericFallback += other.genericFallback
+	s.receiptFallback += other.receiptFallback
 }
 
 func (s *Store) reindexEdgesSetOriented(batch []graph.EdgeReindex) (sqliteReindexSetStats, error) {
@@ -146,6 +150,7 @@ func (s *Store) reindexEdgesSetChunk(chunk []graph.EdgeReindex) (sqliteReindexSe
 	if invalidatedAnalysis {
 		s.analysisGenerationPresent = s.analysisLatchRemaining
 	}
+	noteReindexWrites(stats)
 	s.finishAnalysisMutationLocked(changed)
 	s.noteEdgeEndpointRewriteLocked(changed)
 	if changed {
@@ -196,11 +201,13 @@ func (s *Store) reindexEdgesSetTransactionLocked(ctx context.Context, batch []gr
 	// outside the receipt window and keep the in-place fast path.
 	if resolvedConversionFastPath && receipt != nil && !conversionPlan.oldUnresolved {
 		resolvedConversionFastPath = false
+		stats.receiptFallback = 1
 	}
 
 	var deletes []sqliteReindexKey
 	var inserts []sqliteReindexRow
 	if resolvedConversionFastPath {
+		stats.fastPath = 1
 		deletes = conversionPlan.fallbackDeletes
 		inserts = conversionPlan.fallbackInserts
 
@@ -224,6 +231,9 @@ func (s *Store) reindexEdgesSetTransactionLocked(ctx context.Context, batch []gr
 		deletes = append(deletes, repairDeletes...)
 		inserts = append(inserts, repairInserts...)
 	} else {
+		if stats.receiptFallback == 0 {
+			stats.genericFallback = 1
+		}
 		keys := sqliteReindexKeys(mutations)
 		initial, selectStatements, selectErr := sqliteReindexRowsTxLimited(tx, s.viewGen, keys, &variableLimit)
 		if selectErr != nil {
@@ -454,7 +464,7 @@ func updateSQLiteResolvedConversionsTxLimited(
 		if encodeErr != nil {
 			return updatedRows, statements, repairDeletes, repairInserts, encodeErr
 		}
-		result, execErr := tx.Exec(query, payload, viewGen)
+		result, execErr := countEdgeWrite(tx.Exec(query, payload, viewGen))
 		if execErr != nil {
 			return updatedRows, statements, repairDeletes, repairInserts, execErr
 		}
@@ -824,7 +834,7 @@ func deleteSQLiteReindexRowsTxLimited(tx *sql.Tx, viewGen int64, keys []sqliteRe
 		args = append(args, viewGen)
 
 		query := edgeExactDeleteByIdentitySQL(multiValues(rowCount, reindexKeyParamsPerRow))
-		result, err := tx.Exec(query, args...)
+		result, err := countEdgeWrite(tx.Exec(query, args...))
 		if tooManySQLVariables(err) && rowCount > 1 {
 			rowLimit = lowerBatchVariableLimit(variableLimit, reindexKeyParamsPerRow, rowCount)
 			pos = chunkStart
@@ -880,7 +890,7 @@ func insertSQLiteReindexRowsTxLimited(tx *sql.Tx, viewGen int64, rows []sqliteRe
 		}
 
 		query := `INSERT OR IGNORE INTO edges (` + edgeInsertColumns + `) VALUES ` + multiValues(rowCount, reindexRowParamsPerRow)
-		result, err := tx.Exec(query, args...)
+		result, err := countEdgeWrite(tx.Exec(query, args...))
 		if tooManySQLVariables(err) && rowCount > 1 {
 			rowLimit = lowerBatchVariableLimit(variableLimit, reindexRowParamsPerRow, rowCount)
 			pos = chunkStart

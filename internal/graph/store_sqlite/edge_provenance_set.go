@@ -103,14 +103,14 @@ func updateEdgeProvenanceTx(tx *sql.Tx, viewGen int64, states []provenanceFinalS
 				state.key.from, state.key.to, string(state.key.kind), state.key.filePath, state.key.line)
 		}
 		args = append(args, viewGen)
-		_, err := tx.Exec(`WITH updates(origin,tier,from_id,to_id,kind,file_path,line) AS (VALUES `+values.String()+`)
+		_, err := countEdgeWrite(tx.Exec(`WITH updates(origin,tier,from_id,to_id,kind,file_path,line) AS (VALUES `+values.String()+`)
 UPDATE edges AS e
 SET origin = u.origin, tier = u.tier
 FROM updates AS u
 WHERE e.from_id = u.from_id AND e.to_id = u.to_id AND e.kind = u.kind
   AND e.file_path = u.file_path AND e.line = u.line
   AND e.view_gen = ?
-  AND (e.origin IS NOT u.origin OR e.tier IS NOT u.tier)`, args...)
+  AND (e.origin IS NOT u.origin OR e.tier IS NOT u.tier)`, args...))
 		statements++
 		if err != nil {
 			return statements, err

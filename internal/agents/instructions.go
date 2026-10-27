@@ -125,7 +125,7 @@ func InstructionsDir(env Env) string {
 // MCP-capable agent's working context.
 const InstructionsBody = `## MANDATORY: Use Gortex MCP tools instead of Read/Grep
 
-For every coding task:
+When Gortex can serve the step:
 
 1. Call ` + "`" + `explore` + "`" + ` first with the complete task. Work from the returned source and call paths; do not reopen them with file or shell tools.
 2. Inspect indexed code only with ` + "`" + `search` + "`" + `, ` + "`" + `read` + "`" + `, ` + "`" + `relations` + "`" + `, and ` + "`" + `trace` + "`" + `. Never use Read/Grep/Glob or shell equivalents for indexed source.
@@ -144,7 +144,7 @@ Common calls:
 ` + profiles.WorktreeBranchRoutingPolicy + `
 Never restart the daemon, delete its store, or re-track merely to expose a worktree.
 
-If the Gortex server is configured but these tools are missing from the callable MCP tools, report a Gortex MCP integration failure and stop. Do not start a daemon or switch to a CLI/shell fallback. ` + toolref.MCPMissingToolsException + `
+` + toolref.TransportText + " " + toolref.DegradedModeText + `
 
 Use ` + "`" + `recall` + "`" + ` before revisiting prior work and ` + "`" + `remember` + "`" + ` immediately for durable decisions, invariants, or gotchas.
 `

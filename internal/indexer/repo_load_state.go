@@ -398,6 +398,16 @@ func (mi *MultiIndexer) RepoLoads() []RepoLoad {
 	return slices.Clone(mi.repoLoads.load().records)
 }
 
+// ConfiguredRepoRoots includes declarations whose loading finished without
+// registration. Family guidance must not forget those roots when the pending
+// load table's worktree arm stops applying. This does not grant admission.
+func (mi *MultiIndexer) ConfiguredRepoRoots() []string {
+	if mi == nil || mi.configMgr == nil {
+		return nil
+	}
+	return mi.configMgr.Global().ConfiguredRepoRoots()
+}
+
 // RepoLoadFor returns the record whose root is exactly path. Lock-free; reads
 // no store.
 func (mi *MultiIndexer) RepoLoadFor(path string) (RepoLoad, bool) {

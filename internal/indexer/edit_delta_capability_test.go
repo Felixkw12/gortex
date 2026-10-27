@@ -14,6 +14,9 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// Legacy file repair is a write on the composed delta, never a base-store fallback.
+var _ graph.FileIdentityBatchEvicter = (*graph.DeltaWriter)(nil)
+
 // The DeltaWriter capability checklist.
 //
 // The per-save engine discovers what its store can do by type assertion: a
@@ -33,6 +36,7 @@ import (
 var editDeltaAbsentCapabilities = map[string]string{
 	"graph.ExternalCallCandidateIterator": "read accelerator: external-call candidates fall back to the composed edge-kind scan, preserving delta masks",
 	"anonymous{ReindexEdgesApplied}":      "batch-drop receipt for persistent stores; DeltaWriter applies its reindexes locally and unconditionally through ReindexEdges",
+	"anonymous{WriteMark}":                "process/store write telemetry, not a graph capability: the per-save indexer and resolver receive the underlying store handle's sampler explicitly; a MultiIndexer without this optional sampler falls back to process-wide counters",
 
 	"graph.ContractExtractionEdgeReader":                   "physical checked extraction adjacency; outgoingMetadataContext dispatches the composed DeltaWriter through its selected view rather than forwarding base-only rows",
 	"graph.OverlayLayerContractExtractionEdgeReader":       "physical ancestry-layer projection, not the composed delta; outgoingMetadataContext applies each selected layer and its masks explicitly",

@@ -196,7 +196,7 @@ func TestRunnerRealFullVersusAffectedExecutionAndCoverage(t *testing.T) {
 	head := f.change("leaf/value.go")
 	affected := f.plan(head)
 	requireAffected(t, affected)
-	full, err := f.planner.Plan(t.Context(), Event{Name: "pull_request", Head: head, Base: f.base, Full: true})
+	full, err := f.planner.Plan(t.Context(), Event{Name: "pull_request", Head: affected.Head, Base: f.base, Full: true})
 	if err != nil {
 		t.Fatal(err)
 	}

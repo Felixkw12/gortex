@@ -64,7 +64,7 @@ func (s *Store) EvictEdgesByKinds(kinds []graph.EdgeKind) int {
 		panicOnFatal(err)
 		return 0
 	}
-	res, err := tx.Exec(edgesByKindsDeleteStatement(kinds), kindsJSON, s.viewGen)
+	res, err := countEdgeWrite(tx.Exec(edgesByKindsDeleteStatement(kinds), kindsJSON, s.viewGen))
 	if err != nil {
 		_ = tx.Rollback()
 		panicOnFatal(err)

@@ -277,9 +277,10 @@ func (f *issue767Fixture) start() {
 		ctx, cancel = context.WithDeadline(f.t.Context(), deadline.Add(-time.Minute))
 	}
 	cmd := exec.CommandContext(ctx, f.binary, "daemon", "start", "--embeddings=false", "--backend", "sqlite", "--backend-path", f.store, "--no-progress")
-	// Global testing timeout bypasses Cleanup. This captured child receives
-	// SIGINT and a bounded forced exit before the parent testing deadline.
-	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	// Global testing timeout bypasses Cleanup. Request the same private,
+	// graceful shutdown as stop before exec's bounded last-resort kill.
+	// os.Interrupt cannot be sent to a process on native Windows.
+	cmd.Cancel = func() error { return f.requestGracefulStop(cmd, "cancel") }
 	cmd.WaitDelay = 10 * time.Second
 	cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = f.primary, f.env, log, log
 	if err := cmd.Start(); err != nil {
@@ -326,9 +327,16 @@ func (f *issue767Fixture) stop() {
 	if cmd == nil {
 		return
 	}
-	_ = cmd.Process.Signal(os.Interrupt)
+	if err := f.requestGracefulStop(cmd, "stop"); err != nil {
+		f.t.Errorf("isolated child %d graceful stop request: %v", cmd.Process.Pid, err)
+	}
 	select {
-	case <-done:
+	case err := <-done:
+		clean := issue767CleanChildExit(err, cmd.ProcessState)
+		f.t.Logf("private daemon exit: pid=%d graceful=%t state=%v wait_error=%v", cmd.Process.Pid, clean, cmd.ProcessState, err)
+		if !clean {
+			f.t.Errorf("isolated child %d did not exit cleanly: %v (state=%v)", cmd.Process.Pid, err, cmd.ProcessState)
+		}
 	case <-time.After(30 * time.Second):
 		_ = cmd.Process.Kill()
 		select {
@@ -341,6 +349,54 @@ func (f *issue767Fixture) stop() {
 	if log != nil {
 		_ = log.Close()
 	}
+}
+
+func issue767CleanChildExit(err error, state *os.ProcessState) bool {
+	if state == nil || !state.Success() {
+		return false // a killed/nonzero child never becomes a graceful stop
+	}
+	// testing cancels t.Context before Cleanup. CommandContext then returns
+	// that cancellation even if Cancel requested a graceful, zero-code exit.
+	return err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// requestGracefulStop is shared by explicit cleanup and CommandContext.Cancel.
+// Its Windows command uses only the fixture's private environment, even if the
+// test context has already expired. A successful CLI exit alone is insufficient:
+// daemon stop can report success after force-killing, which is a failed smoke.
+func (f *issue767Fixture) requestGracefulStop(cmd *exec.Cmd, reason string) error {
+	if runtime.GOOS != "windows" {
+		err := cmd.Process.Signal(os.Interrupt)
+		if errors.Is(err, os.ErrProcessDone) {
+			return nil
+		}
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(f.t.Context()), 20*time.Second)
+	defer cancel()
+	stop := exec.CommandContext(ctx, f.binary, "daemon", "stop", "--no-progress")
+	stop.Dir, stop.Env = f.primary, f.env
+	stop.WaitDelay = 2 * time.Second
+	started := time.Now()
+	output, err := stop.CombinedOutput()
+	path := filepath.Join(f.root, fmt.Sprintf("shutdown-%d-%s.log", cmd.Process.Pid, reason))
+	if writeErr := os.WriteFile(path, output, 0600); writeErr != nil {
+		return fmt.Errorf("retain graceful-stop output: %w", writeErr)
+	}
+	f.t.Logf("private Windows daemon stop: pid=%d reason=%s elapsed=%s err=%v output=%s", cmd.Process.Pid, reason, time.Since(started), err, path)
+	return issue767GracefulStopResult(output, err)
+}
+
+func issue767GracefulStopResult(output []byte, err error) error {
+	if err != nil {
+		return fmt.Errorf("daemon stop: %w; output: %s", err, output)
+	}
+	for _, forced := range []string{"graceful shutdown timed out", "close made no progress", "stopped (force-killed)"} {
+		if strings.Contains(string(output), forced) {
+			return fmt.Errorf("private daemon required force kill: %s", output)
+		}
+	}
+	return nil
 }
 
 // stopAndJoin retains stop's errors and deadlines. A detached child handle is

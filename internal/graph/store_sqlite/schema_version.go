@@ -856,8 +856,8 @@ func createCheckoutCatalogTables(tx *sql.Tx) error {
 // and bounded to the tests kind: pending calls and resolved projections are
 // untouched.
 func purgeUnresolvedTestsEdges(tx *sql.Tx) error {
-	_, err := tx.Exec(`DELETE FROM edges WHERE kind = 'tests'
-		AND (to_id LIKE 'unresolved::%' OR to_id LIKE '%::unresolved::%')`)
+	_, err := countEdgeWrite(tx.Exec(`DELETE FROM edges WHERE kind = 'tests'
+		AND (to_id LIKE 'unresolved::%' OR to_id LIKE '%::unresolved::%')`))
 	return err
 }
 
@@ -977,7 +977,7 @@ func backfillSyntheticNodeRepoPrefixes(tx *sql.Tx) error {
 	if err := ensureCloneCorpusColumns(tx); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`
+	if _, err := countNodeWrite(tx.Exec(`
 UPDATE nodes
 SET repo_prefix = substr(id, 1, instr(id, '::') - 1)
 WHERE repo_prefix = ''
@@ -987,7 +987,7 @@ WHERE repo_prefix = ''
       OR substr(id, instr(id, '::') + 2) LIKE 'stdlib::%'
       OR substr(id, instr(id, '::') + 2) LIKE 'builtin::%'
       OR substr(id, instr(id, '::') + 2) LIKE 'external_call::%'
-  )`); err != nil {
+  )`)); err != nil {
 		return err
 	}
 	return backfillEdgeSemanticSources(tx)
@@ -1209,7 +1209,7 @@ func createAnalysisGenerationTables(tx *sql.Tx) error {
 // shrinks only under a manual VACUUM, deliberately out of scope for a derived
 // cache that reclaims the space on its own.
 func dedupeFnValuePlaceholderEdges(tx *sql.Tx) error {
-	_, err := tx.Exec(`
+	_, err := countEdgeWrite(tx.Exec(`
 WITH ph AS (
     SELECT id, from_id, to_id FROM edges
     WHERE (to_id >= 'unresolved::fnvalue::' AND to_id < 'unresolved::fnvalue:;')
@@ -1217,7 +1217,7 @@ WITH ph AS (
 ), keep AS (
     SELECT MIN(id) AS id FROM ph GROUP BY from_id, to_id
 )
-DELETE FROM edges WHERE id IN (SELECT id FROM ph) AND id NOT IN (SELECT id FROM keep)`)
+DELETE FROM edges WHERE id IN (SELECT id FROM ph) AND id NOT IN (SELECT id FROM keep)`))
 	return err
 }
 

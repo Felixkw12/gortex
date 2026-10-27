@@ -86,8 +86,24 @@ A repository prefix identifies one indexed root. By default, it is the directory
 basename. Tracking a different root with a prefix taken by another top-level
 entry fails, even without a daemon. Tracking the same top-level root again is a no-op.
 
-When a linked worktree's family already has a corpus, the daemon names a new
-independent corpus `<family-base>@<admin-name>`. The admin name comes from Git's
+Linked worktrees of a registered or configured Git family are served
+automatically. `gortex track <linked-worktree>` warns and returns without a
+config change or track request. If a daemon is running, the warning also shows
+the available `explain-view` state. To intentionally build a separate graph:
+
+```bash
+gortex track --as-worktree ~/projects/feature-checkout
+```
+
+When no checkout of the family is known yet, tracking a linked checkout keeps
+that choice and identifies it as the family's tracked primary; prefer tracking
+the default-branch checkout instead. While automatic checkout discovery is
+pending, retry graph calls on the same session; no reconnect is needed. Inspect
+`gortex repos explain-view <path>` rather than bootstrap-tracking the current
+checkout. An uncovered session can still track an unrelated repository.
+
+For an explicitly requested independent graph, the daemon names the new
+corpus `<family-base>@<admin-name>`. The admin name comes from Git's
 worktree metadata, not its current branch. The CLI uses the same rule offline,
 including families tracked through a linked checkout or a bare repository.
 An explicit `--name` takes precedence.
@@ -435,6 +451,21 @@ gortex instructions list
 gortex instructions switch localization   # lean machine: diet body + 10-tool surface + lean hooks
 gortex instructions switch core           # back to the balanced default
 ```
+
+
+Generated instruction profiles record the binary version that produced them.
+On daemon startup, an existing managed installation refreshes after an upgrade;
+its saved active selection stays unchanged, even when the daemon process has a
+`GORTEX_INSTRUCTIONS_PROFILE` override. The refresh applies to new sessions.
+A second start leaves already-current files unchanged.
+
+Automatic refresh accepts only recorded generated files or exact known legacy
+profile bodies from v0.64.10 and v0.64.11. It preserves customized, unrecognized or symlinked files and
+logs how to resolve the conflict; the daemon continues serving. Back up and move
+conflicting generated files aside, then run `gortex instructions regen` to
+restore them and record the current version. Keep personal guidance in your
+agent's user-managed instructions rather than editing generated profile files.
+
 
 ### `gortex analyze` — unified analysis dispatcher
 

@@ -143,20 +143,20 @@ func (s *Store) RebindGoMethodReceiversForFiles(filePaths []string) (changed int
 			return 0, fmt.Errorf("sqlite receiver batch invalidate analysis: %w", err)
 		}
 	}
-	if _, err = tx.ExecContext(ctx, goMethodReceiverBatchConflictDeleteSQL); err != nil {
+	if _, err = countEdgeWrite(tx.ExecContext(ctx, goMethodReceiverBatchConflictDeleteSQL)); err != nil {
 		return 0, fmt.Errorf("sqlite receiver batch remove existing-key conflicts: %w", err)
 	}
-	if _, err = tx.ExecContext(ctx, goMethodReceiverBatchDuplicateDeleteSQL); err != nil {
+	if _, err = countEdgeWrite(tx.ExecContext(ctx, goMethodReceiverBatchDuplicateDeleteSQL)); err != nil {
 		return 0, fmt.Errorf("sqlite receiver batch deduplicate canonical keys: %w", err)
 	}
-	if _, err = tx.ExecContext(ctx, `
+	if _, err = countEdgeWrite(tx.ExecContext(ctx, `
 UPDATE edges
 SET to_id = (
     SELECT r.new_to
     FROM temp.go_receiver_rebind_candidates AS r
     WHERE r.edge_id = edges.id
 )
-WHERE id IN (SELECT edge_id FROM temp.go_receiver_rebind_candidates)`); err != nil {
+WHERE id IN (SELECT edge_id FROM temp.go_receiver_rebind_candidates)`)); err != nil {
 		return 0, fmt.Errorf("sqlite receiver batch update targets: %w", err)
 	}
 	if err = tx.Commit(); err != nil {

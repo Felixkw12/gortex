@@ -2322,7 +2322,7 @@ func (s *Store) insertNodeLocked(stmt *sql.Stmt, n *graph.Node) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	res, err := stmt.Exec(
+	res, err := countNodeWrite(stmt.Exec(
 		s.viewGen,
 		n.ID, string(n.Kind), n.Name, n.QualName, n.FilePath,
 		n.StartLine, n.EndLine, n.StartColumn, n.EndColumn, n.Language,
@@ -2332,7 +2332,7 @@ func (s *Store) insertNodeLocked(stmt *sql.Stmt, n *graph.Node) (bool, error) {
 		p.dataClass, p.semanticType, p.semanticSource, p.cloneSig,
 		p.entryPoint, p.entryPointKind, metaBlob,
 		p.searchSig, p.searchQualName, p.searchDoc, p.searchSuppressed, p.sectionText,
-	)
+	))
 	if err != nil {
 		return false, err
 	}
@@ -2382,12 +2382,12 @@ func (s *Store) insertEdgeLocked(stmt *sql.Stmt, e *graph.Edge) (bool, error) {
 	if e.CrossRepo {
 		crossRepo = 1
 	}
-	res, err := stmt.Exec(
+	res, err := countEdgeWrite(stmt.Exec(
 		s.viewGen,
 		e.From, e.To, string(e.Kind), e.FilePath, e.Line,
 		e.Confidence, e.ConfidenceLabel, e.Origin, e.Tier,
 		crossRepo, metaBlob, p.resolveTerminal, p.resolveTerminalReason, p.semanticSource,
-	)
+	))
 	if err != nil {
 		return false, err
 	}
@@ -2447,10 +2447,10 @@ func (s *Store) SetEdgeProvenance(e *graph.Edge, newOrigin string) bool {
 	if newTier != "" {
 		newTier = graph.ResolvedBy(newOrigin)
 	}
-	if _, err := s.execActiveWriteLocked(context.Background(),
+	if _, err := countEdgeWrite(s.execActiveWriteLocked(context.Background(),
 		`UPDATE edges SET origin = ?, tier = ? WHERE from_id = ? AND to_id = ? AND kind = ? AND file_path = ? AND line = ? AND view_gen = ?`,
 		newOrigin, newTier, e.From, e.To, string(e.Kind), e.FilePath, e.Line, s.viewGen,
-	); err != nil {
+	)); err != nil {
 		panicOnFatal(err)
 		return false
 	}
@@ -2487,12 +2487,12 @@ func (s *Store) PersistEdgeAttributes(e *graph.Edge) {
 	if !s.invalidateAnalysisBeforeMutationLocked() {
 		return
 	}
-	res, err := s.execActiveWriteLocked(context.Background(),
+	res, err := countEdgeWrite(s.execActiveWriteLocked(context.Background(),
 		`UPDATE edges SET confidence = ?, confidence_label = ?, origin = ?, tier = ?, meta = ?, resolve_terminal = ?, resolve_terminal_reason = ?, semantic_source = ? WHERE from_id = ? AND to_id = ? AND kind = ? AND file_path = ? AND line = ? AND view_gen = ?`,
 		e.Confidence, e.ConfidenceLabel, e.Origin, e.Tier, metaBlob,
 		p.resolveTerminal, p.resolveTerminalReason, p.semanticSource,
 		e.From, e.To, string(e.Kind), e.FilePath, e.Line, s.viewGen,
-	)
+	))
 	if err != nil {
 		panicOnFatal(err)
 		return
@@ -2563,7 +2563,7 @@ func (s *Store) persistEdgeAttributesBatch(edges []*graph.Edge) (statements int,
 			if len(args) == 0 {
 				continue
 			}
-			res, err := tx.Exec(query, args...)
+			res, err := countEdgeWrite(tx.Exec(query, args...))
 			statements++
 			if err != nil {
 				_ = tx.Rollback()
@@ -2715,7 +2715,7 @@ func (s *Store) ReindexEdge(e *graph.Edge, oldTo string) {
 	insertStmt := tx.Stmt(s.stmtInsertEdge)
 	defer insertStmt.Close()
 
-	res, err := deleteStmt.Exec(e.From, oldTo, string(e.Kind), e.FilePath, e.Line, s.viewGen)
+	res, err := countEdgeWrite(deleteStmt.Exec(e.From, oldTo, string(e.Kind), e.FilePath, e.Line, s.viewGen))
 	if err != nil {
 		panicOnFatal(err)
 		return
@@ -2821,10 +2821,10 @@ func (s *Store) RemoveEdge(from, to string, kind graph.EdgeKind) bool {
 	if !s.invalidateAnalysisBeforeMutationLocked() {
 		return false
 	}
-	res, err := s.execActiveWriteLocked(context.Background(),
+	res, err := countEdgeWrite(s.execActiveWriteLocked(context.Background(),
 		`DELETE FROM edges WHERE from_id = ? AND to_id = ? AND kind = ? AND view_gen = ?`,
 		from, to, string(kind), s.viewGen,
-	)
+	))
 	if err != nil {
 		panicOnFatal(err)
 		return false

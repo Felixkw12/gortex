@@ -707,7 +707,8 @@ type Indexer struct {
 	// (store_sqlite.ReaderWaitMark: the read gate and pools, SQLite's own
 	// busy and WAL-retry sleeps, read-transaction time) for the apply steps'
 	// split.
-	storeWaits func() store_sqlite.ReaderWaitMark
+	storeWaits    func() store_sqlite.ReaderWaitMark
+	writeCounters func() store_sqlite.VFSIOMark
 }
 
 // contractCacheEntry is a cached contract-extraction result for one file.
@@ -752,6 +753,8 @@ func New(g graph.Store, reg *parser.Registry, cfg config.IndexConfig, logger *za
 	}
 	if store, ok := g.(*store_sqlite.Store); ok {
 		idx.primaryWatcherWriteIntent = store.AnnounceWrite
+		idx.writeCounters = store.WriteMark
+		idx.resolver.SetWriteCounterSource(store.WriteMark)
 	}
 	// Resolve JS/TS imports declared through an npm alias against the
 	// local index. The index is built lazily on first use — the repo
@@ -5136,7 +5139,7 @@ func (idx *Indexer) indexFile(
 	// first leaves the file at zero nodes whenever the on-disk bytes are
 	// transiently unparseable (a save mid-edit) — a failed extraction
 	// then returns early and the symbols stay nuked. Capturing the old
-	// state up front and deferring the actual eviction to evictExisting()
+	// state up front and deferring the actual eviction to evictExisting(result)
 	// keeps the file stale-but-present on failure (stale beats empty) and
 	// shrinks the no-nodes window to the gap between evict and AddBatch.
 	//
@@ -5144,11 +5147,13 @@ func (idx *Indexer) indexFile(
 	// incremental clone index can drop their CMS/LSH contributions —
 	// EvictFile removes the nodes (and their clone_sig) from the graph,
 	// so it must be captured before evictExisting runs.
+	priorNodes, legacyIDs, legacyPath := idx.filePriorWithLegacy(graphPath, idx.graph.GetFileNodes(graphPath))
+	var legacyCarried []*graph.Edge
 	var oldFuncIDs []string
-	evictExisting := func() {
+	evictExisting := func(result *parser.ExtractionResult) {
 		idx.invalidateGoModuleSourceStamp(relPath)
 		var oldFTSNodeIDs []string
-		for _, n := range idx.graph.GetFileNodes(graphPath) {
+		for _, n := range priorNodes {
 			if n == nil {
 				continue
 			}
@@ -5164,11 +5169,33 @@ func (idx *Indexer) indexFile(
 		// batch replacement by deleting its prior documents explicitly;
 		// canonical contracts follow the store's owner-retention decision.
 		idx.deleteSymbolFTS(oldFTSNodeIDs)
-		npmConsumers := idx.restubIncomingRefs(graphPath)
+		var npmConsumers []string
+		if len(legacyIDs) == 0 {
+			npmConsumers = idx.restubIncomingRefs(graphPath)
+		} else {
+			// Extraction is still unprefixed here. Build only the identity surface
+			// needed by the same incoming frontier used by the structural batch.
+			fresh := &parser.ExtractionResult{}
+			for _, node := range extractionNodes(result) {
+				if node == nil {
+					continue
+				}
+				copied := *node
+				copied.ID = idx.prefixPath(node.ID)
+				fresh.Nodes = append(fresh.Nodes, &copied)
+			}
+			stage := &incrementalBatchStage{graphPath: graphPath, legacyPath: legacyPath, priorNodes: priorNodes, result: fresh}
+			stages := []*incrementalBatchStage{stage}
+			legacyCarried, npmConsumers = restubIncomingRefsFromView(idx.graph, stages, loadIncrementalPriorView(idx.graph, stages))
+		}
 		if markerBatch != nil {
 			markerBatch.npmConsumerFiles = appendUniqueSorted(markerBatch.npmConsumerFiles, npmConsumers...)
 		}
-		idx.graph.EvictFile(graphPath)
+		if len(legacyIDs) == 0 {
+			idx.graph.EvictFile(graphPath)
+		} else {
+			idx.evictFileIdentities([]string{graphPath}, legacyIDs, []string{legacyPath})
+		}
 	}
 
 	// A delta probe already owns a shared admission lease together with its
@@ -5234,7 +5261,7 @@ func (idx *Indexer) indexFile(
 					return err
 				}
 			}
-			evictExisting()
+			evictExisting(result)
 			idx.graph.AddBatch([]*graph.Node{n}, nil)
 			if !idx.recordFileReadVersion(mtimeKey, absPath, readVersion) {
 				return idx.fileIndexFailureError(absPath)
@@ -5258,7 +5285,7 @@ func (idx *Indexer) indexFile(
 					return err
 				}
 			}
-			evictExisting()
+			evictExisting(result)
 			idx.graph.AddBatch([]*graph.Node{n}, nil)
 			if !idx.recordFileReadVersion(mtimeKey, absPath, readVersion) {
 				return idx.fileIndexFailureError(absPath)
@@ -5360,7 +5387,7 @@ func (idx *Indexer) indexFile(
 			return err
 		}
 	}
-	evictExisting()
+	evictExisting(result)
 
 	// Coverage extractors (todos, licenses, ownership). A prepared watcher
 	// delta already ran this exact pipeline; reusing it avoids both a second
@@ -5398,6 +5425,9 @@ func (idx *Indexer) indexFile(
 	if visCaptured && priorVis != freshVis {
 		reuseIdx, priorUnresolved, priorDeclarations = nil, nil, nil
 	}
+	if len(legacyIDs) > 0 {
+		reuseIdx, priorUnresolved = nil, nil
+	}
 	if reused := applyResolvedOutEdges(idx.graph, result.Edges, reuseIdx, newNodeIDs); reused > 0 {
 		idx.logger.Debug("indexer: reused prior resolutions",
 			zap.Int("edges", reused), zap.String("file", graphPath))
@@ -5409,7 +5439,7 @@ func (idx *Indexer) indexFile(
 	// the node.
 	idx.replaceContentSections(graphPath, result.Nodes, false)
 
-	idx.graph.AddBatch(result.Nodes, result.Edges)
+	idx.graph.AddBatch(result.Nodes, append(result.Edges, legacyCarried...))
 	idx.persistFileMeta(relPath, src, result)
 	idx.persistConstValues(result)
 	// No subsequent stage reads source bytes or the parse tree. Release both
@@ -7122,14 +7152,14 @@ func (idx *Indexer) incrementalReindexPathsMode(
 	// Reconcile the complete durable corpus before any scoped mutation writes
 	// rows with this process's normalization mode. Doing this after a partial
 	// update would leave unchanged symbols in the previous mode.
-	normalizationTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "fts_normalization")
+	normalizationTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "fts_normalization")
 	defer normalizationTiming.abort()
 	if _, err := idx.reconcileSymbolFTSNormalization(nil); err != nil {
 		normalizationTiming.complete(err)
 		return nil, err
 	}
 	normalizationTiming.complete(nil)
-	discoveryTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "scoped_discovery",
+	discoveryTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "scoped_discovery",
 		zap.Int("requested_paths", len(paths)), zap.Bool("full_root", fullRoot))
 	defer discoveryTiming.abort()
 
@@ -7243,6 +7273,8 @@ func (idx *Indexer) incrementalReindexPathsMode(
 			staleFiles = append(staleFiles, absPath)
 		}
 	}
+
+	staleFiles = append(staleFiles, idx.legacyFileCandidates(diskFiles)...)
 
 	projectionCandidates := make([]string, 0, 1)
 	for relPath := range diskFiles {
@@ -7369,7 +7401,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 	discoveryTiming.complete(nil, zap.Int("detected_files", len(diskFiles)),
 		zap.Int("changed_files", len(staleFiles)), zap.Int("deleted_files", len(deletedFiles)),
 		zap.Int("failed_paths", len(discoveryFailed)))
-	dependencyTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "deletion_frontier",
+	dependencyTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "deletion_frontier",
 		zap.Int("deleted_files", len(deletedFiles)))
 	defer dependencyTiming.abort()
 
@@ -7407,7 +7439,7 @@ func (idx *Indexer) incrementalReindexPathsMode(
 	if idx.contractRestatementErr != nil {
 		return nil, idx.contractRestatementErr
 	}
-	finalizeTiming := startReconcilePhase(idx.logger, idx.repoPrefix, "contracts_and_metadata",
+	finalizeTiming := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "contracts_and_metadata",
 		zap.Int("manifest_files", len(manifestFiles)), zap.Int("reparsed_files", len(reparsedFiles)))
 	defer finalizeTiming.abort()
 	manifestPlan, manifestFailed := idx.refreshIncrementalContractManifests(manifestFiles)
@@ -10203,22 +10235,28 @@ func (idx *Indexer) ChangedSinceMtimes(root string) (changed []string, deleted [
 // return or panic from a successful completion. Do not share timers between
 // goroutines.
 type reconcilePhaseTiming struct {
-	logger   *zap.Logger
-	fields   []zap.Field
-	started  time.Time
-	finished bool
+	writes       store_sqlite.VFSIOMark
+	sampleWrites func() store_sqlite.VFSIOMark
+	logger       *zap.Logger
+	fields       []zap.Field
+	started      time.Time
+	finished     bool
 }
 
 func startReconcilePhase(logger *zap.Logger, repo, phase string, fields ...zap.Field) *reconcilePhaseTiming {
+	return startReconcilePhaseWithWrites(store_sqlite.WriteMark, logger, repo, phase, fields...)
+}
+func startReconcilePhaseWithWrites(sample func() store_sqlite.VFSIOMark, logger *zap.Logger, repo, phase string, fields ...zap.Field) *reconcilePhaseTiming {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	timer := &reconcilePhaseTiming{
+		writes: sample(), sampleWrites: sample,
 		logger:  logger,
 		fields:  append([]zap.Field{zap.String("repo", repo), zap.String("phase", phase)}, fields...),
 		started: time.Now(),
 	}
-	logger.Info("indexer: reconcile phase started", timer.fields...)
+	logger.Info("indexer: reconcile phase started", append(append([]zap.Field(nil), timer.fields...), writeCounterFields("phase_", store_sqlite.VFSIOSplit{})...)...)
 	return timer
 }
 
@@ -10243,6 +10281,7 @@ func (timer *reconcilePhaseTiming) finish(outcome string, fields ...zap.Field) {
 	all := append([]zap.Field(nil), timer.fields...)
 	all = append(all, zap.Duration("elapsed", time.Since(timer.started)), zap.String("outcome", outcome))
 	all = append(all, fields...)
+	all = append(all, writeCounterFields("phase_", timer.sampleWrites().Since(timer.writes))...)
 	timer.logger.Info("indexer: reconcile phase complete", all...)
 }
 
@@ -10255,7 +10294,7 @@ func (idx *Indexer) changedSinceMtimesCensus(root string) (
 	detected int,
 	err error,
 ) {
-	timing := startReconcilePhase(idx.logger, idx.repoPrefix, "census")
+	timing := idx.startReconcilePhase(idx.logger, idx.repoPrefix, "census")
 	returned := false
 	defer func() {
 		if !returned {

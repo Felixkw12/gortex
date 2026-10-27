@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
 const (
@@ -147,7 +148,7 @@ func (idx *Indexer) persistRefFactsForFiles(graphPaths []string) {
 	if !ok {
 		return
 	}
-	legs := newRefFactLegs()
+	legs := newRefFactLegs(idx.writeCounterMark)
 	defer func() { idx.logger.Info("ref-facts: persisted", legs.fields(len(graphPaths))...) }()
 	for start := 0; start < len(graphPaths); start += refFactFileBatch {
 		end := min(start+refFactFileBatch, len(graphPaths))
@@ -263,15 +264,18 @@ func (idx *Indexer) deleteRefFactsForFiles(repoPrefix string, graphPaths []strin
 // their out-edges, the targets' names, the delete and the write), each with
 // the major page faults it took. A nil *refFactLegs records nothing.
 type refFactLegs struct {
-	last   time.Time
-	io     editDeltaIO
-	took   map[string]time.Duration
-	faults map[string]int64
-	order  []string
+	sampleWrites func() store_sqlite.VFSIOMark
+	writes       store_sqlite.VFSIOMark
+	writeCounts  map[string]store_sqlite.VFSIOSplit
+	last         time.Time
+	io           editDeltaIO
+	took         map[string]time.Duration
+	faults       map[string]int64
+	order        []string
 }
 
-func newRefFactLegs() *refFactLegs {
-	return &refFactLegs{last: time.Now(), io: editDeltaProcessIO(),
+func newRefFactLegs(sample func() store_sqlite.VFSIOMark) *refFactLegs {
+	return &refFactLegs{sampleWrites: sample, writes: sample(), writeCounts: make(map[string]store_sqlite.VFSIOSplit), last: time.Now(), io: editDeltaProcessIO(),
 		took: make(map[string]time.Duration), faults: make(map[string]int64)}
 }
 
@@ -285,6 +289,9 @@ func (l *refFactLegs) lap(name string) {
 	}
 	l.took[name] += now.Sub(l.last)
 	l.faults[name] += io.since(l.io).majorFaults
+	writes := l.sampleWrites()
+	l.writeCounts[name] = addVFSIOSplit(l.writeCounts[name], writes.Since(l.writes))
+	l.writes = writes
 	l.last, l.io = now, io
 }
 
@@ -292,6 +299,7 @@ func (l *refFactLegs) fields(files int) []zap.Field {
 	fields := []zap.Field{zap.Int("files", files)}
 	for _, name := range l.order {
 		fields = append(fields, zap.Duration(name, l.took[name]), zap.Int64(name+"_faults", l.faults[name]))
+		fields = append(fields, writeCounterFields(name+"_", l.writeCounts[name])...)
 	}
 	return fields
 }

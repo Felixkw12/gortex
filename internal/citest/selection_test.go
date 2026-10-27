@@ -98,11 +98,23 @@ func (f *fixture) change(path string) string {
 }
 func (f *fixture) plan(head string) Manifest {
 	f.t.Helper()
-	m, err := f.planner.Plan(f.t.Context(), Event{Name: "pull_request", Base: f.base, Head: head})
+	m, err := f.planner.Plan(f.t.Context(), f.pullRequestEvent(head))
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	return m
+}
+
+// pullRequestEvent models the same two-parent checkout Actions tests. The
+// existing fixtures have no new main changes, so the merged tree is head's.
+func (f *fixture) pullRequestEvent(head string) Event {
+	f.t.Helper()
+	if head == f.base {
+		head = f.git("commit-tree", head+"^{tree}", "-p", head, "-m", "empty pull request")
+	}
+	tested := f.git("commit-tree", head+"^{tree}", "-p", f.base, "-p", head, "-m", "tested pull request merge")
+	f.git("reset", "--hard", tested)
+	return Event{Name: "pull_request", Base: f.base, Head: tested, Ref: "refs/pull/17/merge", Author: "fixture-author", PullRequest: &PullRequest{Number: 17, Head: head, Base: f.base, BaseRef: "main"}}
 }
 func nativeTarget(t *testing.T) string {
 	t.Helper()
@@ -280,7 +292,8 @@ func TestSelectionMainManualOverridesDependabotAndExplicitEmpty(t *testing.T) {
 			t.Fatalf("override %+v: %+v %v", event, m, err)
 		}
 	}
-	m, err := f.planner.Plan(t.Context(), Event{Name: "pull_request", Head: head, Base: head})
+	f.base = head
+	m, err := f.planner.Plan(t.Context(), f.pullRequestEvent(head))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +413,7 @@ func TestPlannerCancellationAndInvalidMetadataDoNotBecomeEmptySuccess(t *testing
 
 func TestManifestAffectedEmptyNeverMeansFull(t *testing.T) {
 	f := newFixture(t)
-	m, err := f.planner.Plan(t.Context(), Event{Name: "pull_request", Base: f.base, Head: f.base})
+	m, err := f.planner.Plan(t.Context(), f.pullRequestEvent(f.base))
 	if err != nil {
 		t.Fatal(err)
 	}
