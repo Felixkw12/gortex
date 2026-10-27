@@ -166,13 +166,21 @@ func (s *Server) retireCanonicalPendingSource(record *mutationCommitRecord) {
 
 // Capture only failed versions that existed before recovery sampling. IDs are
 // commit versions, so a new edit to the same path cannot be retired by it.
-func (s *Server) captureFailedSourceVersions(eligible map[string]struct{}, checkoutID, incarnation, absPath string) {
+func (s *Server) captureFailedSourceVersions(eligible map[string]struct{}, checkoutID, incarnation, absPath string, receiptOnly bool) {
 	p := &s.pendingSourceFiles
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for id, record := range p.versions {
 		snap := record.snapshot()
-		if snap.DiskStatus != mutationDiskCommitted || !snap.GraphRecorded || snap.GraphStatus == mutationGraphPending || snap.GraphStatus == mutationGraphFresh {
+		_, receiptCaptured := eligible[snap.ReindexReceipt]
+		if receiptOnly && !receiptCaptured {
+			continue
+		}
+		// The receipt witness can be terminal before its disk handler has
+		// recorded that outcome. A recovery must retire this exact version
+		// immediately too, rather than waiting for a later registry sweep.
+		if snap.DiskStatus != mutationDiskCommitted || snap.GraphStatus == mutationGraphFresh ||
+			(!receiptCaptured && (!snap.GraphRecorded || snap.GraphStatus == mutationGraphPending)) {
 			continue
 		}
 		if snap.CheckoutID != checkoutID || snap.CheckoutIncarnation != incarnation {

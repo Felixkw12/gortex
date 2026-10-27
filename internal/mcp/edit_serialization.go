@@ -308,7 +308,7 @@ func (s *Server) failedCheckoutRefreshReceiptsBefore(checkoutID, incarnation str
 		}
 		return true
 	})
-	s.captureFailedSourceVersions(eligible, checkoutID, incarnation, "")
+	s.captureFailedSourceVersions(eligible, checkoutID, incarnation, "", false)
 	return eligible
 }
 
@@ -348,6 +348,7 @@ func (s *Server) resolveCheckoutRecoveryReceipts(recovery *mutationReceipt, elig
 // the sweep holds no lock besides the receipt it is stamping.
 func (s *Server) resolveSupersededFailedReceipts(succeededPath string, succeededGeneration uint64, applied indexer.MutationResult) {
 	cleanPath := filepath.Clean(succeededPath)
+	eligible := make(map[string]struct{})
 	s.mutationReceipts.Range(func(_, value any) bool {
 		other, ok := value.(*mutationReceipt)
 		if !ok || other.checkoutScoped {
@@ -355,6 +356,25 @@ func (s *Server) resolveSupersededFailedReceipts(succeededPath string, succeeded
 		}
 		if other.generation >= succeededGeneration || filepath.Clean(other.path) != cleanPath {
 			return true
+		}
+		other.mu.RLock()
+		if other.completed && (other.result.Err != nil || !other.result.Reindexed) {
+			eligible[other.id] = struct{}{}
+		}
+		other.mu.RUnlock()
+		return true
+	})
+	// Supersession proves only the older failed tickets above, unlike an
+	// explicit scoped reparse which captures all existing failed versions.
+	s.captureFailedSourceVersions(eligible, "", "", cleanPath, true)
+	for id := range eligible {
+		value, ok := s.mutationReceipts.Load(id)
+		if !ok {
+			continue
+		}
+		other, ok := value.(*mutationReceipt)
+		if !ok || other.checkoutScoped || other.generation >= succeededGeneration || filepath.Clean(other.path) != cleanPath {
+			continue
 		}
 		other.mu.Lock()
 		if other.completed && (other.result.Err != nil || !other.result.Reindexed) {
@@ -365,8 +385,8 @@ func (s *Server) resolveSupersededFailedReceipts(succeededPath string, succeeded
 			}
 		}
 		other.mu.Unlock()
-		return true
-	})
+	}
+	s.resolveCapturedSourceVersions(eligible, "", "", cleanPath)
 }
 
 // resolveReindexedPathReceipts resolves terminally failed freshness receipts
@@ -407,7 +427,7 @@ func (s *Server) failedReceiptsBefore(paths []string, root string) map[string]st
 		}
 		return true
 	})
-	s.captureFailedSourceVersions(eligible, "", "", candidate)
+	s.captureFailedSourceVersions(eligible, "", "", candidate, false)
 	return eligible
 }
 

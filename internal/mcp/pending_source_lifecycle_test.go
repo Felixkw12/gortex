@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
+	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/reconcile"
 )
 
@@ -27,6 +28,58 @@ func pendingSourceVersionCount(s *Server, checkoutID string) int {
 		record.mu.RUnlock()
 	}
 	return count
+}
+
+// Leave the commit pending while its ticket has already failed. Recovery must
+// consume that ticket's evidence without relying on a later registry sweep.
+func unobservedFailedSource(s *Server, checkoutID, incarnation, path string, generation uint64) (*mutationCommitRecord, *mutationReceipt) {
+	ctx := context.WithValue(context.Background(), checkoutMutationContextKey{}, &checkoutMutationState{
+		checkoutID: checkoutID, incarnation: incarnation,
+	})
+	record := s.beginMutationCommit(ctx, "edit", "", "", filepath.Base(path), path)
+	record.markCommitted("bytes", 5)
+	id := fmt.Sprintf("mutation-%d", mutationReceiptSequence.Add(1))
+	receipt := pendingFreshnessReceipt(s, id, "fixture", path, generation)
+	receipt.checkoutID, receipt.checkoutIncarnation = checkoutID, incarnation
+	receipt.checkoutScoped = checkoutID != ""
+	record.recordGraph(checkoutOutcome(record, mutationReindexOutcome{Pending: true, Receipt: id}))
+	completeFreshnessReceipt(receipt, indexer.MutationResult{RequestedGeneration: generation, Err: context.DeadlineExceeded})
+	return record, receipt
+}
+
+func TestPendingSourceRegistryRecoveryRetiresAtResolution(t *testing.T) {
+	t.Run("supersession only captures older failed receipts", func(t *testing.T) {
+		s := &Server{}
+		old, _ := unobservedFailedSource(s, "", "", "/fixture/file.go", 4)
+		newer, receipt := unobservedFailedSource(s, "", "", "/fixture/file.go", 12)
+		s.resolveSupersededFailedReceipts("/fixture/file.go", 9, indexer.MutationResult{Reindexed: true, AppliedGeneration: 9})
+		require.NotContains(t, s.pendingSourceFiles.versions, old.id)
+		require.Contains(t, s.pendingSourceFiles.versions, newer.id, "a later failed ticket was not resolved by this success")
+		require.Equal(t, 1, pendingSourceVersionCount(s, ""))
+		require.Error(t, receipt.outcome(false).Err)
+	})
+	t.Run("single path includes a failure not yet recorded by its handler", func(t *testing.T) {
+		s := &Server{}
+		old, _ := unobservedFailedSource(s, "", "", "/fixture/file.go", 4)
+		eligible := s.failedReceiptsBefore([]string{"file.go"}, "/fixture")
+		newer := s.beginMutationCommit(context.Background(), "edit", "", "", "file.go", "/fixture/file.go")
+		newer.markCommitted("newer", 5)
+		s.resolveReindexedPathReceipts("/fixture/file.go", eligible)
+		require.NotContains(t, s.pendingSourceFiles.versions, old.id)
+		require.Contains(t, s.pendingSourceFiles.versions, newer.id, "post-capture disk versions need their own evidence")
+	})
+	t.Run("checkout recovery drains K paths immediately", func(t *testing.T) {
+		s := &Server{}
+		for i := range 8 {
+			unobservedFailedSource(s, "checkout", "incarnation", fmt.Sprintf("/fixture/file%d.go", i), uint64(i+1))
+		}
+		require.Equal(t, 8, pendingSourceVersionCount(s, "checkout"))
+		eligible := s.failedCheckoutRefreshReceiptsBefore("checkout", "incarnation")
+		s.resolveCheckoutRecoveryReceipts(&mutationReceipt{
+			checkoutID: "checkout", checkoutIncarnation: "incarnation", generation: 9,
+		}, eligible, 9)
+		require.Zero(t, pendingSourceVersionCount(s, "checkout"))
+	})
 }
 
 func TestPendingSourceRegistryDropsDeadCheckoutIncarnation(t *testing.T) {
