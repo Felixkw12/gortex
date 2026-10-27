@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/zzet/gortex/internal/daemon"
 )
 
 // staleDaemonFixture fakes a live daemon whose version flips to the binary's
@@ -27,12 +29,18 @@ func installStaleDaemonFixture(t *testing.T, daemonVer, binaryVer string) *stale
 	isDaemonRunning = func() bool { return true }
 	stopIntentActive = func() bool { return false }
 	serviceActive = func() bool { return false }
-	serviceRestart = func(io.Writer) error { f.restarts.Add(1); return nil }
+	serviceRestart = func(io.Writer) error {
+		f.restarts.Add(1)
+		f.mu.Lock()
+		f.version = binaryVer
+		f.mu.Unlock()
+		return nil
+	}
 	binaryVersion = func() string { return binaryVer }
-	runningDaemonVersion = func() (string, bool) {
+	runningDaemonInfo = func() daemonIdentity {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		return f.version, f.version != ""
+		return daemonIdentity{version: f.version, protocol: daemon.ProtocolVersion, protocolKnown: true}
 	}
 	stopStaleDaemon = func() error {
 		f.stops.Add(1)
