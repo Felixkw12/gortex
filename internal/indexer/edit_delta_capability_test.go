@@ -14,6 +14,9 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// Legacy file repair is a write on the composed delta, never a base-store fallback.
+var _ graph.FileIdentityBatchEvicter = (*graph.DeltaWriter)(nil)
+
 // The DeltaWriter capability checklist.
 //
 // The per-save engine discovers what its store can do by type assertion: a
