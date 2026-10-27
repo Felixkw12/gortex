@@ -141,9 +141,36 @@ func issue767WorktreeReadiness(t *testing.T, binary string, crossDrive bool) {
 	if leaked, err := f.trySearchSymbol(f.primary, "Issue767RestartedMarker"); err != nil || leaked {
 		t.Fatalf("after-restart edit leaked into primary: found=%v err=%v", leaked, err)
 	}
+	f.readinessRead("after-restart-linked-read", f.linked, "Issue767RestartedMarker", "Issue767PrimaryMarker")
+	f.readinessRead("after-restart-primary-read", f.primary, "Issue767PrimaryMarker", "Issue767RestartedMarker")
 	f.git(f.primary, "worktree", "remove", "--force", f.linked)
 	f.awaitRemoved()
 	f.awaitSymbol(f.primary, "Issue767PrimaryMarker")
+}
+
+func (f *issue767Fixture) readinessRead(phase, root, present, absent string) {
+	f.t.Helper()
+	request := map[string]any{"operation": "file", "target": map[string]any{"file": filepath.Join(root, "marker.go")}}
+	if root != f.primary {
+		request["view"] = map[string]any{"kind": "worktree", "path": root}
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	output, err := f.tryCommand(30*time.Second, root, "call", "read", "--index", root, "--json", string(payload), "--format", "json")
+	f.write(filepath.Join(f.root, phase+".json"), string(output))
+	if err != nil {
+		f.t.Fatalf("%s: %v; output: %s", phase, err, output)
+	}
+	var response any
+	if err := json.Unmarshal(output, &response); err != nil {
+		f.t.Fatalf("%s is not JSON: %v", phase, err)
+	}
+	_, refused := issue767JSONEvidence(response, "")
+	if refused || (root != f.primary && !issue767JSONExact(response)) || !strings.Contains(string(output), present) || strings.Contains(string(output), absent) {
+		f.t.Fatalf("%s did not prove isolated source: %s", phase, output)
+	}
 }
 
 // The extra volume is optional, but the reason it could not be exercised is
