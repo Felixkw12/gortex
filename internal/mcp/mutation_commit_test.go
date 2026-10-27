@@ -637,6 +637,9 @@ func TestMutationStatusMarksTerminalGraphStatus(t *testing.T) {
 			s := newMutationServer()
 			record := s.beginMutationCommit(context.Background(), "edit_file", "", "fp", "pkg/a.go", "/abs/pkg/a.go")
 			record.markCommitted("sha", 10)
+			if tc.outcome.Pending {
+				pendingFreshnessReceipt(s, tc.outcome.Receipt, "", record.absPath, tc.outcome.Generation)
+			}
 			if !tc.unrecorded {
 				record.recordGraph(tc.outcome)
 			}
