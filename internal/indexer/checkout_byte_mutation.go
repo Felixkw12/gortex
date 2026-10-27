@@ -195,7 +195,7 @@ func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, check
 				return nil, err
 			}
 			admitted, cycleOwned = false, false
-			l.clearMutationRefusalOnAdmission(witness)
+			l.clearMutationRefusalOnAdmission(witness, m)
 			return m, nil
 		}
 	}
@@ -284,7 +284,7 @@ func (l *CheckoutLifecycle) beginCheckoutByteMutation(ctx context.Context, check
 	m.byteRelease = func() { once.Do(func() { held.Release(); baseHeld.Release(); releaseDemand() }) }
 	owned, admitted, demanded, locked = false, false, false, false
 	StampPublicationPhase(ctx, PublicationMutationAdmitted)
-	l.clearMutationRefusalOnAdmission(witness)
+	l.clearMutationRefusalOnAdmission(witness, m)
 	return m, nil
 }
 

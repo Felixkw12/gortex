@@ -59,6 +59,8 @@ type CheckoutMutation struct {
 	checkout        store_sqlite.Checkout
 	rootInfo        os.FileInfo
 	route           store_sqlite.CheckoutRoute
+	refusalOwner    *CheckoutLifecycle
+	refusalWitness  checkoutMutationRefusalWitness
 	recovery        bool
 	prepared        bool
 	fresh           bool
@@ -199,7 +201,7 @@ func (l *CheckoutLifecycle) beginCheckoutMutation(ctx context.Context, checkoutI
 		return nil, err
 	}
 	admitted, cycleOwned = false, false // Close now owns every acquired resource.
-	l.clearMutationRefusalOnAdmission(witness)
+	l.clearMutationRefusalOnAdmission(witness, m)
 	return m, nil
 }
 
@@ -389,7 +391,9 @@ func (m *CheckoutMutation) Prepare(ctx context.Context) error {
 	// Any sample begun from here on will do, so one another caller starts
 	// while this one waits for the sampling lease is shared, not repeated.
 	if err := m.validateSnapshot(ctx, time.Now()); err != nil {
-		return err
+		// Policy is published only by a caller that also proves the operation
+		// wrote nothing. A batch may already have committed another file.
+		return m.prepareRefusal(ctx, err)
 	}
 	StampPublicationPhase(ctx, PublicationWriteValidated)
 	if err := m.coordinator.reserveCheckoutRefresh(); err != nil {

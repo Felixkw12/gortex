@@ -139,7 +139,7 @@ func TestCheckoutMutationRefusalConcurrentOldPublishAndClear(t *testing.T) {
 			}
 		})
 	}
-	l.clearMutationRefusalOnAdmission(refused.witness)
+	l.clearMutationRefusalOnAdmission(refused.witness, nil)
 	workers.Wait()
 	if _, marked := l.CheckoutMutationRefusal(t.Context(), f.checkoutID, f.worktree); marked {
 		t.Fatal("older publishers overwrote the later success")

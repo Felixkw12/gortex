@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"time"
 
@@ -24,6 +25,9 @@ type checkoutMutationRefusalMark struct {
 	route  store_sqlite.CheckoutRoute
 	at     time.Time
 	reason string
+	// A late precommit witness additionally pins the admitted physical root.
+	// Admission-only witnesses retain their existing identity checks.
+	rootInfo os.FileInfo
 }
 
 type checkoutMutationRefusalWitness struct {
@@ -31,6 +35,7 @@ type checkoutMutationRefusalWitness struct {
 	revision   uint64
 	routeEpoch int64
 	route      store_sqlite.CheckoutRoute
+	rootInfo   os.FileInfo
 }
 
 type checkoutMutationRefusalError struct {
@@ -90,7 +95,7 @@ func (l *CheckoutLifecycle) captureMutationRefusalError(err error, witness check
 	return &checkoutMutationRefusalError{err: err, witness: witness}
 }
 
-func (l *CheckoutLifecycle) clearMutationRefusalOnAdmission(w checkoutMutationRefusalWitness) {
+func (l *CheckoutLifecycle) clearMutationRefusalOnAdmission(w checkoutMutationRefusalWitness, m *CheckoutMutation) {
 	if l == nil || w.slot == nil {
 		return
 	}
@@ -100,7 +105,48 @@ func (l *CheckoutLifecycle) clearMutationRefusalOnAdmission(w checkoutMutationRe
 		w.slot.revision++
 		l.mutationRefusalEpoch++
 		w.slot.mark = nil
+		if m != nil {
+			// This is deliberately AFTER the success revision. Reusing the
+			// pre-admission witness would either reject this lease's failure or
+			// let an old lease overwrite a newer successful admission.
+			w.revision = w.slot.revision
+			w.routeEpoch, w.route, w.rootInfo = m.route.RouteEpoch, m.route, m.rootInfo
+			m.refusalOwner, m.refusalWitness = l, w
+		}
 	}
+}
+
+func eligibleCheckoutMutationRefusal(err error) bool {
+	return errors.Is(err, ErrCheckoutMutationStale) && !errors.Is(err, ErrCheckoutMutationBusy) &&
+		!errors.Is(err, ErrCheckoutMutationPending) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+// prepareRefusal carries proof but does NOT publish policy. Only an active
+// lease's first snapshot veto before Prepare withdraws a route can reach here.
+// The caller must independently establish that its whole operation wrote no
+// bytes before passing this error to RecordCheckoutMutationRefusal.
+func (m *CheckoutMutation) prepareRefusal(ctx context.Context, err error) error {
+	if m.refusalOwner == nil || m.refusalWitness.rootInfo == nil || !eligibleCheckoutMutationRefusal(err) || ctx.Err() != nil {
+		return err
+	}
+	// Snapshot failure must not borrow authority after root/incarnation/mode
+	// replacement. This second validation occurs only on the refused path.
+	if m.validateCheckout(ctx) != nil {
+		return err
+	}
+	return m.refusalOwner.captureMutationRefusalError(withMutationRefusalRoute(err, m.route), m.refusalWitness)
+}
+
+func currentLeaseRefusalRoot(checkout store_sqlite.Checkout, rootInfo os.FileInfo) bool {
+	if rootInfo == nil {
+		return true
+	}
+	if checkout.EffectiveMode != store_sqlite.CheckoutModeAutomatic || checkout.DesiredMode != store_sqlite.CheckoutModeAutomatic ||
+		checkout.ActiveIntentTransitionID != "" || checkout.UnavailableSince != 0 || checkout.RemovalDetectedAt != 0 {
+		return false
+	}
+	current, err := checkoutRootFileInfo(checkout.RootPath)
+	return err == nil && current.IsDir() && os.SameFile(rootInfo, current)
 }
 
 func (l *CheckoutLifecycle) forgetMutationRefusal(checkoutID string) {
@@ -142,7 +188,7 @@ func (l *CheckoutLifecycle) currentMutationRefusalRoute(ctx context.Context, che
 // lookup retires the obsolete mark; it can never use it for the newer route.
 func (l *CheckoutLifecycle) RecordCheckoutMutationRefusal(ctx context.Context, err error) bool {
 	var refused *checkoutMutationRefusalError
-	if l == nil || !errors.Is(err, ErrCheckoutMutationStale) || errors.Is(err, ErrCheckoutMutationBusy) || errors.Is(err, ErrCheckoutMutationPending) || !errors.As(err, &refused) {
+	if l == nil || !eligibleCheckoutMutationRefusal(err) || !errors.As(err, &refused) {
 		return false
 	}
 	w := refused.witness
@@ -150,7 +196,7 @@ func (l *CheckoutLifecycle) RecordCheckoutMutationRefusal(ctx context.Context, e
 		return false
 	}
 	checkout, route, known := l.currentMutationRefusalRoute(ctx, w.slot.checkoutID, w.slot.root)
-	if !known || checkout.Incarnation != w.slot.incarnation || route != w.route {
+	if !known || checkout.Incarnation != w.slot.incarnation || route != w.route || !currentLeaseRefusalRoot(checkout, w.rootInfo) {
 		return false
 	}
 	reason := "checkout view is stale"
@@ -174,7 +220,7 @@ func (l *CheckoutLifecycle) RecordCheckoutMutationRefusal(ctx context.Context, e
 	ownedRoute.GraphID = strings.Clone(ownedRoute.GraphID)
 	w.slot.revision++
 	l.mutationRefusalEpoch++
-	w.slot.mark = &checkoutMutationRefusalMark{route: ownedRoute, at: at, reason: reason}
+	w.slot.mark = &checkoutMutationRefusalMark{route: ownedRoute, at: at, reason: reason, rootInfo: w.rootInfo}
 	return true
 }
 
@@ -203,12 +249,19 @@ func (l *CheckoutLifecycle) CheckoutMutationState(ctx context.Context, checkoutI
 	if !known {
 		return "", ""
 	}
+	rootCurrent := mark == nil || currentLeaseRefusalRoot(checkout, mark.rootInfo)
 	l.mutationRefusalMu.Lock()
 	defer l.mutationRefusalMu.Unlock()
 	if l.mutationRefusals[checkoutID] != slot || (slot != nil && (slot.revision != revision || slot.mark != mark)) {
 		return "", ""
 	}
 	if slot != nil && mark != nil {
+		if !rootCurrent {
+			slot.revision++
+			l.mutationRefusalEpoch++
+			slot.mark = nil
+			return "", ""
+		}
 		if slot.incarnation == checkout.Incarnation && pathkey.EqualPaths(slot.root, checkout.RootPath) && mark.route == route {
 			return "read_only", mark.reason
 		}
