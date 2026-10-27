@@ -1013,9 +1013,12 @@ type FileCoverageResult struct {
 	// tool: the agent would have no read path at all. Repo names it.
 	RepoState string `json:"repo_state,omitempty"`
 	Repo      string `json:"repo,omitempty"`
-	// MutationState is read_only only while the current checkout's exact
-	// route has refused a stale source mutation. It is independent of read
-	// coverage: indexed reads can remain available while writes are refused.
+	// MutationState is read_only while the current checkout's exact route has
+	// refused a stale source mutation, ready when the current active route is
+	// positively known without such a mark, and empty for unknown/older
+	// daemons. Ready prevents a
+	// legacy hook TTL from overriding a newer healthy route. Read coverage is
+	// independent: indexed reads may remain available while writes refuse.
 	MutationState  string `json:"mutation_state,omitempty"`
 	MutationReason string `json:"mutation_reason,omitempty"`
 }

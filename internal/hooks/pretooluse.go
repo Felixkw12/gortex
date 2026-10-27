@@ -1181,6 +1181,7 @@ type fileIndexStatus struct {
 	Loading        bool
 	LoadingRepo    string
 	ReadOnly       bool
+	MutationKnown  bool
 	MutationReason string
 }
 
@@ -1302,9 +1303,10 @@ func fileIndexStatusFromCoverage(result daemon.FileCoverageResult) fileIndexStat
 		View:    result.View,
 	}
 	if result.MutationState == "read_only" {
-		st.ProbeOK, st.ReadOnly, st.MutationReason = true, true, result.MutationReason
+		st.ProbeOK, st.ReadOnly, st.MutationKnown, st.MutationReason = true, true, true, result.MutationReason
 		return st
 	}
+	st.MutationKnown = result.MutationState == "ready"
 	if result.RepoState == daemon.RepoStateLoading {
 		// Coverage read from a loading repository's persisted rows is not a
 		// reason to deny: report it as loading, never as indexed.

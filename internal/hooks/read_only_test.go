@@ -64,3 +64,16 @@ func TestReadOnlyNativeDoorsKeepOneProbeAndRecoveryAcrossModes(t *testing.T) {
 		})
 	}
 }
+
+func TestFileIndexStatusModernReadyRetainsIndexedPolicy(t *testing.T) {
+	st := fileIndexStatusFromCoverage(daemon.FileCoverageResult{
+		Covered: true, Symbols: 7, Answered: true, Tracked: true, MutationState: "ready",
+	})
+	if st.ReadOnly || !st.MutationKnown || !st.Indexed || st.Count != 7 || st.noGraphAnswer() {
+		t.Fatalf("authoritative ready must retain healthy enforcement: %+v", st)
+	}
+	unknown := fileIndexStatusFromCoverage(daemon.FileCoverageResult{Covered: true, Symbols: 7})
+	if unknown.MutationKnown || !unknown.Indexed {
+		t.Fatalf("legacy omission must remain unknown, not ready: %+v", unknown)
+	}
+}

@@ -91,31 +91,27 @@ func (l *CheckoutLifecycle) forgetMutationRefusal(checkoutID string) {
 	l.mutationRefusalMu.Unlock()
 }
 
-func (l *CheckoutLifecycle) mutationRefusalRouteCurrent(ctx context.Context, slot *checkoutMutationRefusalSlot, expected store_sqlite.CheckoutRoute) (current, known bool) {
-	if l == nil || l.catalog == nil || slot == nil || expected.RouteEpoch <= 0 {
-		return false, false
+// Read identity on both sides of the route: do not join an old incarnation
+// to a replacement's route. Errors are unknown, never a healthy verdict.
+func (l *CheckoutLifecycle) currentMutationRefusalRoute(ctx context.Context, checkoutID, root string) (store_sqlite.Checkout, store_sqlite.CheckoutRoute, bool) {
+	var noCheckout store_sqlite.Checkout
+	var noRoute store_sqlite.CheckoutRoute
+	if l == nil || l.catalog == nil {
+		return noCheckout, noRoute, false
 	}
-	checkout, found, err := l.catalog.GetCheckout(ctx, slot.checkoutID)
-	if err != nil {
-		return false, false
+	checkout, found, err := l.catalog.GetCheckout(ctx, checkoutID)
+	if err != nil || !found || !sameMutationRoot(checkout.RootPath, root) || checkout.State != store_sqlite.CheckoutStateReady {
+		return noCheckout, noRoute, false
 	}
-	if !found || checkout.Incarnation != slot.incarnation || !sameMutationRoot(checkout.RootPath, slot.root) {
-		return false, true
+	route, found, err := l.catalog.GetCheckoutRoute(ctx, checkoutID)
+	if err != nil || !found || route.RouteEpoch <= 0 || route.State != store_sqlite.RouteActive || route.CommitGenerationID <= 0 || route.DirtyGenerationID <= 0 {
+		return noCheckout, noRoute, false
 	}
-	route, found, err := l.catalog.GetCheckoutRoute(ctx, slot.checkoutID)
-	if err != nil {
-		return false, false
+	again, found, err := l.catalog.GetCheckout(ctx, checkoutID)
+	if err != nil || !found || again.Incarnation != checkout.Incarnation || !sameMutationRoot(again.RootPath, checkout.RootPath) || again.State != store_sqlite.CheckoutStateReady {
+		return noCheckout, noRoute, false
 	}
-	if !found || route != expected || route.State != store_sqlite.RouteActive {
-		return false, true
-	}
-	// Revalidate incarnation after the route read rather than joining an old
-	// checkout row to a replacement incarnation's route.
-	checkout, found, err = l.catalog.GetCheckout(ctx, slot.checkoutID)
-	if err != nil {
-		return false, false
-	}
-	return found && checkout.Incarnation == slot.incarnation && sameMutationRoot(checkout.RootPath, slot.root), true
+	return checkout, route, true
 }
 
 // RecordCheckoutMutationRefusal publishes only the final stale admission
@@ -129,7 +125,11 @@ func (l *CheckoutLifecycle) RecordCheckoutMutationRefusal(ctx context.Context, e
 		return
 	}
 	w := refused.witness
-	if current, known := l.mutationRefusalRouteCurrent(ctx, w.slot, w.route); !known || !current {
+	if w.slot == nil {
+		return
+	}
+	checkout, route, known := l.currentMutationRefusalRoute(ctx, w.slot.checkoutID, w.slot.root)
+	if !known || checkout.Incarnation != w.slot.incarnation || route != w.route {
 		return
 	}
 	reason := "checkout view is stale"
@@ -149,36 +149,47 @@ func (l *CheckoutLifecycle) RecordCheckoutMutationRefusal(ctx context.Context, e
 	w.slot.mark = &checkoutMutationRefusalMark{route: w.route, at: at, reason: reason}
 }
 
-// CheckoutMutationRefusal answers only for the supplied checkout/root. Copy
-// the mark before catalog reads, then revalidate its pointer and revision:
-// success, another refusal, replacement or retirement cannot be overwritten by
-// a late lookup. A concurrent route flip linearizes after the catalog read;
-// every lookup that observes the newer route rejects the old mark.
-func (l *CheckoutLifecycle) CheckoutMutationRefusal(ctx context.Context, checkoutID, root string) (reason string, refused bool) {
+// CheckoutMutationState distinguishes an authoritative healthy route from an
+// older daemon's unknown state. This lets hooks ignore a legacy TTL fallback
+// after a modern daemon has published a fresh route, without writing session
+// state from every PreToolUse invocation.
+//
+// Snapshot the slot BEFORE catalog reads and revalidate it afterward. A
+// concurrent admission/refusal/replacement yields unknown rather than a stale
+// ready answer or clearing a newer refusal. Route publication linearizes after
+// its catalog read; later readers cannot use a mark for the preceding route.
+func (l *CheckoutLifecycle) CheckoutMutationState(ctx context.Context, checkoutID, root string) (state, reason string) {
 	if l == nil {
-		return "", false
+		return "", ""
 	}
 	l.mutationRefusalMu.Lock()
 	slot := l.mutationRefusals[checkoutID]
-	if slot == nil || slot.mark == nil || !pathkey.EqualPaths(slot.root, root) {
-		l.mutationRefusalMu.Unlock()
-		return "", false
+	var mark *checkoutMutationRefusalMark
+	var revision uint64
+	if slot != nil {
+		mark, revision = slot.mark, slot.revision
 	}
-	mark, revision := slot.mark, slot.revision
 	l.mutationRefusalMu.Unlock()
-	current, known := l.mutationRefusalRouteCurrent(ctx, slot, mark.route)
+	checkout, route, known := l.currentMutationRefusalRoute(ctx, checkoutID, root)
+	if !known {
+		return "", ""
+	}
 	l.mutationRefusalMu.Lock()
 	defer l.mutationRefusalMu.Unlock()
-	if l.mutationRefusals[checkoutID] != slot || slot.revision != revision || slot.mark != mark {
-		return "", false
+	if l.mutationRefusals[checkoutID] != slot || (slot != nil && (slot.revision != revision || slot.mark != mark)) {
+		return "", ""
 	}
-	if !known {
-		return "", false
-	}
-	if !current {
+	if slot != nil && mark != nil {
+		if slot.incarnation == checkout.Incarnation && pathkey.EqualPaths(slot.root, checkout.RootPath) && mark.route == route {
+			return "read_only", mark.reason
+		}
 		slot.revision++
 		slot.mark = nil
-		return "", false
 	}
-	return mark.reason, true
+	return "ready", ""
+}
+
+func (l *CheckoutLifecycle) CheckoutMutationRefusal(ctx context.Context, checkoutID, root string) (reason string, refused bool) {
+	state, reason := l.CheckoutMutationState(ctx, checkoutID, root)
+	return reason, state == "read_only"
 }

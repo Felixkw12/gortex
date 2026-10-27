@@ -57,11 +57,11 @@ func TestFileCoverageReadOnlyIsCheckoutScopedAndFreshRouteClears(t *testing.T) {
 	}
 	advance()
 	f.controller.lifecycle.RecordCheckoutMutationRefusal(t.Context(), refusal)
-	if fresh := probe(f.worktreeRoot); !fresh.Covered || fresh.MutationState != "" || fresh.MutationReason != "" {
+	if fresh := probe(f.worktreeRoot); !fresh.Covered || fresh.MutationState != "ready" || fresh.MutationReason != "" {
 		t.Fatalf("late refusal survived fresh route: %+v", fresh)
 	}
 	f.controller.lifecycle.RecordCheckoutMutationRefusal(t.Context(), indexer.ErrCheckoutMutationBusy)
-	if busy := probe(f.worktreeRoot); busy.MutationState != "" {
+	if busy := probe(f.worktreeRoot); busy.MutationState != "ready" {
 		t.Fatal("Busy became read_only")
 	}
 }

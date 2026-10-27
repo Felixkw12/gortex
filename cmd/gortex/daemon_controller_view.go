@@ -323,8 +323,9 @@ func (c *realController) FileCoverage(ctx context.Context, p daemon.FileCoverage
 
 	out := daemon.FileCoverageResult{View: view.answer, Tracked: c.pathTracked(abs, view)}
 	if c.lifecycle != nil && view.answer != nil && view.root != "" {
-		if reason, refused := c.lifecycle.CheckoutMutationRefusal(ctx, view.answer.CheckoutID, view.root); refused {
-			out.MutationState, out.MutationReason = "read_only", reason
+		state, reason := c.lifecycle.CheckoutMutationState(ctx, view.answer.CheckoutID, view.root)
+		if state == "read_only" || (state == "ready" && view.servable && view.answer.Exact) {
+			out.MutationState, out.MutationReason = state, reason
 		}
 	}
 	// On a warm restart the persisted catalog binds a configured repository
