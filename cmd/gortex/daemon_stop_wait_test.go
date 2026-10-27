@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -154,4 +155,70 @@ func TestDaemonStopCLIFallbackJoinsActualOwnedProcessAndStoreLock(t *testing.T) 
 	require.NoError(t, err)
 	require.True(t, gone)
 	require.Contains(t, out.String(), "stopped")
+}
+
+func TestDaemonStopReapedBeforeCaptureCleansOnlyPinnedStaleRuntime(t *testing.T) {
+	original, exit, wait, _ := ownedStopTarget(t)
+	require.NoError(t, exit())
+	require.NoError(t, wait()) // Deliberately reap BEFORE the CLI/native capture.
+	stale, err := captureDaemonStopTarget(original.process.PID())
+	require.NoError(t, err)
+	require.Equal(t, original.process.PID(), stale.absentPID)
+	require.Zero(t, stale.process.PID(), "absence must not fabricate a reusable birth identity")
+	require.NotNil(t, stale.store, "stale path must use its declared pinned store, never a default")
+	previousKill, previousTerminate := daemonKillCapturedProcess, daemonTerminateCapturedProcess
+	var signals atomic.Int32
+	refuse := func(platform.ProcessIdentity) error {
+		signals.Add(1)
+		return errors.New("stale PID must never be signaled")
+	}
+	daemonKillCapturedProcess, daemonTerminateCapturedProcess = refuse, refuse
+	t.Cleanup(func() { daemonKillCapturedProcess, daemonTerminateCapturedProcess = previousKill, previousTerminate })
+	var out bytes.Buffer
+	require.NoError(t, stopRunningDaemon(&out))
+	require.Zero(t, signals.Load())
+	free, err := stale.storeFree()
+	require.NoError(t, err)
+	require.True(t, free)
+	gone, err := stale.runtimeGone()
+	require.NoError(t, err)
+	require.True(t, gone)
+}
+
+func TestDaemonStopTermRechecksStoreAfterNativeAndRuntimeReads(t *testing.T) {
+	target, exit, wait, unlock := ownedStopTarget(t)
+	previousRunning, previousTerminate := daemonCapturedProcessRunning, daemonTerminateCapturedProcess
+	var once sync.Once
+	var actionErr error
+	var signals atomic.Int32
+	daemonCapturedProcessRunning = func(identity platform.ProcessIdentity) (bool, error) {
+		once.Do(func() {
+			actionErr = unlock()
+			if actionErr == nil {
+				for _, file := range target.files {
+					actionErr = errors.Join(actionErr, os.Remove(file.path))
+				}
+			}
+		})
+		if actionErr != nil {
+			return false, actionErr
+		}
+		return identity.Running()
+	}
+	daemonTerminateCapturedProcess = func(platform.ProcessIdentity) error {
+		signals.Add(1)
+		return errors.New("unexpected TERM after free store")
+	}
+	t.Cleanup(func() {
+		daemonCapturedProcessRunning, daemonTerminateCapturedProcess = previousRunning, previousTerminate
+	})
+	result, err := terminateCapturedDaemon(&bytes.Buffer{}, target)
+	require.NoError(t, err)
+	require.False(t, result.forced)
+	require.Zero(t, signals.Load())
+	running, err := target.process.Running()
+	require.NoError(t, err)
+	require.True(t, running, "observed store-free tail must remain unsignaled")
+	require.NoError(t, exit())
+	require.NoError(t, wait())
 }

@@ -93,10 +93,11 @@ func (f daemonStopFile) present() (bool, error) {
 }
 
 type daemonStopTarget struct {
-	process  platform.ProcessIdentity
-	files    []daemonStopFile
-	store    *daemonStoreLock
-	storeErr error
+	process   platform.ProcessIdentity
+	absentPID int // positive native absence observed before any RPC; never signal
+	files     []daemonStopFile
+	store     *daemonStoreLock
+	storeErr  error
 	// Only an absent legacy runtime record or an explicitly empty backend
 	// permits process-exit fallback. A failed/missing expected lock does not.
 	noStore bool
@@ -104,10 +105,13 @@ type daemonStopTarget struct {
 
 func captureDaemonStopTarget(pid int) (*daemonStopTarget, error) {
 	identity, err := platform.CaptureProcessIdentity(pid)
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return nil, err
 	}
 	target := &daemonStopTarget{process: identity}
+	if errors.Is(err, os.ErrProcessDone) {
+		target.absentPID = pid
+	}
 	for _, item := range []struct {
 		path    string
 		regular bool
@@ -139,10 +143,37 @@ func captureDaemonStopTarget(pid int) (*daemonStopTarget, error) {
 			target.store, target.storeErr = captureDaemonStoreLock(runtime.BackendPath)
 		}
 	}
-	if same, err := identity.Matches(); err != nil || !same {
+	if target.absentPID != 0 {
+		if _, err := target.processRunning(); !errors.Is(err, os.ErrProcessDone) {
+			return nil, errors.Join(errors.New("absent daemon PID changed during stop capture"), err)
+		}
+	} else if same, err := identity.Matches(); err != nil || !same {
 		return nil, errors.Join(errors.New("daemon process changed during stop capture"), err)
 	}
 	return target, nil
+}
+
+func (t *daemonStopTarget) pid() int {
+	if t.absentPID != 0 {
+		return t.absentPID
+	}
+	return t.process.PID()
+}
+
+func (t *daemonStopTarget) processRunning() (bool, error) {
+	if t.absentPID != 0 {
+		// Absence is not a reusable birth token. If this PID now exists,
+		// refuse to infer ownership or signal its new incarnation.
+		_, err := platform.CaptureProcessIdentity(t.absentPID)
+		if errors.Is(err, os.ErrProcessDone) {
+			return false, err
+		}
+		if err != nil {
+			return false, err
+		}
+		return false, platform.ErrProcessIdentityChanged
+	}
+	return daemonCapturedProcessRunning(t.process)
 }
 
 func (t *daemonStopTarget) runtimeGone() (bool, error) {
@@ -157,6 +188,9 @@ func (t *daemonStopTarget) runtimeGone() (bool, error) {
 }
 
 func (t *daemonStopTarget) verifyBeforeControl() error {
+	if t.absentPID != 0 {
+		return errors.New("refusing shutdown control for an already-exited captured PID")
+	}
 	if same, err := t.process.Matches(); err != nil || !same {
 		return errors.Join(errors.New("daemon process changed before shutdown control"), err)
 	}
@@ -184,7 +218,7 @@ func (t *daemonStopTarget) storeFree() (bool, error) {
 	}
 	// Explicit older/no-store fallback needs actual native process exit.
 	// Permission/query failures cannot masquerade as a free store.
-	running, err := daemonCapturedProcessRunning(t.process)
+	running, err := t.processRunning()
 	if errors.Is(err, os.ErrProcessDone) {
 		return true, nil
 	}
@@ -192,7 +226,7 @@ func (t *daemonStopTarget) storeFree() (bool, error) {
 }
 
 func (t *daemonStopTarget) removeExitedRuntime() error {
-	running, err := daemonCapturedProcessRunning(t.process)
+	running, err := t.processRunning()
 	if err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return err
 	}

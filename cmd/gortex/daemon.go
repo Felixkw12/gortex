@@ -1225,6 +1225,9 @@ func stopRunningDaemon(w io.Writer) error {
 	} else if err != nil {
 		return err
 	}
+	if target.absentPID != 0 {
+		return errors.New("recorded daemon has exited but its captured store or runtime release could not be verified; no signal sent")
+	}
 	if !daemon.IsRunning() {
 		result, err := terminateCapturedDaemon(w, target)
 		return reportCapturedDaemonStop(w, result, err, daemon.SocketPath(), 0)

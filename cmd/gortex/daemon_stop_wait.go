@@ -31,7 +31,7 @@ func (t *daemonStopTarget) completeStop(w io.Writer) (bool, error) {
 		return false, err
 	}
 	if !gone {
-		running, processErr := daemonCapturedProcessRunning(t.process)
+		running, processErr := t.processRunning()
 		if processErr != nil && !errors.Is(processErr, os.ErrProcessDone) {
 			return false, processErr
 		}
@@ -48,12 +48,15 @@ func (t *daemonStopTarget) completeStop(w io.Writer) (bool, error) {
 	}
 	// Store and runtime are the completion proof; a parent need not have
 	// reaped the PID. Distinguish a real Unix zombie from a still-live tail.
-	if running, processErr := daemonCapturedProcessRunning(t.process); processErr == nil {
+	if running, processErr := t.processRunning(); processErr == nil {
 		if running {
 			fmt.Fprintln(w, "[gortex daemon] store free and runtime removed; daemon process is still exiting")
 		} else if same, matchErr := t.process.Matches(); matchErr == nil && same && (runtime.GOOS == "darwin" || runtime.GOOS == "linux") {
 			fmt.Fprintln(w, "[gortex daemon] store free; exited process has not yet been reaped by its parent")
 		}
+	}
+	if t.noStore {
+		fmt.Fprintln(w, "[gortex daemon] no store was declared; completion verified by process exit and runtime cleanup")
 	}
 	return true, nil
 }
@@ -76,7 +79,7 @@ func waitForDaemonTarget(w io.Writer, target *daemonStopTarget, grace time.Durat
 			return daemonStopResult{}, nil
 		}
 		now := time.Now()
-		progress, reporting := daemonCloseProgressFor(target.process.PID())
+		progress, reporting := daemonCloseProgressFor(target.pid())
 		if now.Before(deadline) {
 			if (draining || reporting) && daemonDrainProgressPeriod > 0 && !now.Before(nextProgress) {
 				fmt.Fprintf(w, "[gortex daemon] still draining the WAL: %s of up to %s%s\n",
@@ -114,7 +117,7 @@ func waitForDaemonTarget(w io.Writer, target *daemonStopTarget, grace time.Durat
 		}
 		break
 	}
-	if running, err := daemonCapturedProcessRunning(target.process); err != nil || !running {
+	if running, err := target.processRunning(); err != nil || !running {
 		return daemonStopResult{}, errors.Join(errors.New("daemon still owns its store but no signalable captured process is running"), err)
 	}
 	if _, err := target.runtimeGone(); err != nil {
@@ -164,11 +167,20 @@ func terminateCapturedDaemon(w io.Writer, target *daemonStopTarget) (daemonStopR
 		if _, err := target.runtimeGone(); err != nil {
 			return daemonStopResult{}, err
 		}
-		running, err := daemonCapturedProcessRunning(target.process)
+		running, err := target.processRunning()
 		if err != nil {
 			return daemonStopResult{}, err
 		}
 		if running {
+			// Closing may have released the lock during native/runtime
+			// checks. Apply the same last observed-free guard as KILL.
+			free, err := target.storeFree()
+			if err != nil {
+				return daemonStopResult{}, err
+			}
+			if free {
+				return waitForDaemonTarget(w, target, 3*time.Second, false)
+			}
 			if err := daemonTerminateCapturedProcess(target.process); err != nil {
 				return daemonStopResult{}, fmt.Errorf("terminate captured daemon: %w", err)
 			}
