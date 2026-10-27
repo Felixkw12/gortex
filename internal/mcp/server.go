@@ -1609,6 +1609,20 @@ func (s *Server) afterInitializeInstructions(ctx context.Context, _ any, req *mc
 		SessionCWDFromContext(ctx), s.effectiveSessionPolicy(ctx))
 }
 
+// Modern clients discover the server without an initialize handshake. Apply
+// the same per-session instructions, including loading and pending-checkout
+// guidance, and read their identity from the SDK's parsed request metadata.
+func (s *Server) afterDiscoverInstructions(ctx context.Context, _ any, _ *mcp.DiscoverRequest, result *mcp.DiscoverResult) {
+	if s == nil || result == nil {
+		return
+	}
+	if info := server.RequestProtocolInfoFromContext(ctx); info != nil && info.Modern && info.ClientInfo != nil {
+		s.sessionFor(ctx).recordClientName(info.ClientInfo.Name)
+	}
+	result.Instructions = s.stateAwareInstructionsForPolicy(
+		SessionCWDFromContext(ctx), s.effectiveSessionPolicy(ctx))
+}
+
 // stateAwareInstructions chooses the initialize `instructions` text for a
 // connection rooted at cwd. An uncovered multi-repo cwd gets the terse
 // activation affordance (shared with the F4 handshake path); a covered cwd —
@@ -1823,8 +1837,8 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	// Wire the process-wide tokenStats as the parent of every
 	// per-session counter so record() fanout aggregates daemon-wide.
 	s.sessions.setParentTokenStats(s.tokenStats)
-	// Per-connection state-aware initialize instructions: the after-init
-	// hook rewrites result.Instructions for THIS session's cwd — the terse
+	// Per-connection state-aware instructions: initialize and discovery
+	// hooks rewrite result.Instructions for THIS session's cwd — the terse
 	// activation affordance for an uncovered cwd, or the base guidance plus
 	// live workspace + warmup facts for a covered one. It fires for every
 	// MCP client straight from the handshake, including non-Claude-Code
@@ -1832,6 +1846,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	// rewrite for the proxy path would not reach the embedded stdio server).
 	initHooks := &server.Hooks{}
 	initHooks.AddAfterInitialize(s.afterInitializeInstructions)
+	initHooks.AddAfterDiscover(s.afterDiscoverInstructions)
 
 	// mcpServer is constructed after s exists so the per-session tool
 	// filter can close over s — toolSurfaceFilter varies the tools/list
