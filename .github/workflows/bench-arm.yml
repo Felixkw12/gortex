@@ -204,12 +204,13 @@ jobs:
           sha256sum "$RUNNER_TEMP/gortex-acceptance.exe" \
             > "$RUNNER_TEMP/gortex-windows-readiness-artifacts/binary-sha256.txt"
       - name: Run native restart edits ten times (same-drive and available cross-drive)
+        timeout-minutes: 35
         env:
           GORTEX_ISSUE767_READINESS_BINARY: ${{ runner.temp }}/gortex-acceptance.exe
           GORTEX_ISSUE767_ARTIFACT_DIR: ${{ runner.temp }}/gortex-windows-readiness-artifacts/fixtures
         run: |
           set -euo pipefail
-          go test -tags acceptance -count=10 -timeout=35m -v \
+          go test -tags acceptance -count=10 -timeout=30m -v \
             -run '^TestIssue767WorktreeReadinessIntegration$' ./cmd/gortex 2>&1 \
             | tee "$RUNNER_TEMP/gortex-windows-readiness-artifacts/test-output.txt"
       - name: Upload Windows restart evidence (including failures)
