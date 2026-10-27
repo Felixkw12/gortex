@@ -8,7 +8,7 @@ import (
 )
 
 func sampleCorpus() Corpus {
-	return Corpus{Label: "sample", Source: "/input/sample", Commit: strings.Repeat("a", 40), File: "sample.go", Symbol: "sample.go::Example", Query: "Example"}
+	return Corpus{Label: "sample", Source: "/input/sample", Commit: strings.Repeat("a", 40), File: "sample.go", Symbol: "sample.go::Example", Query: "Example", ProposedSignature: "func Example() int"}
 }
 
 func TestAgentPacingAndBusyBackoff(t *testing.T) {
@@ -47,13 +47,20 @@ func TestSourceTargetsAndStablePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range plan {
-		if r.name() == "change.verify" || r.name() == "relations.dependents" || r.name() == "read.source" {
+		if r.name() == "relations.dependents" || r.name() == "read.source" {
 			target, ok := r.Arguments["target"].(map[string]any)
 			if !ok || len(target) != 1 {
 				t.Fatalf("%s has no valid target: %v", r.name(), r.Arguments)
 			}
 			if symbol, ok := target["symbol"].(string); ok && strings.HasPrefix(symbol, "ext::") {
 				t.Fatal("external read target")
+			}
+		}
+		if r.name() == "change.verify" {
+			source := r.Arguments["source"].(map[string]any)
+			changes := source["changes"].([]map[string]any)
+			if len(changes) != 1 || changes[0]["symbol_id"] != c.Symbol || changes[0]["new_signature"] != c.ProposedSignature {
+				t.Fatal("verify omitted proposed source-backed signature change")
 			}
 		}
 	}
@@ -111,6 +118,10 @@ func TestSummaryRetainsErrorAndCensoringDenominators(t *testing.T) {
 	read := metrics["read.source"]
 	if read.Latency.P50.Value != nil || read.PhaseCensored != 1 || read.ProductExpired != 1 || read.Errors["-32602:invalid_argument"] != 1 {
 		t.Fatalf("incomplete/error samples lost: %+v", read)
+	}
+	probe := summarize(attempts, 10, "probe")["search.symbols"]
+	if probe.BusyRefusals != 1 || probe.SuccessPerSec.Value != nil {
+		t.Fatalf("probe denominator mixed with continuous workload: %+v", probe)
 	}
 	encoded, err := json.Marshal(read.Latency)
 	if err != nil || !strings.Contains(string(encoded), `"value":null`) {

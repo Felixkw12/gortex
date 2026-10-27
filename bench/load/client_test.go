@@ -136,7 +136,7 @@ func TestStubDaemonSweepTargetsBusyAndMetrics(t *testing.T) {
 			busy++
 			return nil, &rpcError{Code: -32002, Message: "busy"}
 		}
-		if (name == "change" && operation == "verify" && target["symbol"] == nil) || (name == "relations" && operation == "dependents" && target["file"] == nil) {
+		if (name == "change" && operation == "verify" && args["source"] == nil) || (name == "relations" && operation == "dependents" && target["symbol"] == nil) {
 			invalid++
 			return map[string]any{"isError": true, "content": []any{map[string]any{"text": `{"error_code":"invalid_argument","message":"missing target"}`}}}, nil
 		}
@@ -343,6 +343,29 @@ func TestWireLimitAndStructuredErrors(t *testing.T) {
 	var remote *rpcError
 	if err := checkToolResult(json.RawMessage(`{"isError":true,"content":[{"text":"{\"error_code\":\"invalid_argument\",\"message\":\"target\"}"}]}`)); !errors.As(err, &remote) || remote.Code != -32602 {
 		t.Fatalf("structured tool error not classified: %v", err)
+	}
+	if err := checkToolResult(json.RawMessage(`{"isError":true,"content":[{"text":"source symbol not found"}]}`)); err == nil || !strings.Contains(err.Error(), "source symbol not found") {
+		t.Fatalf("plain tool error was lost: %v", err)
+	}
+}
+
+func TestMalformedRPCReceiptCannotBecomeSuccess(t *testing.T) {
+	local, peer := net.Pipe()
+	defer peer.Close()
+	ch := make(chan wireReply, 1)
+	c := &socketClient{conn: local, reader: bufio.NewReader(local), pending: map[int64]chan wireReply{1: ch}, done: make(chan struct{})}
+	go c.readLoop()
+	defer c.Close()
+	if _, err := peer.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":1}\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case reply := <-ch:
+		if reply.err == nil {
+			t.Fatal("missing result/error accepted")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("malformed response did not fail pending call")
 	}
 }
 

@@ -148,6 +148,10 @@ func (c *socketClient) readLoop() {
 			c.fail(errors.New("daemon returned non-integer response ID"))
 			return
 		}
+		if reply.Result == nil && reply.Error == nil {
+			c.fail(errors.New("daemon response has neither result nor error"))
+			return
+		}
 		c.mu.Lock()
 		ch := c.pending[id]
 		delete(c.pending, id)

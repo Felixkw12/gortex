@@ -147,7 +147,7 @@
             "max_bytes": 0
           },
           "target": {
-            "file": "sample.go"
+            "symbol": "sample.go::Example"
           }
         }
       },
@@ -223,8 +223,13 @@
             "format": "json",
             "max_bytes": 0
           },
-          "target": {
-            "symbol": "sample.go::Example"
+          "source": {
+            "changes": [
+              {
+                "new_signature": "func Example() int",
+                "symbol_id": "sample.go::Example"
+              }
+            ]
           }
         }
       },
@@ -325,10 +330,11 @@
       "symbol": "sample.go::Example",
       "query": "Example",
       "edit_template": "",
-      "edit_anchor": ""
+      "edit_anchor": "",
+      "proposed_signature": "func Example() int"
     }
   ],
-  "request_plan_sha256": "2e878cb3753e1821cac6224408fbe864a4860070ddaf5c90c73502d1645c7660",
+  "request_plan_sha256": "fb510994f978a408e000b36d7d54c90cf49e7ddb0e96a89896893bb5b4302c6d",
   "phases": [
     {
       "operations": [
@@ -462,7 +468,7 @@
               "max_bytes": 0
             },
             "target": {
-              "file": "sample.go"
+              "symbol": "sample.go::Example"
             }
           }
         },
@@ -538,8 +544,13 @@
               "format": "json",
               "max_bytes": 0
             },
-            "target": {
-              "symbol": "sample.go::Example"
+            "source": {
+              "changes": [
+                {
+                  "new_signature": "func Example() int",
+                  "symbol_id": "sample.go::Example"
+                }
+              ]
             }
           }
         },

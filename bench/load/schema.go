@@ -29,6 +29,8 @@ func schemaFor(t reflect.Type) map[string]any {
 		return map[string]any{"anyOf": []any{schemaFor(t.Elem()), map[string]any{"type": "null"}}}
 	}
 	switch t.Kind() {
+	case reflect.Interface:
+		return map[string]any{} // canonical request arguments contain heterogeneous JSON
 	case reflect.Struct:
 		properties := make(map[string]any)
 		required := make([]string, 0, t.NumField())

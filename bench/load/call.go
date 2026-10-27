@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -34,7 +35,23 @@ func checkToolResult(data json.RawMessage) error {
 	}
 	payload, err := textPayload(data, "content")
 	if err != nil {
-		return errors.New("tool returned isError without a structured error")
+		var plain struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(data, &plain) == nil {
+			var messages []string
+			for _, content := range plain.Content {
+				if content.Text != "" {
+					messages = append(messages, content.Text)
+				}
+			}
+			if len(messages) > 0 {
+				return &rpcError{Code: -32000, Message: strings.Join(messages, "\n")}
+			}
+		}
+		return errors.New("tool returned isError without error content")
 	}
 	var body struct {
 		Code    string `json:"error_code"`

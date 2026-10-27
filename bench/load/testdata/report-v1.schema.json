@@ -37,6 +37,9 @@
           "label": {
             "type": "string"
           },
+          "proposed_signature": {
+            "type": "string"
+          },
           "query": {
             "type": "string"
           },
@@ -55,7 +58,8 @@
           "symbol",
           "query",
           "edit_template",
-          "edit_anchor"
+          "edit_anchor",
+          "proposed_signature"
         ],
         "type": "object"
       },
@@ -534,9 +538,7 @@
               "additionalProperties": false,
               "properties": {
                 "arguments": {
-                  "additionalProperties": {
-                    "type": "integer"
-                  },
+                  "additionalProperties": {},
                   "type": [
                     "object",
                     "null"
@@ -1180,9 +1182,7 @@
             "additionalProperties": false,
             "properties": {
               "arguments": {
-                "additionalProperties": {
-                  "type": "integer"
-                },
+                "additionalProperties": {},
                 "type": [
                   "object",
                   "null"

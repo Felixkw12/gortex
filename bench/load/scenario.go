@@ -35,6 +35,18 @@ func runPhase(ctx context.Context, o runOptions, scenario string, corpora []Corp
 		}
 		phase.Tools = summarize(phase.Attempts, phase.DurationSec, "workload")
 		phase.Probes = summarize(phase.Attempts, phase.DurationSec, "probe")
+		for tool, row := range phase.Tools {
+			errors := row.ProductExpired
+			for _, count := range row.Errors {
+				errors += count
+			}
+			if errors > 0 {
+				phase.Errors = append(phase.Errors, fmt.Sprintf("%s: %d workload errors/product expiries (retained in metrics and attempts)", tool, errors))
+			}
+		}
+		if phase.NeverSeen > 0 {
+			phase.Errors = append(phase.Errors, fmt.Sprintf("%d acknowledged edits never visible before product deadline", phase.NeverSeen))
+		}
 		if scenario != "cold" && scenario != "restart" && len(phase.Tools) == 0 {
 			phase.Errors = append(phase.Errors, "no workload calls observed before phase end")
 		}
@@ -262,18 +274,7 @@ func runPhase(ctx context.Context, o runOptions, scenario string, corpora []Corp
 		requests, sweep, err = discoverSweep(sweepCtx, clients[0], p.Repos[0].Corpus)
 		phase.Operations = requests
 		if err == nil {
-			for i, r := range requests {
-				_, rows, callErr := callTool(sweepCtx, clients[0], r, dispatchArgs(r, p.Repos[0]), "workload", 0, i, 0, o.Deadline, waitContext)
-				phase.Attempts = append(phase.Attempts, rows...)
-				for j := range sweep {
-					if sweep[j].Tool == r.Tool && sweep[j].Operation == r.Operation {
-						sweep[j].Status = "measured"
-						if callErr != nil {
-							sweep[j].Status, sweep[j].Reason = "error", callErr.Error()
-						}
-					}
-				}
-			}
+			err = runSweep(sweepCtx, o, clients[0], p.Repos[0], requests, sweep, &phase, waitContext)
 			for _, entry := range sweep {
 				if entry.Status != "measured" && entry.Status != "outside_scope" {
 					phase.Errors = append(phase.Errors, "tool sweep "+entry.Tool+"."+entry.Operation+": "+entry.Status+": "+entry.Reason)
@@ -327,6 +328,19 @@ func dispatchArgs(r request, repo privateRepo) map[string]any {
 			}
 		}
 	}
+	if r.name() == "change.verify" {
+		if source, ok := args["source"].(map[string]any); ok {
+			if changes, ok := source["changes"].([]any); ok {
+				for _, item := range changes {
+					if change, ok := item.(map[string]any); ok {
+						if symbol, ok := change["symbol_id"].(string); ok {
+							change["symbol_id"] = repo.Prefix + "/" + symbol
+						}
+					}
+				}
+			}
+		}
+	}
 	return args
 }
 
@@ -355,6 +369,9 @@ func runAgents(parent context.Context, o runOptions, p *privateRun, clients []*s
 					phase.Edits = append(phase.Edits, edit)
 					phase.Attempts = append(phase.Attempts, rows...)
 					mu.Unlock()
+				}
+				if ctx.Err() != nil {
+					return
 				}
 				var burst sync.WaitGroup
 				for slot := range pace.burst() {

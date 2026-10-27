@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,10 @@ func sampleReport(t *testing.T) Report {
 }
 
 func TestReportSchemaGolden(t *testing.T) {
+	argumentSchema := schemaFor(reflect.TypeFor[map[string]any]())
+	if property, ok := argumentSchema["additionalProperties"].(map[string]any); !ok || len(property) != 0 {
+		t.Fatalf("heterogeneous request values wrongly constrained: %v", argumentSchema)
+	}
 	data, err := json.MarshalIndent(reportSchema(), "", "  ")
 	if err != nil {
 		t.Fatal(err)

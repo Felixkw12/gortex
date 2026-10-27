@@ -48,14 +48,15 @@ func distribution(values []float64, unit string) Distribution {
 }
 
 type Corpus struct {
-	Label        string `json:"label"`
-	Source       string `json:"source"`
-	Commit       string `json:"commit"`
-	File         string `json:"file"`
-	Symbol       string `json:"symbol"`
-	Query        string `json:"query"`
-	EditTemplate string `json:"edit_template"`
-	EditAnchor   string `json:"edit_anchor"`
+	Label             string `json:"label"`
+	Source            string `json:"source"`
+	Commit            string `json:"commit"`
+	File              string `json:"file"`
+	Symbol            string `json:"symbol"`
+	Query             string `json:"query"`
+	EditTemplate      string `json:"edit_template"`
+	EditAnchor        string `json:"edit_anchor"`
+	ProposedSignature string `json:"proposed_signature"`
 }
 
 type Host struct {
@@ -193,7 +194,9 @@ func summarize(attempts []Attempt, seconds float64, role string) map[string]Tool
 	for tool, m := range result {
 		m.Latency = distribution(latencies[tool], "ms")
 		m.SuccessPerSec = unavailable("calls/s", "phase has no measured duration")
-		if seconds > 0 {
+		if role == "probe" {
+			m.SuccessPerSec = unavailable("calls/s", "intermittent setup/visibility probes do not have a continuous offered-load interval")
+		} else if seconds > 0 {
 			m.SuccessPerSec = measured(float64(m.Successes)/seconds, "calls/s")
 		}
 		result[tool] = m

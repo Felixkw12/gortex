@@ -40,6 +40,7 @@ revision; replace with real values):
     "file": "sample.go",
     "symbol": "sample.go::Example",
     "query": "Example",
+	"proposed_signature": "func Example() int",
     "edit_anchor": "package sample\n",
     "edit_template": "\nfunc {{marker}}() {}\n"
   }
@@ -98,7 +99,11 @@ The 21-operation benchmark contract is:
 The sweep inventories advertised operations, marks other operations
 `outside_scope`, and records missing benchmark operations explicitly. It does
 not claim to exercise every administrative, provider, forge or mutation API.
-`change.verify` has a symbol target and `relations.dependents` has a file target.
+`relations.dependents` carries a symbol selector. `change.verify` carries the
+source-backed symbol ID plus the manifest's proposed signature in canonical
+`source.changes`; these handlers do not accept ignored file/symbol selectors.
+The two mutually exclusive analyses run in different deterministic sweep bursts.
+The ordinary concurrent reading workload retains analysis refusals as errors.
 Missing, unsupported or failed benchmark operations prevent a complete sweep.
 
 Steady phases require both queryable and enriched readiness, source-backed

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"sync"
+	"time"
 )
 
 // Sweep every advertised domain/operation explicitly. Unsupported prerequisites
@@ -89,5 +91,67 @@ func discoverSweep(ctx context.Context, client *socketClient, corpus Corpus) ([]
 		}
 		return 0
 	})
-	return selected, inventory, nil
+	// Both operations take the daemon's mutually-exclusive expensive-analysis
+	// guard. Keep them at opposite ends, hence distinct 3–5-call bursts. Do
+	// not hide ordinary workload refusals behind a new retry classification.
+	var ordered []request
+	for _, r := range selected {
+		if r.name() == "analyze.dead_code" {
+			ordered = append(ordered, r)
+		}
+	}
+	for _, r := range selected {
+		if r.name() != "analyze.dead_code" && r.name() != "analyze.hotspots" {
+			ordered = append(ordered, r)
+		}
+	}
+	for _, r := range selected {
+		if r.name() == "analyze.hotspots" {
+			ordered = append(ordered, r)
+		}
+	}
+	return ordered, inventory, nil
+}
+
+func sweepBurst(remaining int, p *pacing) int {
+	if remaining <= 5 {
+		return remaining
+	}
+	size := p.burst()
+	if tail := remaining - size; tail > 0 && tail < 3 {
+		size = remaining - 3
+	}
+	return size
+}
+
+func runSweep(ctx context.Context, o runOptions, client *socketClient, repo privateRepo, requests []request, inventory []SweepEntry, phase *Phase, sleep func(context.Context, time.Duration) error) error {
+	pace := newPacing(profile(o.Profile), uint64(o.Seed))
+	var mu sync.Mutex
+	for index, step := 0, 0; index < len(requests); step++ {
+		if err := sleep(ctx, pace.think()); err != nil {
+			return err
+		}
+		size := sweepBurst(len(requests)-index, pace)
+		var burst sync.WaitGroup
+		for slot := range size {
+			r := requests[index+slot]
+			burst.Go(func() {
+				_, rows, err := callTool(ctx, client, r, dispatchArgs(r, repo), "workload", 0, step, slot, o.Deadline, sleep)
+				mu.Lock()
+				defer mu.Unlock()
+				phase.Attempts = append(phase.Attempts, rows...)
+				for i := range inventory {
+					if inventory[i].Tool == r.Tool && inventory[i].Operation == r.Operation {
+						inventory[i].Status = "measured"
+						if err != nil {
+							inventory[i].Status, inventory[i].Reason = "error", err.Error()
+						}
+					}
+				}
+			})
+		}
+		burst.Wait()
+		index += size
+	}
+	return nil
 }

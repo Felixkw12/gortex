@@ -111,13 +111,13 @@ func readingPlan(c Corpus) ([]request, error) {
 		{Tool: "read", Operation: "summary", Arguments: map[string]any{"operation": "summary", "target": file}},
 		{Tool: "relations", Operation: "callers", Arguments: map[string]any{"operation": "callers", "target": symbol}},
 		{Tool: "relations", Operation: "usages", Arguments: map[string]any{"operation": "usages", "target": symbol}},
-		{Tool: "relations", Operation: "dependents", Arguments: map[string]any{"operation": "dependents", "target": file}},
+		{Tool: "relations", Operation: "dependents", Arguments: map[string]any{"operation": "dependents", "target": symbol}},
 		{Tool: "relations", Operation: "implementations", Arguments: map[string]any{"operation": "implementations", "target": symbol}},
 		{Tool: "explore", Operation: "context", Arguments: map[string]any{"operation": "context", "task": c.Query}},
 		{Tool: "explore", Operation: "outline", Arguments: map[string]any{"operation": "outline"}},
 		{Tool: "explore", Operation: "localize", Arguments: map[string]any{"operation": "localize", "task": c.Query}},
 		{Tool: "change", Operation: "impact", Arguments: map[string]any{"operation": "impact", "target": symbol}},
-		{Tool: "change", Operation: "verify", Arguments: map[string]any{"operation": "verify", "target": symbol}},
+		{Tool: "change", Operation: "verify", Arguments: map[string]any{"operation": "verify", "source": map[string]any{"changes": []map[string]any{{"symbol_id": c.Symbol, "new_signature": c.ProposedSignature}}}}},
 		{Tool: "change", Operation: "tests", Arguments: map[string]any{"operation": "tests", "target": map[string]any{"symbols": []string{c.Symbol}}}},
 		{Tool: "change", Operation: "detect", Arguments: map[string]any{"operation": "detect", "source": map[string]any{"scope": "unstaged"}}},
 		{Tool: "trace", Operation: "call_chain", Arguments: map[string]any{"operation": "call_chain", "target": symbol}},
@@ -143,6 +143,9 @@ func validateCorpus(c Corpus) error {
 	}
 	if c.Symbol == "" || strings.HasPrefix(c.Symbol, "ext::") || c.Query == "" {
 		return fmt.Errorf("corpus %s: requires a source-backed symbol and query; ext:: targets are excluded", c.Label)
+	}
+	if c.ProposedSignature == "" {
+		return fmt.Errorf("corpus %s: verify requires a language-valid proposed_signature for its source-backed symbol", c.Label)
 	}
 	return nil
 }
