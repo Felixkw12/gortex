@@ -24,6 +24,31 @@ func TestFamilyRepoRootsAndPendingText(t *testing.T) {
 	}
 }
 
+func TestNearestGitRootAbstainsAtUnknownNestedBoundary(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var inspected []string
+	got := nearestGitRootWithLstat(nested, func(path string) (os.FileInfo, error) {
+		inspected = append(inspected, path)
+		if path == filepath.Join(nested, ".git") {
+			return nil, &os.PathError{Op: "lstat", Path: path, Err: os.ErrPermission}
+		}
+		return os.Lstat(path)
+	})
+	if got != "" || len(inspected) != 1 {
+		t.Fatalf("unknown nested boundary fell through to known ancestor: root=%q probes=%v", got, inspected)
+	}
+	if got := nearestGitRoot(nested); got != root {
+		t.Fatalf("a genuinely absent nested .git should still find ancestor: %q", got)
+	}
+}
+
 func worktreeGuidanceGit(t testing.TB, dir string, args ...string) {
 	t.Helper()
 	gitArgs := append([]string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)

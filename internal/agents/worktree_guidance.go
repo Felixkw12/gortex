@@ -85,6 +85,10 @@ func AutomaticCheckoutFamily(cwd string, knownRoots []string) (checkout, represe
 }
 
 func nearestGitRoot(path string) string {
+	return nearestGitRootWithLstat(path, os.Lstat)
+}
+
+func nearestGitRootWithLstat(path string, lstat func(string) (os.FileInfo, error)) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return ""
@@ -98,8 +102,12 @@ func nearestGitRoot(path string) string {
 		current = filepath.Dir(current)
 	}
 	for {
-		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil {
+		if _, err := lstat(filepath.Join(current, ".git")); err == nil {
 			return current
+		} else if !os.IsNotExist(err) {
+			// A nearer checkout boundary is unknown, not absent. Never
+			// attribute it to an ancestor family on permission/I/O failure.
+			return ""
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
