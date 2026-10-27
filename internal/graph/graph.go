@@ -1840,10 +1840,10 @@ func (g *Graph) AllEdgesLight(kinds ...EdgeKind) []*Edge {
 // in the disk backend where the equivalent path materialises the full
 // in-edge map.
 func (g *Graph) DeadCodeCandidates(allowedNodeKinds []NodeKind, allowedInEdgeKinds map[NodeKind][]EdgeKind) []*Node {
-	return g.deadCodeCandidates(allowedNodeKinds, allowedInEdgeKinds, nil)
+	return g.deadCodeCandidates(allowedNodeKinds, allowedInEdgeKinds, nil, OutlineEdgeFilter{})
 }
 
-func (g *Graph) deadCodeCandidates(allowedNodeKinds []NodeKind, allowedInEdgeKinds map[NodeKind][]EdgeKind, prefixes []string) []*Node {
+func (g *Graph) deadCodeCandidates(allowedNodeKinds []NodeKind, allowedInEdgeKinds map[NodeKind][]EdgeKind, prefixes []string, filter OutlineEdgeFilter) []*Node {
 	if len(allowedNodeKinds) == 0 {
 		return nil
 	}
@@ -1859,6 +1859,7 @@ func (g *Graph) deadCodeCandidates(allowedNodeKinds []NodeKind, allowedInEdgeKin
 	}
 
 	var out []*Node
+	filtering := len(filter.ExcludeKinds)+len(filter.ExcludeNodeKinds)+len(filter.ExcludeNodeIDs) > 0 || filter.ExcludeVia != ""
 	for _, k := range allowedNodeKinds {
 		allowed, hasAllow := allowedSet[k]
 		anyKindCounts := !hasAllow || len(allowed) == 0
@@ -1870,6 +1871,9 @@ func (g *Graph) deadCodeCandidates(allowedNodeKinds []NodeKind, allowedInEdgeKin
 			dead := true
 			for _, e := range incoming {
 				if e == nil {
+					continue
+				}
+				if filtering && !filter.Allows(e, g.GetNode(e.From), n) {
 					continue
 				}
 				if anyKindCounts {

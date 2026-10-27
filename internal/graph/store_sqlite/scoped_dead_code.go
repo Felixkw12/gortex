@@ -10,6 +10,7 @@ import (
 )
 
 var _ graph.ScopedDeadCodeReader = (*Store)(nil)
+var _ graph.FilteredScopedDeadCodeReader = (*Store)(nil)
 
 func sortedDeadCodeRepos(prefixes []string) []string {
 	if prefixes == nil {
@@ -24,9 +25,32 @@ func sortedDeadCodeRepos(prefixes []string) []string {
 // the remaining primary-key id. Repo/generation equality makes id a keyset
 // seek and supplies ORDER BY without repeatedly sorting the ownership bucket.
 func deadCodeScopedVerdictPageSQL(allowed int) string {
-	return `SELECT n.id, ` + deadCodeIncomingProbeSQL(allowed) + `
-FROM nodes AS n INDEXED BY nodes_by_repo
-WHERE n.view_gen = ? AND n.repo_prefix = ? AND n.id > ? AND n.kind = ? ORDER BY n.id LIMIT ?`
+	q, _ := deadCodeFilteredVerdictPageSQL(allowed, true, graph.OutlineEdgeFilter{})
+	return q
+}
+
+func deadCodeFilteredVerdictPageSQL(allowed int, scoped bool, filter graph.OutlineEdgeFilter) (string, []any) {
+	probe := `NOT EXISTS (SELECT 1 FROM edges e `
+	source := ""
+	if len(filter.ExcludeNodeKinds) > 0 {
+		source = "source"
+		probe += `LEFT JOIN nodes source ON source.id = e.from_id AND source.view_gen = e.view_gen `
+	}
+	probe += `WHERE e.to_id = n.id AND e.view_gen = n.view_gen`
+	if allowed > 0 {
+		probe += ` AND e.kind IN (` + inPlaceholders(allowed) + `)`
+	}
+	edgeSQL, edgeArgs := outlineEdgePredicate(filter, source, "n")
+	viaSQL, viaArgs := outlineViaPredicate(filter.ExcludeVia)
+	probe += edgeSQL + viaSQL + `)`
+	q := `SELECT n.id, ` + probe + ` FROM nodes AS n`
+	if scoped {
+		q += ` INDEXED BY nodes_by_repo WHERE n.view_gen = ? AND n.repo_prefix = ?`
+	} else {
+		q += ` WHERE n.view_gen = ?`
+	}
+	q += ` AND n.id > ? AND n.kind = ? ORDER BY n.id LIMIT ?`
+	return q, append(edgeArgs, viaArgs...)
 }
 
 const deadCodeScopedFilesPageSQL = `SELECT ` + lookupNodeCols + ` FROM nodes INDEXED BY nodes_by_repo
@@ -44,12 +68,25 @@ func (s *Store) DeadCodeCandidatesInReposContext(ctx context.Context, kinds []gr
 	if prefixes == nil {
 		return s.DeadCodeCandidatesContext(ctx, kinds, incoming)
 	}
+	return s.deadCodeCandidatesInReposFiltered(ctx, kinds, incoming, prefixes, graph.OutlineEdgeFilter{})
+}
+
+func (s *Store) DeadCodeCandidatesInReposFiltered(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, filter graph.OutlineEdgeFilter) ([]*graph.Node, error) {
+	return s.deadCodeCandidatesInReposFiltered(s.readContext(), kinds, incoming, prefixes, filter)
+}
+
+func (s *Store) deadCodeCandidatesInReposFiltered(ctx context.Context, kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, filter graph.OutlineEdgeFilter) ([]*graph.Node, error) {
+	repos := sortedDeadCodeRepos(prefixes)
+	if prefixes == nil {
+		repos = []string{""} // One global pass; no ownership predicate or argument.
+	}
+
 	var out []*graph.Node
 	for _, kind := range kinds {
 		var candidates []*graph.Node
 		allowed := anaDedupeEdgeKinds(incoming[kind])
-		q := deadCodeScopedVerdictPageSQL(len(allowed))
-		for _, prefix := range sortedDeadCodeRepos(prefixes) {
+		q, filterArgs := deadCodeFilteredVerdictPageSQL(len(allowed), prefixes != nil, filter)
+		for _, prefix := range repos {
 			after := ""
 			for {
 				if err := ctx.Err(); err != nil {
@@ -59,7 +96,12 @@ func (s *Store) DeadCodeCandidatesInReposContext(ctx context.Context, kinds []gr
 				for _, edgeKind := range allowed {
 					args = append(args, string(edgeKind))
 				}
-				args = append(args, s.viewGen, prefix, after, string(kind), deadCodePageSize)
+				args = append(args, filterArgs...)
+				args = append(args, s.viewGen)
+				if prefixes != nil {
+					args = append(args, prefix)
+				}
+				args = append(args, after, string(kind), deadCodePageSize)
 				dead, scanned, lastID, err := s.scanDeadCodeVerdictPage(ctx, q, args...)
 				if err != nil {
 					return append(out, candidates...), err
@@ -91,24 +133,42 @@ func (s *Store) IfaceImplementsRowsInRepos(prefixes []string) []graph.IfaceImple
 }
 
 func (s *Store) IfaceImplementsRowsInReposContext(ctx context.Context, prefixes []string) ([]graph.IfaceImplementsRow, error) {
+	return s.ifaceImplementsRowsInReposFiltered(ctx, prefixes, graph.OutlineEdgeFilter{})
+}
+
+func (s *Store) IfaceImplementsRowsInReposFiltered(prefixes []string, filter graph.OutlineEdgeFilter) ([]graph.IfaceImplementsRow, error) {
+	return s.ifaceImplementsRowsInReposFiltered(s.readContext(), prefixes, filter)
+}
+
+func (s *Store) ifaceImplementsRowsInReposFiltered(ctx context.Context, prefixes []string, filter graph.OutlineEdgeFilter) ([]graph.IfaceImplementsRow, error) {
+	repos := sortedDeadCodeRepos(prefixes)
 	if prefixes == nil {
-		q := `SELECT e.from_id, n.id, n.meta FROM edges e
-JOIN nodes n ON n.id = e.to_id AND n.view_gen = e.view_gen
-WHERE e.kind = ? AND n.kind = ? AND n.meta IS NOT NULL AND e.view_gen = ?`
-		rows, err := s.db.QueryContext(ctx, q, string(graph.EdgeImplements), string(graph.KindInterface), s.viewGen)
-		if err != nil {
-			return nil, err
-		}
-		return scanIfaceImplementsRows(rows)
+		repos = []string{""}
 	}
 	var out []graph.IfaceImplementsRow
-	for _, prefix := range sortedDeadCodeRepos(prefixes) {
-		q := `SELECT e.from_id, n.id, n.meta
+	for _, prefix := range repos {
+		var q string
+		var args []any
+		if prefixes == nil {
+			// Preserve legacy dangling implementing-type tuples in the global view.
+			q = `SELECT e.from_id, n.id, n.meta FROM edges e
+LEFT JOIN nodes implementing ON implementing.id = e.from_id AND implementing.view_gen = e.view_gen
+JOIN nodes n ON n.id = e.to_id AND n.view_gen = e.view_gen
+WHERE e.kind = ? AND n.kind = ? AND n.meta IS NOT NULL AND e.view_gen = ?`
+			args = []any{string(graph.EdgeImplements), string(graph.KindInterface), s.viewGen}
+		} else {
+			q = `SELECT e.from_id, n.id, n.meta
 FROM nodes AS implementing INDEXED BY nodes_by_repo
 CROSS JOIN edges e INDEXED BY edges_by_from ON e.from_id = implementing.id AND e.view_gen = implementing.view_gen AND e.kind = ?
 JOIN nodes n ON n.id = e.to_id AND n.view_gen = e.view_gen
 WHERE implementing.view_gen = ? AND implementing.repo_prefix = ? AND n.kind = ? AND n.meta IS NOT NULL`
-		rows, err := s.db.QueryContext(ctx, q, string(graph.EdgeImplements), s.viewGen, prefix, string(graph.KindInterface))
+			args = []any{string(graph.EdgeImplements), s.viewGen, prefix, string(graph.KindInterface)}
+		}
+		edgeSQL, edgeArgs := outlineEdgePredicate(filter, "implementing", "n")
+		viaSQL, viaArgs := outlineViaPredicate(filter.ExcludeVia)
+		args = append(args, edgeArgs...)
+		args = append(args, viaArgs...)
+		rows, err := s.db.QueryContext(ctx, q+edgeSQL+viaSQL, args...)
 		if err != nil {
 			return nil, err
 		}
