@@ -279,6 +279,22 @@ func replaceStaleDaemon(observed daemonIdentity) (daemonDecision, daemonIdentity
 	// A supervised daemon is bounced through its supervisor, as `daemon
 	// restart` does; a manual stop+start would orphan it from the unit.
 	if serviceActive() {
+		// The external supervisor query can outlive a concurrent daemon swap.
+		// Recheck its direction before asking the supervisor to restart it.
+		current := runningDaemonInfo()
+		if current.mismatch() {
+			observedMismatch = current
+		}
+		if current.err != nil && !current.mismatch() {
+			return daemonUnavailable, observedMismatch, daemonHandoffError(identity, "recheck supervised daemon", current.err)
+		}
+		if !current.olderThan(binaryVersion()) {
+			if current.mismatch() {
+				return daemonReady, observedMismatch, daemonMismatchError(current)
+			}
+			return daemonReady, observedMismatch, nil
+		}
+		identity = current
 		if err := serviceRestart(io.Discard); err != nil {
 			return daemonReady, observedMismatch, daemonHandoffError(identity, "supervisor restart", err)
 		}

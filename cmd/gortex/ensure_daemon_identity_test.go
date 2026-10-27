@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -110,5 +111,59 @@ func TestEnsureDaemonRetainsMismatchObservedWhileWaitingForReplacement(t *testin
 	decision, observed, err := ensureDaemonReadyWithError(true)
 	if err != nil || decision != daemonAutostarted || !probedMismatch || !observed.mismatch() || !observed.protocolKnown || observed.protocol != 0 {
 		t.Fatalf("successful replacement lost transient refusal: decision=%v observed=%+v err=%v", decision, observed, err)
+	}
+}
+
+func TestEnsureDaemonSupervisorRevalidatesPeerAfterExternalQuery(t *testing.T) {
+	for _, tc := range []struct {
+		name, version     string
+		protocol          int
+		mismatch, restart bool
+	}{
+		{"newer-protocol", "v0.64.10", daemon.ProtocolVersion + 1, true, false},
+		{"newer-compatible-release", "v0.64.13", daemon.ProtocolVersion, false, false},
+		{"newer-release-older-protocol", "v0.64.13", 0, true, false},
+		{"older-mismatch-observed-after-query", "v0.64.10", 0, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := installStaleDaemonFixture(t, "v0.64.10", "v0.64.12")
+			changed := daemonIdentity{version: tc.version, protocol: tc.protocol, protocolKnown: true}
+			if tc.mismatch {
+				changed.err = &daemon.ProtocolMismatchError{DaemonVersion: tc.version, DaemonProtocol: tc.protocol, DaemonProtocolKnown: true, ClientProtocol: daemon.ProtocolVersion}
+			}
+			restarted := false
+			serviceActive = func() bool {
+				// Deterministically replace the observed endpoint during the
+				// external query, after the spawn-lock identity recheck.
+				runningDaemonInfo = func() daemonIdentity {
+					if restarted {
+						return daemonIdentity{version: "v0.64.12", protocol: daemon.ProtocolVersion, protocolKnown: true}
+					}
+					return changed
+				}
+				return true
+			}
+			serviceRestart = func(io.Writer) error { f.restarts.Add(1); restarted = true; return nil }
+			var decision daemonDecision
+			var observed daemonIdentity
+			var err error
+			stderr, _ := captureLegacyStderr(t, func() { decision, observed, err = ensureDaemonReadyWithError(true) })
+			if decision != daemonReady || restarted != tc.restart || f.stops.Load() != 0 || f.spawns.Load() != 0 {
+				t.Fatalf("supervisor changed peer: decision=%v restart=%v stops=%d spawns=%d err=%v", decision, restarted, f.stops.Load(), f.spawns.Load(), err)
+			}
+			if observed.mismatch() != tc.mismatch {
+				t.Fatalf("lost query-time mismatch: %+v", observed)
+			}
+			if tc.mismatch && !tc.restart {
+				if !errors.Is(err, daemon.ErrProtocolVersionMismatch) || !strings.Contains(err.Error(), "use the matching binary") {
+					t.Fatalf("newer peer refusal = %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.restart && strings.Contains(stderr, "[gortex mcp] replaced daemon ") {
+				t.Fatalf("refused peer reported a handoff: %s", stderr)
+			}
+		})
 	}
 }
