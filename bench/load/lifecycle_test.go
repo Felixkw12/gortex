@@ -118,3 +118,22 @@ func TestPrivateEnvironmentAndManifestValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestCancelledClonePreparationDoesNotRetainState(t *testing.T) {
+	corpus := gitFixture(t)
+	scratch := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := newPrivateRun(ctx, scratch, "unused", []Corpus{corpus}); err == nil {
+		t.Fatal("cancelled preparation succeeded")
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if _, err := os.Stat(filepath.Join(scratch, entry.Name(), "repos")); !os.IsNotExist(err) {
+			t.Fatalf("failed clone retained state: %v", err)
+		}
+	}
+}

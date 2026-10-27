@@ -272,6 +272,13 @@ func (delayedCancellationCaller) call(ctx context.Context, _ string, _ any) (jso
 	return nil, ctx.Err()
 }
 
+type lateSuccessCaller struct{}
+
+func (lateSuccessCaller) call(ctx context.Context, _ string, _ any) (json.RawMessage, error) {
+	<-ctx.Done()
+	return json.RawMessage(`{"content":[{"text":"{}"}]}`), nil
+}
+
 func TestPhaseCensoringIsNotProductExpiry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
@@ -288,6 +295,10 @@ func TestPhaseCensoringIsNotProductExpiry(t *testing.T) {
 	_, attempts, _ = callTool(ctx, delayedCancellationCaller{}, request{Tool: "search"}, nil, "workload", 0, 0, 0, 5*time.Millisecond, waitContext)
 	if len(attempts) != 1 || attempts[0].Outcome != "phase_censored" {
 		t.Fatalf("return after both deadlines lost declared clipping: %+v", attempts)
+	}
+	_, attempts, err := callTool(context.Background(), lateSuccessCaller{}, request{Tool: "search"}, nil, "workload", 0, 0, 0, time.Millisecond, waitContext)
+	if !errors.Is(err, context.DeadlineExceeded) || attempts[0].Outcome != "product_deadline" {
+		t.Fatalf("late successful receipt crossed deadline: %+v %v", attempts, err)
 	}
 }
 

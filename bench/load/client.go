@@ -265,6 +265,9 @@ func (c *socketClient) call(ctx context.Context, method string, params any) (jso
 		cancel()
 		return nil, ctx.Err()
 	case reply := <-ch:
+		if ctx.Err() != nil {
+			return reply.Result, ctx.Err()
+		}
 		if reply.err != nil {
 			return nil, reply.err
 		}

@@ -94,6 +94,9 @@ func callTool(ctx context.Context, client toolCaller, r request, args map[string
 	for retry := 0; ; retry++ {
 		start := time.Now()
 		data, err := client.call(callCtx, "tools/call", map[string]any{"name": r.Tool, "arguments": args})
+		if err == nil && callCtx.Err() != nil {
+			err = callCtx.Err()
+		}
 		if err == nil {
 			err = checkToolResult(data)
 		}

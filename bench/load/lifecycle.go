@@ -73,6 +73,28 @@ func loadManifest(path string) ([]Corpus, error) {
 	return corpora, nil
 }
 
+func validateOutputRoots(corpora []Corpus, paths ...string) error {
+	for _, corpus := range corpora {
+		source, err := canonicalPath(corpus.Source)
+		if err != nil {
+			continue
+		}
+		for _, output := range paths {
+			if output == "" {
+				continue
+			}
+			path, err := canonicalPath(output)
+			if err != nil {
+				return err
+			}
+			if inside(source, path) {
+				return errors.New("scratch/report output must be outside every manifest source root")
+			}
+		}
+	}
+	return nil
+}
+
 // Only this function allocates mutation ownership. Manifest roots are inputs;
 // no edit or daemon is ever pointed at them. Every invocation starts fresh.
 func newPrivateRun(ctx context.Context, scratch, binary string, corpora []Corpus) (_ *privateRun, err error) {
@@ -119,6 +141,8 @@ func newPrivateRun(ctx context.Context, scratch, binary string, corpora []Corpus
 	defer func() {
 		if err != nil {
 			_ = os.RemoveAll(p.SocketDir)
+			_ = p.removeState()
+			err = fmt.Errorf("private preparation at %s: %w", p.Root, err)
 		}
 	}()
 	for _, dir := range []string{"home", "cache", "config", "data", "runtime", "tmp", "repos", "hooks"} {
@@ -228,12 +252,24 @@ func ownedFile(root, relative string) (string, error) {
 }
 
 func (p *privateRun) git(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	args = append([]string{"-c", "core.hooksPath=" + filepath.Join(p.Root, "hooks")}, args...)
+	operation := args[0]
+	args = append([]string{"-c", "core.hooksPath=" + filepath.Join(p.Root, "hooks"), "-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)
 	cmd := exec.CommandContext(ctx, "git", args...)
+	configureOwnedProcess(cmd)
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		return killOwnedProcess(cmd)
+	}
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir, cmd.Env = dir, p.Env
 	data, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", args[2], err, data)
+		if cmd.Process != nil {
+			_ = killOwnedProcess(cmd)
+		}
+		return nil, fmt.Errorf("git %s: %w: %s", operation, err, data)
 	}
 	return data, nil
 }
