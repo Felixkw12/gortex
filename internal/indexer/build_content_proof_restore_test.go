@@ -507,6 +507,11 @@ func newSideInputBase(t *testing.T) *sideInputBase {
 	path := filepath.Join(t.TempDir(), "base.sqlite")
 	store := builderOpenStoreAt(t, path)
 	builderIndex(t, store, repoDir)
+	// This fixture transports only the main database's bytes. Explicitly
+	// checkpoint that snapshot; normal Store.Close now preserves durable WAL.
+	if err := store.CheckpointWAL(); err != nil {
+		t.Fatalf("checkpoint the main-only base snapshot: %v", err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close the base store: %v", err)
 	}
