@@ -184,12 +184,12 @@ func TestOwnedAnalysisTransactionJoinsPhysicalRollbackBeforeNextWriter(t *testin
 	var scanOnce sync.Once
 	releaseScan := func() { scanOnce.Do(func() { close(scanner.release) }) }
 	t.Cleanup(releaseScan)
-	type scanReceipt struct{ scan, close, iteration error }
+	type scanReceipt struct{ scan, close error }
 	scanned := make(chan scanReceipt, 1)
 	go func() {
 		scanErr := rows.Scan(scanner)
 		closeErr := rows.Close()
-		scanned <- scanReceipt{scan: scanErr, close: closeErr, iteration: rows.Err()}
+		scanned <- scanReceipt{scan: scanErr, close: closeErr}
 	}()
 	waitCheckpointSignal(t, scanner.entered)
 	cancel()
@@ -210,10 +210,11 @@ func TestOwnedAnalysisTransactionJoinsPhysicalRollbackBeforeNextWriter(t *testin
 	scan := <-scanned
 	require.NoError(t, scan.scan)
 	require.NoError(t, scan.close)
+	iterationErr := rows.Err()
 	// database/sql.Tx.rollback cancels its own context before joining rows;
 	// Rows.awaitDone may retain that exact cancellation. Do not hide another
 	// iterator error (including an error joined with context.Canceled).
-	require.True(t, scan.iteration == nil || scan.iteration == context.Canceled, "unexpected iterator completion error: %v", scan.iteration)
+	require.True(t, iterationErr == nil || iterationErr == context.Canceled, "unexpected iterator completion error: %v", iterationErr)
 	waitCheckpointSignal(t, finished)
 	require.ErrorIs(t, primary, context.Canceled)
 	require.NoError(t, <-next)
