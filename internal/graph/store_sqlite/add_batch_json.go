@@ -269,10 +269,6 @@ func appendJSONBIngestRow(buffers *jsonbIngestBuffers, row []any, metaIndex, row
 	return true, nil
 }
 
-func nextJSONBNodePayload(buffers *jsonbIngestBuffers, viewGen int64, nodes []*graph.Node, start int) (jsonPayload, blobPayload []byte, next, rows int, err error) {
-	return nextJSONBNodePayloadContext(context.Background(), buffers, viewGen, nodes, start)
-}
-
 func nextJSONBNodePayloadContext(ctx context.Context, buffers *jsonbIngestBuffers, viewGen int64, nodes []*graph.Node, start int) (jsonPayload, blobPayload []byte, next, rows int, err error) {
 	buffers.reset(nodeInsertParams + 1)
 	pos := start
@@ -302,10 +298,6 @@ func nextJSONBNodePayloadContext(ctx context.Context, buffers *jsonbIngestBuffer
 	}
 	buffers.payload.WriteByte(']')
 	return buffers.payload.Bytes(), buffers.blobs.Bytes(), pos, rows, nil
-}
-
-func nextJSONBEdgePayload(buffers *jsonbIngestBuffers, viewGen int64, edges []*graph.Edge, start int) (jsonPayload, blobPayload []byte, next, rows int, err error) {
-	return nextJSONBEdgePayloadContext(context.Background(), buffers, viewGen, edges, start)
 }
 
 func nextJSONBEdgePayloadContext(ctx context.Context, buffers *jsonbIngestBuffers, viewGen int64, edges []*graph.Edge, start int) (jsonPayload, blobPayload []byte, next, rows int, err error) {

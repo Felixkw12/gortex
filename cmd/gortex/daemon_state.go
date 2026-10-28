@@ -279,7 +279,7 @@ func (r *daemonStartupReporter) Stop() {
 	// Serving/Fail/migration publication may have been admitted independently
 	// of the heartbeat. Retain its actual completion before runtime removal.
 	r.mu.Lock()
-	r.mu.Unlock()
+	r.mu.Unlock() //nolint:staticcheck // Join the actual admitted publication before runtime removal; cancellation alone is not completion.
 }
 
 func (r *daemonStartupReporter) publishLocked() {

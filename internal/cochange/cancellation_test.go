@@ -95,7 +95,7 @@ func (g *cancelBatchStore) AddBatchChecked(nodes []*graph.Node, edges []*graph.E
 	if g.calls == g.failAt {
 		return g.failure
 	}
-	g.Store.AddBatch(nodes, edges)
+	g.AddBatch(nodes, edges)
 	if g.cancel != nil {
 		g.cancel()
 	}

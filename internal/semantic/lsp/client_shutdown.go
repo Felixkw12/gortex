@@ -102,7 +102,7 @@ func (c *Client) shutdownBefore(deadline time.Time, alreadyClosed bool) error {
 	// currently owning writeMu; queued ordinary senders recheck closed after
 	// acquiring it and therefore can never write after this barrier.
 	c.writeMu.Lock()
-	c.writeMu.Unlock()
+	c.writeMu.Unlock() //nolint:staticcheck // Physical writer-completion barrier after transport closure; queued senders must observe closed.
 	if c.readerDone != nil {
 		<-c.readerDone
 	}

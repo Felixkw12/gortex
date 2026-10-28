@@ -98,15 +98,11 @@ func checkoutRelPath(root, path string) (string, bool) {
 	return filepath.ToSlash(rel), true
 }
 
-// startCheckoutWatch watches root recursively and calls onChange with the
+// startCheckoutWatchContext watches root recursively and calls onChange with the
 // changed paths (absolute, as the backend reports them) of each batch of
 // events. A nil slice means changes were lost (a queue overflow or a dropped
 // event) and the paths are unknown. matcher carries the repository's exclude
 // and include rules; nil takes the built-in list.
-func startCheckoutWatch(root string, matcher *excludes.Matcher, logger *zap.Logger, onChange func([]string)) (*checkoutWatch, error) {
-	return startCheckoutWatchContext(context.Background(), root, matcher, logger, onChange)
-}
-
 func startCheckoutWatchContext(parent context.Context, root string, matcher *excludes.Matcher, logger *zap.Logger, onChange func([]string)) (*checkoutWatch, error) {
 	if err := parent.Err(); err != nil {
 		return nil, err

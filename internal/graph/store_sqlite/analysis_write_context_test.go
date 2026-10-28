@@ -2,6 +2,7 @@ package store_sqlite
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -185,7 +186,11 @@ func TestOwnedAnalysisTransactionJoinsPhysicalRollbackBeforeNextWriter(t *testin
 	releaseScan := func() { scanOnce.Do(func() { close(scanner.release) }) }
 	t.Cleanup(releaseScan)
 	scanned := make(chan error, 1)
-	go func() { e := rows.Scan(scanner); _ = rows.Close(); scanned <- e }()
+	go func() {
+		scanErr := rows.Scan(scanner)
+		closeErr := rows.Close()
+		scanned <- errors.Join(scanErr, closeErr, rows.Err())
+	}()
 	waitCheckpointSignal(t, scanner.entered)
 	cancel()
 	primary = context.Canceled

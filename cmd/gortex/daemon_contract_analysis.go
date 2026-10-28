@@ -129,7 +129,7 @@ func (r *daemonContractAnalysis) beginClose() {
 		go func() {
 			defer close(r.closeDone)
 			r.baselineAdmissionMu.Lock()
-			r.baselineAdmissionMu.Unlock()
+			r.baselineAdmissionMu.Unlock() //nolint:staticcheck // Actual completion barrier for a previously admitted baseline handoff, not an empty critical section.
 			// All contract owners were canceled above; every physical handoff
 			// still has to finish before this barrier permits backend close.
 			r.repair.Close()
