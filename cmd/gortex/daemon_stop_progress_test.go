@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -204,5 +205,44 @@ func TestDaemonStopWedgedProcessStillKillsAndCleansRuntimeFiles(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Errorf("runtime file %s remains after forced stop: %v", path, err)
 		}
+	}
+}
+
+func TestDaemonStopAndHandoffProgressUseCapturedStoreAfterRuntimeChanges(t *testing.T) {
+	dir := t.TempDir()
+	captured, foreign := filepath.Join(dir, "captured.sqlite"), filepath.Join(dir, "foreign.sqlite")
+	for path, pid := range map[string]int{captured: 123, foreign: 456} {
+		data, err := json.Marshal(store_sqlite.CloseProgress{PID: pid, Phase: "draining"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(store_sqlite.CloseProgressPath(path), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GORTEX_DAEMON_STATEFILE", filepath.Join(dir, "runtime.json"))
+	if err := daemon.WriteRuntimeState(daemon.RuntimeState{PID: os.Getpid(), BackendPath: foreign}); err != nil {
+		t.Fatal(err)
+	}
+	old := daemonCloseProgress
+	daemonCloseProgress = nil
+	t.Cleanup(func() { daemonCloseProgress = old })
+	for _, name := range []string{"ordinary", "handoff"} {
+		t.Run(name, func(t *testing.T) {
+			var reset func()
+			if name == "ordinary" {
+				reset = installDaemonCloseProgressForTarget(&daemonStopTarget{store: &daemonStoreLock{path: captured + ".lock"}})
+			} else {
+				reset = installDaemonCloseProgressForStore(captured)
+			}
+			defer reset()
+			progress, ok := daemonCloseProgressFor(123)
+			if !ok || progress.PID != 123 {
+				t.Fatalf("captured close progress = %+v, %v", progress, ok)
+			}
+			if _, ok := daemonCloseProgressFor(456); ok {
+				t.Fatal("replacement runtime must not supply close progress")
+			}
+		})
 	}
 }

@@ -39,10 +39,18 @@ func resolveDaemonCloseNoProgressBound() time.Duration {
 var daemonCloseProgress func() (store_sqlite.CloseProgress, bool)
 
 func installDaemonCloseProgressForTarget(target *daemonStopTarget) func() {
-	if daemonCloseProgress != nil || target.store == nil {
+	if target.store == nil {
 		return func() {}
 	}
-	path := strings.TrimSuffix(target.store.path, ".lock")
+	return installDaemonCloseProgressForStore(strings.TrimSuffix(target.store.path, ".lock"))
+}
+
+// Both ordinary stop and protocol handoff already captured their store before
+// signaling. Never rediscover it from a possibly replaced ambient runtime.
+func installDaemonCloseProgressForStore(path string) func() {
+	if daemonCloseProgress != nil || strings.TrimSpace(path) == "" {
+		return func() {}
+	}
 	daemonCloseProgress = func() (store_sqlite.CloseProgress, bool) { return store_sqlite.ReadCloseProgress(path) }
 	return func() { daemonCloseProgress = nil }
 }
