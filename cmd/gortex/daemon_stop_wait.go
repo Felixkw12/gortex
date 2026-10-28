@@ -147,7 +147,7 @@ func waitForDaemonTarget(w io.Writer, target *daemonStopTarget, grace time.Durat
 			}
 		}
 	}
-	fmt.Fprintln(w, "[gortex daemon] graceful shutdown timed out — rechecking ownership before force-killing")
+	fmt.Fprintln(w, "[gortex daemon] rechecking captured ownership before force-killing")
 	// QUIT/output may have released the store or changed process/runtime.
 	// Reapply every fence AFTER intent output; pre-QUIT proof cannot authorize
 	// KILL and a blocked output writer must not stale the final lock check.
@@ -157,6 +157,7 @@ func waitForDaemonTarget(w io.Writer, target *daemonStopTarget, grace time.Durat
 	if err := daemonKillCapturedProcess(target.process); err != nil {
 		return daemonStopResult{diagnostic: diagnostic}, fmt.Errorf("kill captured daemon: %w", err)
 	}
+	fmt.Fprintln(w, "[gortex daemon] graceful shutdown timed out — sent force-kill")
 	// A successful signal is not a successful stop. Retain physical ownership
 	// and cleanup errors instead of unconditionally removing PID/socket files.
 	forceDeadline := time.Now().Add(3 * time.Second)

@@ -60,6 +60,7 @@ func TestDaemonStopDumpDefaultAndNonOneKeepExistingKillPath(t *testing.T) {
 			require.False(t, result.diagnostic)
 			require.Error(t, wait())
 			require.NotContains(t, out.String(), "SIGQUIT")
+			require.Contains(t, out.String(), "graceful shutdown timed out — sent force-kill")
 		})
 	}
 }

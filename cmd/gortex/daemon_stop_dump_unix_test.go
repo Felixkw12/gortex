@@ -125,6 +125,7 @@ func TestDaemonStopDumpRefusesLateFreeAndUnknownOrReusedOwnership(t *testing.T) 
 			if mode == "late-free" {
 				require.NoError(t, out.err)
 				require.NoError(t, err)
+				require.NotContains(t, out.String(), "timed out", "late free-store success was described as a timeout")
 			} else {
 				require.Error(t, err)
 			}
@@ -160,6 +161,7 @@ func TestDaemonStopDumpIgnoredQuitCannotAuthorizeKillAfterLateStoreRelease(t *te
 	require.NoError(t, out.err)
 	require.True(t, result.diagnostic)
 	require.False(t, result.forced)
+	require.NotContains(t, out.String(), "timed out", "late release after QUIT was described as a KILL timeout")
 	running, err := target.process.Running()
 	require.NoError(t, err)
 	require.True(t, running, "ignored-QUIT child was killed after its store became free")
