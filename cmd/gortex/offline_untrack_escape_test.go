@@ -111,15 +111,29 @@ func TestOfflineUntrackEscapeHatch(t *testing.T) {
 		logPath = filepath.Join(root, fmt.Sprintf("daemon-%d.log", run))
 		log, openErr := os.Create(logPath)
 		require.NoError(t, openErr)
-		cmd := exec.Command(binary, "daemon", "start", "--backend", "sqlite", "--backend-path", storePath, "--embeddings=false", "--no-progress")
+		// Match the existing native fixture's owned cancellation shape: ask
+		// this private daemon to stop before exec's last-resort bounded kill.
+		deadline := time.Now().Add(5 * time.Minute)
+		if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-30*time.Second).Before(deadline) {
+			deadline = testDeadline.Add(-30 * time.Second)
+		}
+		require.True(t, deadline.After(time.Now()), "insufficient test deadline for owned daemon cleanup")
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		cmd := exec.CommandContext(ctx, binary, "daemon", "start", "--backend", "sqlite", "--backend-path", storePath, "--embeddings=false", "--no-progress")
+		cmd.Cancel = func() error {
+			_, stopErr := command(6*time.Second, "daemon", "stop")
+			return stopErr
+		}
+		cmd.WaitDelay = 10 * time.Second
 		cmd.Env, cmd.Dir, cmd.Stdout, cmd.Stderr = env, root, log, log
 		if startErr := cmd.Start(); startErr != nil {
+			cancel()
 			_ = log.Close()
 			t.Fatal(startErr)
 		}
 		child = cmd
 		exited = make(chan error, 1)
-		go func() { waitErr := cmd.Wait(); _ = log.Close(); exited <- waitErr }()
+		go func() { waitErr := cmd.Wait(); cancel(); _ = log.Close(); exited <- waitErr }()
 	}
 	stop := func(label string) {
 		started := time.Now()
@@ -146,7 +160,10 @@ func TestOfflineUntrackEscapeHatch(t *testing.T) {
 		if child != nil {
 			_, _ = command(6*time.Second, "daemon", "stop")
 			select {
-			case <-exited:
+			case waitErr := <-exited:
+				if waitErr != nil {
+					t.Errorf("owned daemon cleanup exit: %v", waitErr)
+				}
 			case <-time.After(10 * time.Second):
 				t.Error("owned daemon required cleanup SIGKILL; gate failed")
 				_ = child.Process.Kill()
