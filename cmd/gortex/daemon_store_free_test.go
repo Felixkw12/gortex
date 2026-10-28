@@ -93,8 +93,9 @@ func TestDaemonStoreFreeProbeRetainsUnlockErrorAndClosesPhysicalLock(t *testing.
 	require.ErrorIs(t, err, failure)
 	require.False(t, free)
 	require.NotNil(t, opened)
-	_, err = opened.Stat()
-	require.ErrorIs(t, err, os.ErrClosed)
+	// A second Close has the portable os.ErrClosed contract. Stat on a
+	// closed Windows file may instead return native ERROR_INVALID_HANDLE.
+	require.ErrorIs(t, opened.Close(), os.ErrClosed)
 	owner := flock.New(backend + ".lock")
 	held, err := owner.TryLock()
 	require.NoError(t, err)

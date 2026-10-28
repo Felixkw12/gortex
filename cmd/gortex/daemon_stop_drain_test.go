@@ -282,7 +282,7 @@ func TestDaemonStopKeepsItsScheduleWithoutAnEstimate(t *testing.T) {
 	out := f.stderr.String()
 
 	assert.Equal(t, int32(1), f.kills.Load(), "a daemon with no reported backlog keeps the old no-ack schedule")
-	assert.Contains(t, out, "graceful shutdown timed out — force-killing")
+	assert.Contains(t, out, "graceful shutdown timed out — sent force-kill")
 	assert.NotContains(t, out, "draining")
 }
 
