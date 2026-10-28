@@ -1320,6 +1320,16 @@ func formatPendingFrames(n int64) string {
 // prints a progress line every daemonDrainProgressPeriod so a long stop is
 // visibly waiting on the WAL rather than hung.
 func waitForDaemonExitWithin(w io.Writer, pid int, grace time.Duration, draining bool) {
+	forced, err := waitForDaemonExitChecked(w, pid, grace, draining, daemonProcessAlive, daemonKillProcess)
+	if forced && err == nil {
+		_ = os.Remove(daemon.PIDFilePath())
+		_ = os.Remove(daemon.SocketPath())
+	}
+}
+
+// The handoff supplies birth-identity guards instead of trusting a PID file
+// after a long close. Ordinary stop keeps its existing process-control seams.
+func waitForDaemonExitChecked(w io.Writer, pid int, grace time.Duration, draining bool, alive func(int) bool, kill func(int) error) (bool, error) {
 	if w == nil {
 		w = os.Stderr
 	}
@@ -1328,8 +1338,8 @@ func waitForDaemonExitWithin(w io.Writer, pid int, grace time.Duration, draining
 	nextProgress := start.Add(daemonDrainProgressPeriod)
 	extended := false
 	for {
-		if !daemonProcessAlive(pid) {
-			return
+		if !alive(pid) {
+			return false, nil
 		}
 		now := time.Now()
 		progress, reporting := daemonCloseProgressFor(pid)
@@ -1367,12 +1377,16 @@ func waitForDaemonExitWithin(w io.Writer, pid int, grace time.Duration, draining
 	// half-exited daemon clutching the lock — force it, then clean up the
 	// socket/PID so the next start isn't tripped by stale files.
 	fmt.Fprintln(w, "[gortex daemon] graceful shutdown timed out — force-killing")
-	_ = daemonKillProcess(pid)
-	for i := 0; i < 60 && daemonProcessAlive(pid); i++ {
+	if err := kill(pid); err != nil {
+		return true, err
+	}
+	for i := 0; i < 60 && alive(pid); i++ {
 		time.Sleep(50 * time.Millisecond)
 	}
-	_ = os.Remove(daemon.PIDFilePath())
-	_ = os.Remove(daemon.SocketPath())
+	if alive(pid) {
+		return true, fmt.Errorf("daemon process %d did not exit after force-kill", pid)
+	}
+	return true, nil
 }
 
 // daemonStatusBeforeStop best-effort-fetches the daemon's reported uptime via
