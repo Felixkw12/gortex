@@ -35,9 +35,10 @@ func TestOfflineUntrackEscapeHatch(t *testing.T) {
 	}
 	binary := os.Getenv("GORTEX_E2E_BINARY")
 	require.True(t, filepath.IsAbs(binary), "GORTEX_E2E_BINARY must name the pinned absolute binary")
-	root := testenv.ShortTempDir(t)
+	root := t.TempDir()
+	socketDir := testenv.ShortTempDir(t)
 	// Registered before owned-child cleanup: its joined logs are dumped before
-	// ShortTempDir removes the fixture, including on startup/cleanup failures.
+	// temporary directories are removed, including on startup/cleanup failures.
 	t.Cleanup(func() {
 		if !t.Failed() {
 			return
@@ -85,7 +86,7 @@ func TestOfflineUntrackEscapeHatch(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "xdg-state"))
-	t.Setenv("GORTEX_DAEMON_SOCKET", filepath.Join(root, "s"))
+	t.Setenv("GORTEX_DAEMON_SOCKET", filepath.Join(socketDir, "s"))
 	t.Setenv("GORTEX_DAEMON_PIDFILE", filepath.Join(root, "p"))
 	t.Setenv("GORTEX_DAEMON_STATEFILE", filepath.Join(root, "state"))
 	t.Setenv("GORTEX_AUTOSTART", "off")
@@ -163,6 +164,7 @@ func TestOfflineUntrackEscapeHatch(t *testing.T) {
 			t.Fatal(startErr)
 		}
 		child = cmd
+		t.Logf("owned daemon run=%d pid=%d root=%s socket=%s", run, cmd.Process.Pid, root, daemon.SocketPath())
 		exited = make(chan error, 1)
 		go func() { waitErr := cmd.Wait(); cancel(); _ = log.Close(); exited <- waitErr }()
 	}
