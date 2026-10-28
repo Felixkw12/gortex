@@ -251,6 +251,10 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	}
 	logger, closeLog := configureDaemonLogger(newLogger(), logPolicy, daemon.LogFilePath(), &os.Stderr, &os.Stdout)
 	defer closeLog()
+	exitGuard, guardErr := installDaemonExitGuard(daemon.LogFilePath(), os.Stderr)
+	if guardErr != nil {
+		logger.Warn("daemon: shutdown diagnostic log unavailable", zap.Error(guardErr))
+	}
 	if configErr != nil {
 		logger.Warn("daemon: could not read log policy — using defaults", zap.Error(configErr))
 	}
@@ -271,6 +275,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	}
 
 	srv := daemon.New(daemon.SocketPath(), canonicalVersion(), logger)
+	srv.OnShutdownComplete = exitGuard.runtimeClosed
 
 	// Record whether `--embeddings` was set explicitly so
 	// buildDaemonState can let it override the `embedding:` config
@@ -426,7 +431,11 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			// The shared stack's teardown chain flushes the savings store and
 			// closes the backend handle, checkpointing the sqlite WAL.
 			if state.shared != nil {
-				return state.shared.Close()
+				err := state.shared.Close()
+				// Observe the actual store/sidecar close, separately from
+				// diagnostic contract-drain warnings in the outer receipt.
+				exitGuard.sharedClosed(err)
+				return err
 			}
 			if state.mcpServer != nil {
 				return state.mcpServer.FlushSavings()
@@ -826,7 +835,12 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	// is canceled before deferred health/janitor joins, not only when the later
 	// once-guarded backend teardown is reached.
 	defer warmupTask.cancel()
-	return srv.Serve()
+	serveErr := srv.Serve()
+	// Record a real error before deferred cleanup can complete both receipts.
+	// The watchdog must preserve normal error exit codes if an outer finalizer
+	// subsequently blocks. The usual execute error path remains unchanged.
+	exitGuard.setExitCode(serveErr)
+	return serveErr
 }
 
 // installDaemonTeardown wires one once-guarded teardown into both of the

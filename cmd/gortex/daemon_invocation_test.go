@@ -38,6 +38,7 @@ func TestForegroundDaemonRecordsBeforeTeardownAndNeverReopensPostRunSidecar(t *t
 	require.EqualValues(t, 1, roll.Counts["cli_command:daemon.start"])
 	sc, err := persistence.OpenSidecar(path)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = sc.Close() })
 	rows, err := sc.CLIEventsBySession("foreground-invocation")
 	require.NoError(t, err)
 	require.Len(t, rows, 1, "invocation was not durable before teardown")

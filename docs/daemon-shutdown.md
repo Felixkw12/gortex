@@ -1,4 +1,24 @@
-# SQLite shutdown checkpoint policy
+# Daemon shutdown
+
+## Final process cleanup
+
+The foreground daemon keeps an exit watchdog through Cobra and terminal cleanup.
+It starts only after both the actual shared-stack close and the actual owned
+runtime/descriptor cleanup succeed. Contract-drain diagnostic warnings alone do
+not negate a successful shared close; actual close errors prevent the watchdog
+from arming. Producer joins still precede backend close.
+
+If outer cleanup remains stuck, a best-effort goroutine snapshot starts after
+two seconds and an independent exit deadline fires after three seconds. The
+deadline does not wait for logging, filesystem sync or stderr. Its diagnostic
+log handle is opened before the graph and retained until process exit, so it
+survives the command logger's close; rotation may rename that pinned log inode.
+A missing completion marker means the dump is incomplete. Normal completion
+disarms without joining a potentially blocked diagnostic writer. These bounds
+start after successful store/runtime cleanup; they do not bound earlier owner
+joins, SQLite BEGIN, filesystem sync or legacy algorithm work.
+
+## SQLite checkpoint policy
 
 Closing the store skips its final WAL `TRUNCATE` checkpoint by default. Committed WAL frames remain available for recovery on the next open. Every graph-store connection disables SQLite's implicit last-connection checkpoint, so closing the connection cannot secretly repeat that copy.
 
