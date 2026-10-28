@@ -509,15 +509,20 @@ func TestRelayProxySessionDoesNotReplayCompletedRequestAfterDisconnect(t *testin
 				done <- relayProxySession(ctx, testProxyHandshake(), initialClient, stdinR, stdoutW, io.Discard, nil, nil)
 			}()
 			defer func() {
-				cancel()
+				// Keep relay I/O valid until genuine stdin EOF has stopped and
+				// joined the relay. Closing its read/output pipes first races
+				// teardown into an unrelated io.ErrClosedPipe failure.
+				defer func() {
+					cancel()
+					_ = stdinR.Close()
+					_ = stdoutR.Close()
+					_ = stdoutW.Close()
+					_ = initialDaemon.Close()
+					_ = recoveredDaemon.Close()
+					_ = initialClient.Close()
+					_ = recoveredClient.Close()
+				}()
 				_ = stdinW.Close()
-				_ = stdinR.Close()
-				_ = stdoutR.Close()
-				_ = stdoutW.Close()
-				_ = initialDaemon.Close()
-				_ = recoveredDaemon.Close()
-				_ = initialClient.Close()
-				_ = recoveredClient.Close()
 				waitRelay(t, done)
 			}()
 
