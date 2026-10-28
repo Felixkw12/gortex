@@ -124,21 +124,23 @@ func TestOfflineUntrackEscapeHatch(t *testing.T) {
 	stop := func(label string) {
 		started := time.Now()
 		output, stopErr := command(6*time.Second, "daemon", "stop")
-		elapsed := time.Since(started)
-		t.Logf("%s stop=%s output=%s", label, elapsed, output)
+		cliElapsed := time.Since(started)
+		t.Logf("%s cli_stop=%s output=%s", label, cliElapsed, output)
 		require.NoError(t, stopErr)
-		require.LessOrEqual(t, elapsed, 5*time.Second)
 		select {
 		case waitErr := <-exited:
 			pid := child.Process.Pid
 			child = nil // The captured child is reaped even if the assertion fails.
 			require.NoError(t, waitErr, "captured daemon must exit normally, without SIGKILL")
 			t.Logf("%s pid=%d sigkill=false", label, pid)
-		case <-time.After(2 * time.Second):
-			t.Fatal("stop returned before the captured daemon exited")
+		case <-time.After(5*time.Second - time.Since(started)):
+			t.Fatal("captured daemon did not exit within the complete 5-second stop budget")
 		}
 		_, statErr := os.Lstat(daemon.SocketPath())
 		require.True(t, os.IsNotExist(statErr), "stop must remove the socket")
+		elapsed := time.Since(started)
+		t.Logf("%s complete_stop=%s cli_stop=%s socket_removed=true", label, elapsed, cliElapsed)
+		require.LessOrEqual(t, elapsed, 5*time.Second, "budget includes CLI startup, captured join and socket removal")
 	}
 	t.Cleanup(func() {
 		if child != nil {
@@ -226,7 +228,12 @@ func TestOfflineUntrackEscapeHatch(t *testing.T) {
 
 func offlineUntrackColdStarted(data []byte, prefix string) bool {
 	for _, line := range bytes.Split(data, []byte("\n")) {
-		var event struct{ Msg, Repo string }
+		// newLoggerConfig uses zap's production JSON message key; the
+		// admitted full-index event in indexer.go supplies the repo prefix.
+		var event struct {
+			Msg  string `json:"msg"`
+			Repo string `json:"repo"`
+		}
 		if json.Unmarshal(line, &event) == nil && event.Msg == "indexer: full index started" && event.Repo == prefix {
 			return true
 		}
