@@ -994,7 +994,10 @@ func TestFacadeToolHonoursTheUndeclaredFreshnessKnobs(t *testing.T) {
 	waiter := &fakeFreshnessWaiter{
 		answerCtx: func(ctx context.Context, _ int, _, _ string) (*indexer.CheckoutRefreshTicket, error) {
 			observed, _ := ctx.Deadline()
-			admittedDeadline <- observed
+			select {
+			case admittedDeadline <- observed:
+			default: // observed-call census below still rejects a second admission
+			}
 			return nil, indexer.ErrCheckoutRefreshStopped
 		},
 	}
