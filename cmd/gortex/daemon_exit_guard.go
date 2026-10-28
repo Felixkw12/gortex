@@ -168,9 +168,10 @@ func dumpDaemonExit(log *os.File, stderr io.Writer, sinkErr error) {
 	if err := pprof.Lookup("goroutine").WriteTo(&b, 2); err != nil {
 		return
 	}
-	// Attempt both sinks independently. A completion marker means the entire
-	// snapshot reached both sinks and the retained daemon log was synced. If a
-	// write blocks or fails, that marker is absent; the exit timer still runs.
+	// Best-effort writes are sequential: a blocked log write/Sync can prevent
+	// reaching stderr. Only the EXIT TIMER is independent. A completion marker
+	// means the entire snapshot reached both sinks and the retained log was
+	// synced; blocked or failed output leaves no completion marker.
 	var logErr error
 	if sinkErr == nil && log != nil {
 		_, logErr = log.Write(b.Bytes())
