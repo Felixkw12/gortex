@@ -165,6 +165,7 @@ type stopFixture struct {
 
 func newStopFixture(t *testing.T, controller *drainingController) *stopFixture {
 	t.Helper()
+	t.Setenv("GORTEX_STOP_DUMP", "0") // Process control is simulated; the test PID is not a diagnostic target.
 	dir := t.TempDir()
 	socket := filepath.Join(os.TempDir(), fmt.Sprintf("gx-stop-drain-%d.sock", os.Getpid()))
 	_ = os.Remove(socket)

@@ -15,10 +15,12 @@ var (
 	daemonCapturedProcessRunning   = func(identity platform.ProcessIdentity) (bool, error) { return identity.Running() }
 	daemonKillCapturedProcess      = func(identity platform.ProcessIdentity) error { return identity.Kill() }
 	daemonTerminateCapturedProcess = func(identity platform.ProcessIdentity) error { return identity.Terminate() }
+	daemonDiagnosticTerminate      = func(identity platform.ProcessIdentity) error { return identity.DiagnosticTerminate() }
 )
 
 type daemonStopResult struct {
-	forced bool
+	forced     bool
+	diagnostic bool // Actual SIGQUIT sent, not proof that a dump completed.
 }
 
 func (t *daemonStopTarget) completeStop(w io.Writer) (bool, error) {
@@ -117,30 +119,43 @@ func waitForDaemonTarget(w io.Writer, target *daemonStopTarget, grace time.Durat
 		}
 		break
 	}
-	if running, err := target.processRunning(); err != nil || !running {
-		return daemonStopResult{}, errors.Join(errors.New("daemon still owns its store but no signalable captured process is running"), err)
-	}
-	if _, err := target.runtimeGone(); err != nil {
-		return daemonStopResult{}, fmt.Errorf("refusing force with changed runtime ownership: %w", err)
-	}
-	if err := target.requireSignalOwner(); err != nil {
-		return daemonStopResult{}, err
-	}
-	// Recheck immediately before signaling: close may have finished while
-	// the incarnation/runtime guards were being read. Never ignore an
-	// observed free store just because an earlier poll saw its lock held.
-	if free, err := target.storeFree(); err != nil {
-		return daemonStopResult{}, err
-	} else if free {
-		complete, err := target.completeStop(w)
-		if complete || err != nil {
-			return daemonStopResult{}, err
+	diagnostic := false
+	if os.Getenv("GORTEX_STOP_DUMP") == "1" {
+		if runtime.GOOS == "windows" {
+			fmt.Fprintln(w, "[gortex daemon] SIGQUIT diagnostic termination is unavailable on Windows; continuing the existing force-stop path")
+		} else {
+			fmt.Fprintln(w, "[gortex daemon] rechecking ownership before SIGQUIT diagnostic termination (fatal with Go's default handler; dump completion is not guaranteed)")
+			if complete, err := fenceCapturedDaemonSignal(w, target); complete || err != nil {
+				return daemonStopResult{}, err
+			}
+			if err := daemonDiagnosticTerminate(target.process); err != nil {
+				return daemonStopResult{}, fmt.Errorf("diagnostic SIGQUIT captured daemon: %w", err)
+			}
+			diagnostic = true
+			// Do not immediately truncate a default Go SIGQUIT dump with KILL.
+			// This is one bounded completion allowance, never a mutation retry.
+			until := time.Now().Add(time.Second)
+			for {
+				complete, err := target.completeStop(w)
+				if complete || err != nil {
+					return daemonStopResult{diagnostic: true}, err
+				}
+				if !time.Now().Before(until) {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
 		}
-		return daemonStopResult{}, errors.New("daemon store became free; captured runtime cleanup is still pending, process left unsignaled")
 	}
-	fmt.Fprintln(w, "[gortex daemon] graceful shutdown timed out — force-killing")
+	fmt.Fprintln(w, "[gortex daemon] graceful shutdown timed out — rechecking ownership before force-killing")
+	// QUIT/output may have released the store or changed process/runtime.
+	// Reapply every fence AFTER intent output; pre-QUIT proof cannot authorize
+	// KILL and a blocked output writer must not stale the final lock check.
+	if complete, err := fenceCapturedDaemonSignal(w, target); complete || err != nil {
+		return daemonStopResult{diagnostic: diagnostic}, err
+	}
 	if err := daemonKillCapturedProcess(target.process); err != nil {
-		return daemonStopResult{}, fmt.Errorf("kill captured daemon: %w", err)
+		return daemonStopResult{diagnostic: diagnostic}, fmt.Errorf("kill captured daemon: %w", err)
 	}
 	// A successful signal is not a successful stop. Retain physical ownership
 	// and cleanup errors instead of unconditionally removing PID/socket files.
@@ -148,13 +163,40 @@ func waitForDaemonTarget(w io.Writer, target *daemonStopTarget, grace time.Durat
 	for {
 		complete, err := target.completeStop(w)
 		if complete {
-			return daemonStopResult{forced: true}, nil
+			return daemonStopResult{forced: true, diagnostic: diagnostic}, nil
 		}
 		if !time.Now().Before(forceDeadline) {
-			return daemonStopResult{}, errors.Join(errors.New("captured daemon did not release its store and runtime after force-kill"), err)
+			return daemonStopResult{diagnostic: diagnostic}, errors.Join(errors.New("captured daemon did not release its store and runtime after force-kill"), err)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// Reused for the actual QUIT and KILL steps. Store-free is checked last, after
+// native/runtime reads. Unknown/reused ownership never authorizes a signal.
+func fenceCapturedDaemonSignal(w io.Writer, target *daemonStopTarget) (bool, error) {
+	if complete, err := target.completeStop(w); complete || err != nil {
+		return complete, err
+	}
+	if running, err := target.processRunning(); err != nil || !running {
+		return false, errors.Join(errors.New("daemon still owns its store but no signalable captured process is running"), err)
+	}
+	if _, err := target.runtimeGone(); err != nil {
+		return false, fmt.Errorf("refusing force with changed runtime ownership: %w", err)
+	}
+	if err := target.requireSignalOwner(); err != nil {
+		return false, err
+	}
+	if free, err := target.storeFree(); err != nil {
+		return false, err
+	} else if free {
+		complete, err := target.completeStop(w)
+		if complete || err != nil {
+			return complete, err
+		}
+		return false, errors.New("daemon store became free; captured runtime cleanup is still pending, process left unsignaled")
+	}
+	return false, nil
 }
 
 func terminateCapturedDaemon(w io.Writer, target *daemonStopTarget) (daemonStopResult, error) {

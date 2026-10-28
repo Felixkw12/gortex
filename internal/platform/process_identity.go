@@ -86,3 +86,9 @@ func (p ProcessIdentity) Terminate() error { return signalProcessIdentity(p, fal
 // Kill forcibly terminates this incarnation, with the same identity safeguards
 // and Unix check-to-signal limitation as Terminate.
 func (p ProcessIdentity) Kill() error { return signalProcessIdentity(p, true) }
+
+// DiagnosticTerminate sends SIGQUIT to this incarnation on Unix. Go's default
+// SIGQUIT handler dumps goroutines and TERMINATES the process; this is not a
+// nonfatal snapshot request. Windows has no equivalent and returns an error.
+// The Unix birth-check/PID-signal race is the same as Terminate and Kill.
+func (p ProcessIdentity) DiagnosticTerminate() error { return quitProcessIdentity(p) }

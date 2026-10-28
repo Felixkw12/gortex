@@ -45,6 +45,25 @@ func TestDaemonStopFreeStoreAndGoneRuntimeNeverKillsLiveFinalizer(t *testing.T) 
 	require.NoError(t, wait())
 }
 
+func TestDaemonStopDumpDefaultAndNonOneKeepExistingKillPath(t *testing.T) {
+	for _, value := range []string{"", "true"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("GORTEX_STOP_DUMP", value)
+			target, _, wait, _ := ownedStopTarget(t)
+			previous := daemonDiagnosticTerminate
+			daemonDiagnosticTerminate = func(platform.ProcessIdentity) error { t.Error("diagnostic was not opted in"); return nil }
+			t.Cleanup(func() { daemonDiagnosticTerminate = previous })
+			var out bytes.Buffer
+			result, err := waitForDaemonTarget(&out, target, 0, false)
+			require.NoError(t, err)
+			require.True(t, result.forced)
+			require.False(t, result.diagnostic)
+			require.Error(t, wait())
+			require.NotContains(t, out.String(), "SIGQUIT")
+		})
+	}
+}
+
 func TestDaemonStopForceActuallyReleasesAndReapsOnlyOwnedChild(t *testing.T) {
 	unrelated, exitUnrelated, waitUnrelated, _ := ownedStopTarget(t)
 	target, _, wait, _ := ownedStopTarget(t)

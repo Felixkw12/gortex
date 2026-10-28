@@ -69,6 +69,9 @@ func TestProcessIdentityRefusesUnknownAndChangedIncarnations(t *testing.T) {
 	if err := (ProcessIdentity{}).Kill(); err == nil {
 		t.Fatal("signaled an unknown identity")
 	}
+	if err := (ProcessIdentity{}).DiagnosticTerminate(); err == nil {
+		t.Fatal("sent diagnostic termination to an unknown identity")
+	}
 	child, closeInput, wait := identityChild(t)
 	if child.PID() <= 0 {
 		t.Fatal("lost captured PID")
@@ -97,7 +100,7 @@ func TestProcessIdentityRefusesUnknownAndChangedIncarnations(t *testing.T) {
 	if running, err := changed.Running(); running || !errors.Is(err, ErrProcessIdentityChanged) {
 		t.Fatalf("changed incarnation must remain a state error: running=%v error=%v", running, err)
 	}
-	for _, signal := range []func() error{changed.Terminate, changed.Kill} {
+	for _, signal := range []func() error{changed.Terminate, changed.Kill, changed.DiagnosticTerminate} {
 		if err := signal(); err == nil {
 			t.Fatal("accepted signal for another incarnation")
 		}

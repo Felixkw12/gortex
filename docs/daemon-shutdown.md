@@ -48,6 +48,20 @@ A positive deadline can interrupt SQLite admission or SQL work; it cannot guaran
 
 ## Stop ownership and older daemons
 
+`GORTEX_STOP_DUMP=1 gortex daemon stop` opts into **diagnostic termination** on
+Unix only, when the ordinary shutdown/TERM grace and any advancing-close wait
+have been exhausted. The CLI rechecks the captured incarnation, runtime and
+existing store lock, sends SIGQUIT, then permits one second for completion.
+Go's default SIGQUIT handler writes a goroutine dump to the daemon's stderr and
+terminates the process; this is neither a nonfatal snapshot nor a promise that
+the dump completed. If the daemon still owns its store, the CLI repeats all
+ownership/store-free checks before the existing KILL fallback. Output records
+QUIT-only versus QUIT followed by KILL; signal errors remain errors. A free,
+unknown or changed target is never authorized by an earlier poll. Windows
+reports SIGQUIT unavailable and retains its existing force-stop path without a
+substitute diagnostic signal. Only the exact value `1` opts in; default stop
+behavior is unchanged.
+
 The CLI captures the daemon's declared store, existing lock identity, runtime files and native process incarnation before requesting shutdown. Success requires the captured lock to be free and the old runtime files to be gone. A still-visible process may be exiting or awaiting parent reaping; a free store is not a reason to kill it. Missing or replaced lock files remain unknown, and failed signals or cleanup are returned as errors.
 
 New runtime records include an optional native process-birth token. Linux tokens include the boot ID because process start ticks are boot-relative. A present mismatched token is refused. Older JSON remains readable, and normal control-socket shutdown remains available. An older daemon's successful matching PID probe can authorize a fallback signal after endpoint and native-birth rechecks. Without a matching token or successful matching probe, the CLI refuses a PID-only TERM/KILL fallback with an unknown-owner error: a stale PID may already belong to an unrelated process. This deliberately limits forced shutdown of unreachable older daemons; it does not silently claim a successful stop. An already-reaped recorded daemon can be cleaned only with positive native absence and the captured runtime/store proofs, without any signal or guessed default store.

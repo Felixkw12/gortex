@@ -27,6 +27,7 @@ type fakeClosingDaemon struct {
 
 func (f *fakeClosingDaemon) install(t *testing.T, pid int) {
 	t.Helper()
+	t.Setenv("GORTEX_STOP_DUMP", "0") // This fake names the test process; never emit a real diagnostic signal.
 	dir := t.TempDir()
 	t.Setenv("GORTEX_DAEMON_PIDFILE", filepath.Join(dir, "daemon.pid"))
 	t.Setenv("GORTEX_DAEMON_STATEFILE", filepath.Join(dir, "daemon.state"))

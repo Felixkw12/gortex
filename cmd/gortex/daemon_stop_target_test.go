@@ -8,12 +8,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -47,6 +50,9 @@ func TestDaemonStopTargetChild(t *testing.T) {
 	backend := os.Getenv("GORTEX_TEST_STOP_TARGET_BACKEND")
 	if backend == "" {
 		return
+	}
+	if os.Getenv("GORTEX_TEST_STOP_IGNORE_QUIT") == "1" {
+		signal.Ignore(syscall.SIGQUIT) // Explicit Unix diagnostic-escalation fixture.
 	}
 	// TestMain intentionally replaces inherited production daemon overrides.
 	// Reapply only these explicit test-owned paths after that sandbox exists;
@@ -117,6 +123,10 @@ func ownedStopTarget(t *testing.T) (*daemonStopTarget, func() error, func() erro
 }
 
 func ownedStopTargetMode(t *testing.T, legacyEndpoint bool) (*daemonStopTarget, func() error, func() error, func() error) {
+	return ownedStopTargetWithStderr(t, legacyEndpoint, nil)
+}
+
+func ownedStopTargetWithStderr(t *testing.T, legacyEndpoint bool, stderr io.Writer) (*daemonStopTarget, func() error, func() error, func() error) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("GORTEX_DAEMON_PIDFILE", filepath.Join(dir, "daemon.pid"))
@@ -128,8 +138,9 @@ func ownedStopTargetMode(t *testing.T, legacyEndpoint bool) (*daemonStopTarget, 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDaemonStopTargetChild$")
+	cmd.Stderr = stderr
 	cmd.Env = append(os.Environ(), "GORTEX_TEST_STOP_TARGET_BACKEND="+filepath.Join(dir, "store.sqlite"),
-		"GORTEX_TEST_STOP_TARGET_ROOT="+dir, "GORTEX_TEST_STOP_TARGET_SOCKET="+daemon.SocketPath(), "GORACE=atexit_sleep_ms=0")
+		"GORTEX_TEST_STOP_TARGET_ROOT="+dir, "GORTEX_TEST_STOP_TARGET_SOCKET="+daemon.SocketPath(), "GORACE=atexit_sleep_ms=0", "GOTRACEBACK=all")
 	if legacyEndpoint {
 		cmd.Env = append(cmd.Env, "GORTEX_TEST_STOP_LEGACY_ENDPOINT=1")
 	}

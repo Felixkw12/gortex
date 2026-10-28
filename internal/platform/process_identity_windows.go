@@ -61,3 +61,7 @@ func signalProcessIdentity(p ProcessIdentity, _ bool) (err error) {
 	}
 	return windows.TerminateProcess(handle, 1)
 }
+
+func quitProcessIdentity(ProcessIdentity) error {
+	return errors.New("SIGQUIT diagnostic termination is unavailable on Windows")
+}

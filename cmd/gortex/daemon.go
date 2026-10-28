@@ -1327,6 +1327,14 @@ func reportCapturedDaemonStop(w io.Writer, result daemonStopResult, err error, s
 	if err != nil {
 		return err
 	}
+	if result.diagnostic {
+		if result.forced {
+			fmt.Fprintln(w, "[gortex daemon] stopped (SIGQUIT diagnostic termination attempted, then force-killed; store free and runtime removed)")
+		} else {
+			fmt.Fprintln(w, "[gortex daemon] stopped (SIGQUIT diagnostic termination requested; store free and runtime removed)")
+		}
+		return nil
+	}
 	if result.forced {
 		fmt.Fprintln(w, "[gortex daemon] stopped (force-killed; store free and runtime removed)")
 		return nil
