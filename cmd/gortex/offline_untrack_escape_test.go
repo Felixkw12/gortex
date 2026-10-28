@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +36,36 @@ func TestOfflineUntrackEscapeHatch(t *testing.T) {
 	binary := os.Getenv("GORTEX_E2E_BINARY")
 	require.True(t, filepath.IsAbs(binary), "GORTEX_E2E_BINARY must name the pinned absolute binary")
 	root := testenv.ShortTempDir(t)
+	// Registered before owned-child cleanup: its joined logs are dumped before
+	// ShortTempDir removes the fixture, including on startup/cleanup failures.
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for run := 1; run <= 2; run++ {
+			path := filepath.Join(root, fmt.Sprintf("daemon-%d.log", run))
+			file, err := os.Open(path)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				t.Logf("owned daemon log %s unavailable: %v", path, err)
+				continue
+			}
+			info, statErr := file.Stat()
+			if statErr == nil {
+				const limit = int64(32 << 10)
+				offset := max(int64(0), info.Size()-limit)
+				data, readErr := io.ReadAll(io.NewSectionReader(file, offset, limit))
+				t.Logf("owned daemon log %s tail offset=%d read_error=%v:\n%s", path, offset, readErr, data)
+			} else {
+				t.Logf("owned daemon log %s stat: %v", path, statErr)
+			}
+			if err := file.Close(); err != nil {
+				t.Logf("owned daemon log %s close: %v", path, err)
+			}
+		}
+	})
 	home := filepath.Join(root, "home")
 	require.NoError(t, os.MkdirAll(home, 0o700))
 	// Both service detectors first require their HOME-relative installed unit
