@@ -4,10 +4,11 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
-	"github.com/stretchr/testify/require"
-	sqlite "modernc.org/sqlite"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+	sqlite "modernc.org/sqlite"
 )
 
 type unsupportedClosePolicyConn struct {
