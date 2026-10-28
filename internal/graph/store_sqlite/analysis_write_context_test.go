@@ -2,7 +2,6 @@ package store_sqlite
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -185,11 +184,12 @@ func TestOwnedAnalysisTransactionJoinsPhysicalRollbackBeforeNextWriter(t *testin
 	var scanOnce sync.Once
 	releaseScan := func() { scanOnce.Do(func() { close(scanner.release) }) }
 	t.Cleanup(releaseScan)
-	scanned := make(chan error, 1)
+	type scanReceipt struct{ scan, close, iteration error }
+	scanned := make(chan scanReceipt, 1)
 	go func() {
 		scanErr := rows.Scan(scanner)
 		closeErr := rows.Close()
-		scanned <- errors.Join(scanErr, closeErr, rows.Err())
+		scanned <- scanReceipt{scan: scanErr, close: closeErr, iteration: rows.Err()}
 	}()
 	waitCheckpointSignal(t, scanner.entered)
 	cancel()
@@ -207,7 +207,13 @@ func TestOwnedAnalysisTransactionJoinsPhysicalRollbackBeforeNextWriter(t *testin
 	default:
 	}
 	releaseScan()
-	require.NoError(t, <-scanned)
+	scan := <-scanned
+	require.NoError(t, scan.scan)
+	require.NoError(t, scan.close)
+	// database/sql.Tx.rollback cancels its own context before joining rows;
+	// Rows.awaitDone may retain that exact cancellation. Do not hide another
+	// iterator error (including an error joined with context.Canceled).
+	require.True(t, scan.iteration == nil || scan.iteration == context.Canceled, "unexpected iterator completion error: %v", scan.iteration)
 	waitCheckpointSignal(t, finished)
 	require.ErrorIs(t, primary, context.Canceled)
 	require.NoError(t, <-next)
