@@ -587,9 +587,13 @@ func (s *Server) handshake(conn net.Conn, reader *bufio.Reader) (*Session, error
 		})
 		return nil, fmt.Errorf("parse handshake: %w", err)
 	}
+	protocol := ProtocolVersion
 	if h.Version != ProtocolVersion {
 		_ = WriteJSONLine(conn, HandshakeAck{
-			ErrorCode: ErrProtocolMismatch,
+			ErrorCode:      ErrProtocolMismatch,
+			DaemonVersion:  s.Version,
+			DaemonProtocol: &protocol,
+			DaemonInstance: s.instanceID,
 			ErrorMsg: fmt.Sprintf("daemon expects protocol %d, client sent %d",
 				ProtocolVersion, h.Version),
 		})
@@ -610,6 +614,7 @@ func (s *Server) handshake(conn net.Conn, reader *bufio.Reader) (*Session, error
 		SessionID:      sess.ID,
 		DaemonVersion:  s.Version,
 		DaemonInstance: s.instanceID,
+		DaemonProtocol: &protocol,
 	}
 	// Stamp warmup state so the client can tell a still-warming daemon from a
 	// ready one. The session is established either way — Warming is advisory.

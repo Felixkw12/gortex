@@ -1456,6 +1456,68 @@ func waitForDaemonExitWithin(w io.Writer, pid int, grace time.Duration, draining
 	return err
 }
 
+// Protocol handoff supplies its captured socket/process birth guards. Ordinary
+// stop uses the captured target and store/runtime release proof above.
+func waitForDaemonExitChecked(w io.Writer, pid int, grace time.Duration, draining bool, alive func(int) bool, kill func(int) error) (bool, error) {
+	if w == nil {
+		w = os.Stderr
+	}
+	start := time.Now()
+	deadline := start.Add(grace)
+	nextProgress := start.Add(daemonDrainProgressPeriod)
+	extended := false
+	for {
+		if !alive(pid) {
+			return false, nil
+		}
+		now := time.Now()
+		progress, reporting := daemonCloseProgressFor(pid)
+		if now.Before(deadline) {
+			if (draining || reporting) && daemonDrainProgressPeriod > 0 && !now.Before(nextProgress) {
+				fmt.Fprintf(w, "[gortex daemon] still draining the WAL: %s of up to %s%s\n",
+					now.Sub(start).Truncate(time.Second), grace.Truncate(time.Second), describeCloseProgress(progress, reporting, now))
+				nextProgress = now.Add(daemonDrainProgressPeriod)
+			}
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		// Past the grace. A close that is still copying loses its whole copy
+		// if killed (a checkpoint publishes its progress only when the pass
+		// ends), so the wait is bounded on the interval without progress, not
+		// on a fixed total.
+		if reporting {
+			since := progress.Since(now)
+			if since < daemonCloseNoProgressBound {
+				if !extended || !now.Before(nextProgress) {
+					fmt.Fprintf(w, "[gortex daemon] close still making progress after %s — waiting (last progress %s ago, giving up after %s without progress)%s\n",
+						now.Sub(start).Truncate(time.Second), since.Truncate(time.Second), daemonCloseNoProgressBound, describeCloseProgress(progress, reporting, now))
+					extended = true
+					nextProgress = now.Add(daemonDrainProgressPeriod)
+				}
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			fmt.Fprintf(w, "[gortex daemon] close made no progress for %s (bound %s) after %s — force-killing%s\n",
+				since.Truncate(time.Second), daemonCloseNoProgressBound, now.Sub(start).Truncate(time.Second), describeCloseProgress(progress, reporting, now))
+		}
+		break
+	}
+	// Graceful shutdown stalled (e.g. a wedged cgo call). Don't leave a
+	// half-exited daemon clutching the lock — force it, then clean up the
+	// socket/PID so the next start isn't tripped by stale files.
+	fmt.Fprintln(w, "[gortex daemon] graceful shutdown timed out — force-killing")
+	if err := kill(pid); err != nil {
+		return true, err
+	}
+	for i := 0; i < 60 && alive(pid); i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if alive(pid) {
+		return true, fmt.Errorf("daemon process %d did not exit after force-kill", pid)
+	}
+	return true, nil
+}
+
 // daemonStatusBeforeStop best-effort-fetches the daemon's reported uptime via
 // a Status control before shutdown so the summary card can show how long the
 // process ran. Returns 0 on any error — we'd rather degrade the card than
