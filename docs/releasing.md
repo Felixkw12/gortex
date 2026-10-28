@@ -8,10 +8,11 @@ toolchain/build flags to produce the binary first, then run:
 
 ```sh
 GORTEX_E2E=1 GORTEX_E2E_BINARY=/absolute/path/to/pinned/gortex \
-  go test -run '^TestOfflineUntrackEscapeHatch$' -count=20 -timeout=45m ./cmd/gortex/
+  go test -v -run '^TestOfflineUntrackEscapeHatch$' -count=20 -timeout=45m ./cmd/gortex/
 ```
 
-Retain each logged cold-stop duration and normal child-exit result. Require
+Save the verbose test output for each platform, including every cold-stop and
+offline-untrack duration and normal child-exit result. Require
 20 consecutive passes per platform, every active-cold stop ≤5 seconds, zero
 SIGKILLs, offline absolute-path untrack ≤1 second, a released store lock, and
 the remaining repository ready with zero removed-prefix rows after restart.
