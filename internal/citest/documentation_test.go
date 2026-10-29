@@ -93,9 +93,17 @@ func TestDocumentationUnsafeOwnershipAndContentStayFull(t *testing.T) {
 func TestDocumentationTrackedSymlinkModeIsNotOrdinaryEvenWithRegularCheckout(t *testing.T) {
 	f := newFixture(t)
 	f.git("config", "core.symlinks", "false")
+	f.git("config", "core.autocrlf", "true")
+	f.git("config", "core.safecrlf", "warn")
 	f.write("docs/cli.md", "../README.md\n")
 	f.git("add", "docs/cli.md")
-	blob := f.git("hash-object", "-w", "docs/cli.md")
+	// Symlink payloads are raw blobs, not text-converted checkout files.
+	// Forced CRLF policy reproduces the warning that polluted CombinedOutput
+	// when hash-object applied ordinary Markdown filters on Windows.
+	blob := f.git("hash-object", "-w", "--no-filters", "docs/cli.md")
+	if !commitSHA.MatchString(blob) {
+		t.Fatalf("raw symlink blob hash includes non-identity output: %q", blob)
+	}
 	f.git("update-index", "--cacheinfo", "120000,"+blob+",docs/cli.md")
 	f.git("commit", "-qm", "symlink-mode fixture")
 	head := f.git("rev-parse", "HEAD")
