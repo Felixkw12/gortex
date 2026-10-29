@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"context"
 	"math"
 	"path/filepath"
 	"slices"
@@ -750,6 +751,19 @@ const hotspotBetweennessWeight = 0.4
 // other symbols — that augments the fan-in/out signals rather than replacing them.
 // If threshold <= 0, the default threshold is mean + 2*stddev.
 func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float64) []HotspotEntry {
+	result, _ := FindHotspotsContext(context.Background(), g, communities, threshold)
+	return result
+}
+
+// FindHotspotsContext computes the same ranking, but cancellation makes the
+// entire result unavailable instead of publishing a smaller partial ranking.
+func FindHotspotsContext(ctx context.Context, g graph.Reader, communities *CommunityResult, threshold float64) ([]HotspotEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if ctx.Done() != nil {
+		g = graph.BindReadContext(g, ctx)
+	}
 	// Pull only function/method node IDs — the hotspots ranking is
 	// callable-only, and the scoring math doesn't touch any column
 	// beyond the id. NodeIDsByKinds returns the projection from a
@@ -777,6 +791,9 @@ func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float6
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Build lookup maps for community membership
 	nodeToComm := make(map[string]string)
@@ -789,10 +806,16 @@ func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float6
 	// list -- it never returns rows for ids the caller didn't ask
 	// for, so the cgo payload stays bounded by the candidate count
 	// rather than the whole graph.
-	fanIn, fanOut := CollectFanCounts(g, candidateIDs,
+	fanIn, fanOut, err := collectFanCountsContext(ctx, g, candidateIDs,
 		[]graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences},
 		[]graph.EdgeKind{graph.EdgeCalls},
 	)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Community crossings per node: outgoing edges (Calls or
 	// References) whose target sits in a different community than
@@ -814,7 +837,12 @@ func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float6
 	} else {
 		crossings = make(map[string]int)
 		countCrossings := func(kind graph.EdgeKind) {
+			scanned := 0
 			for e := range g.EdgesByKind(kind) {
+				if scanned&1023 == 0 && ctx.Err() != nil {
+					return
+				}
+				scanned++
 				if e == nil {
 					continue
 				}
@@ -829,11 +857,17 @@ func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float6
 			countCrossings(k)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Betweenness centrality — exact on small graphs, sampled on
 	// large ones. Normalized to 0-100 against the graph's own max so
 	// it sits on the same scale as the other score terms.
-	bc := ComputeBetweenness(g)
+	bc, err := ComputeBetweennessContext(ctx, g)
+	if err != nil {
+		return nil, err
+	}
 	betweenness := make(map[string]float64, len(bc.Scores))
 	if bc.Max > 0 {
 		for id, v := range bc.Scores {
@@ -856,7 +890,12 @@ func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float6
 	}
 
 	entries := make([]rawEntry, 0, len(candidateIDs))
-	for _, id := range candidateIDs {
+	for index, id := range candidateIDs {
+		if index&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		fi := fanIn[id]
 		fo := fanOut[id]
 		cc := crossings[id]
@@ -874,12 +913,17 @@ func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float6
 	}
 
 	if len(entries) == 0 {
-		return nil
+		return nil, ctx.Err()
 	}
 
 	// Find max raw score for normalization
 	maxRaw := 0.0
-	for _, e := range entries {
+	for index, e := range entries {
+		if index&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if e.rawScore > maxRaw {
 			maxRaw = e.rawScore
 		}
@@ -888,6 +932,11 @@ func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float6
 	// Normalize to 0-100
 	normalized := make([]float64, len(entries))
 	for i, e := range entries {
+		if i&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if maxRaw > 0 {
 			normalized[i] = (e.rawScore / maxRaw) * 100.0
 		}
@@ -896,13 +945,23 @@ func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float6
 	// Compute default threshold if not specified: mean + 2*stddev
 	if threshold <= 0 {
 		var sum float64
-		for _, s := range normalized {
+		for index, s := range normalized {
+			if index&1023 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			sum += s
 		}
 		mean := sum / float64(len(normalized))
 
 		var variance float64
-		for _, s := range normalized {
+		for index, s := range normalized {
+			if index&1023 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			diff := s - mean
 			variance += diff * diff
 		}
@@ -921,6 +980,11 @@ func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float6
 	}
 	survivors := make([]survivor, 0, len(entries))
 	for i := range entries {
+		if i&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		score := math.Round(normalized[i]*100) / 100 // round to 2 decimal places
 		if score < threshold {
 			continue
@@ -928,17 +992,30 @@ func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float6
 		survivors = append(survivors, survivor{entryIdx: i, score: score})
 	}
 	if len(survivors) == 0 {
-		return nil
+		return nil, ctx.Err()
 	}
 
 	survivorIDs := make([]string, 0, len(survivors))
-	for _, s := range survivors {
+	for index, s := range survivors {
+		if index&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		survivorIDs = append(survivorIDs, entries[s.entryIdx].id)
 	}
 	nodesByID := g.GetNodesByIDs(survivorIDs)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	result := make([]HotspotEntry, 0, len(survivors))
-	for _, s := range survivors {
+	for index, s := range survivors {
+		if index&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		e := entries[s.entryIdx]
 		n := nodesByID[e.id]
 		if n == nil {
@@ -963,7 +1040,10 @@ func FindHotspots(g graph.Reader, communities *CommunityResult, threshold float6
 		return result[i].ComplexityScore > result[j].ComplexityScore
 	})
 
-	return result
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // isTestFilePath checks if a file path indicates a test file.
@@ -1198,13 +1278,26 @@ func matchesExcludePattern(filePath, nodeID string, patterns []string) bool {
 // keeps them per-call so a future analyzer with a different kind
 // split can share the same plumbing.
 func CollectFanCounts(g graph.Reader, ids []string, fanInKinds []graph.EdgeKind, fanOutKinds []graph.EdgeKind) (fanIn, fanOut map[string]int) {
+	fanIn, fanOut, _ = collectFanCountsContext(context.Background(), g, ids, fanInKinds, fanOutKinds)
+	return fanIn, fanOut
+}
+
+func collectFanCountsContext(ctx context.Context, g graph.Reader, ids []string, fanInKinds []graph.EdgeKind, fanOutKinds []graph.EdgeKind) (fanIn, fanOut map[string]int, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	fanIn = make(map[string]int, len(ids))
 	fanOut = make(map[string]int, len(ids))
 	if len(ids) == 0 {
-		return fanIn, fanOut
+		return fanIn, fanOut, nil
 	}
 	if agg, ok := g.(graph.NodeFanAggregator); ok {
-		for _, r := range agg.NodeFanCounts(ids, fanInKinds, fanOutKinds) {
+		for index, r := range agg.NodeFanCounts(ids, fanInKinds, fanOutKinds) {
+			if index&1023 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, nil, err
+				}
+			}
 			if r.FanIn != 0 {
 				fanIn[r.NodeID] = r.FanIn
 			}
@@ -1212,14 +1305,22 @@ func CollectFanCounts(g graph.Reader, ids []string, fanInKinds []graph.EdgeKind,
 				fanOut[r.NodeID] = r.FanOut
 			}
 		}
-		return fanIn, fanOut
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		return fanIn, fanOut, nil
 	}
 
 	// Fallback path: stream the requested kinds via EdgesByKind and
 	// tally Go-side. ID-set membership keeps the maps bounded to
 	// candidate ids, matching the capability contract.
 	idSet := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
+	for index, id := range ids {
+		if index&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
+		}
 		if id != "" {
 			idSet[id] = struct{}{}
 		}
@@ -1230,7 +1331,12 @@ func CollectFanCounts(g graph.Reader, ids []string, fanInKinds []graph.EdgeKind,
 			return
 		}
 		streamed[kind] = struct{}{}
+		scanned := 0
 		for e := range g.EdgesByKind(kind) {
+			if scanned&1023 == 0 && ctx.Err() != nil {
+				return
+			}
+			scanned++
 			if e == nil {
 				continue
 			}
@@ -1265,9 +1371,15 @@ func CollectFanCounts(g graph.Reader, ids []string, fanInKinds []graph.EdgeKind,
 		allKinds = append(allKinds, k)
 	}
 	for _, k := range allKinds {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		_, toIn := inKinds[k]
 		_, toOut := outKinds[k]
 		stream(k, toIn, toOut)
 	}
-	return fanIn, fanOut
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	return fanIn, fanOut, nil
 }

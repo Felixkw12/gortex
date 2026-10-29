@@ -3071,7 +3071,7 @@ func (s *Server) runAnalysisOwned(ctx context.Context, background bool) {
 	if ctx.Err() != nil {
 		return // An interrupted attempt is not a settled bootstrap receipt.
 	}
-	hotspotsWarmup := s.warmOutlineHotspots()
+	hotspotsWarmup := s.warmOutlineHotspotsContext(ctx)
 	if ctx.Err() != nil {
 		return
 	}
@@ -3371,6 +3371,13 @@ func (s *Server) getHITS() *analysis.HITSResult {
 // the stale result is discarded and rebuilt against the new communities.
 // The returned slice is shared and must not be mutated by the caller.
 func (s *Server) getHotspots() []analysis.HotspotEntry {
+	return s.getHotspotsContext(context.Background())
+}
+
+func (s *Server) getHotspotsContext(ctx context.Context) []analysis.HotspotEntry {
+	if ctx.Err() != nil {
+		return nil
+	}
 	s.analysisMu.RLock()
 	if !s.analysisSnapshotCurrentLocked() {
 		s.analysisMu.RUnlock()
@@ -3383,9 +3390,14 @@ func (s *Server) getHotspots() []analysis.HotspotEntry {
 	}
 	s.analysisMu.RUnlock()
 
-	s.hotspotsBuildMu.Lock()
+	if !lockAnalysisPreparation(ctx, &s.hotspotsBuildMu) {
+		return nil
+	}
 	defer s.hotspotsBuildMu.Unlock()
 	for {
+		if ctx.Err() != nil {
+			return nil
+		}
 		s.analysisMu.RLock()
 		if !s.analysisSnapshotCurrentLocked() {
 			s.analysisMu.RUnlock()
@@ -3399,7 +3411,10 @@ func (s *Server) getHotspots() []analysis.HotspotEntry {
 		s.analysisMu.RUnlock()
 		// Coalesced waiters recheck the ranking before hydrating a partition.
 		// A retained result therefore needs no full community map at all.
-		materialized := s.ensureCommunitiesMaterialized()
+		materialized := s.ensureCommunitiesMaterializedContext(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
 		if !materialized && s.hotspotsFn == nil {
 			return nil
 		}
@@ -3418,14 +3433,26 @@ func (s *Server) getHotspots() []analysis.HotspotEntry {
 			continue
 		}
 
-		build := analysis.FindHotspots
-		if s.hotspotsFn != nil {
-			build = s.hotspotsFn
+		var reader graph.Reader = s.graph
+		if ctx.Done() != nil {
+			reader = graph.BindReadContext(reader, ctx)
 		}
-		hotspots := build(s.graph, communities, 0)
+		var hotspots []analysis.HotspotEntry
+		if s.hotspotsFn != nil {
+			hotspots = s.hotspotsFn(reader, communities, 0)
+		} else {
+			var err error
+			hotspots, err = analysis.FindHotspotsContext(ctx, reader, communities, 0)
+			if err != nil {
+				return nil
+			}
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
 
 		s.analysisMu.Lock()
-		if s.analysisEpoch == epoch && s.communitiesToken == token && s.analysisSnapshotCurrentLocked() {
+		if ctx.Err() == nil && s.analysisEpoch == epoch && s.communitiesToken == token && s.analysisSnapshotCurrentLocked() {
 			s.hotspots = hotspots
 			s.hotspotsReady = true
 			s.hotspotsOwned = false

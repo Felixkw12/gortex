@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"time"
 
 	"github.com/zzet/gortex/internal/analysis"
@@ -11,11 +12,15 @@ import (
 // reported separately: preparing steady-state outlines moves this work into
 // the explicit analysis pass, it does not make the work disappear.
 func (s *Server) warmOutlineHotspots() time.Duration {
-	if !s.analysisSnapshotStillCurrent() {
+	return s.warmOutlineHotspotsContext(context.Background())
+}
+
+func (s *Server) warmOutlineHotspotsContext(ctx context.Context) time.Duration {
+	if ctx.Err() != nil || !s.analysisSnapshotStillCurrent() {
 		return 0
 	}
 	started := time.Now()
-	_ = s.getHotspots()
+	_ = s.getHotspotsContext(ctx)
 	return time.Since(started)
 }
 

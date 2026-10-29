@@ -3916,6 +3916,14 @@ func (s *Store) GetNodesByIDs(ids []string) map[string]*graph.Node {
 	if len(ids) == 0 {
 		return nil
 	}
+	if s.readCtx != nil {
+		nodes, err := s.GetNodesByIDsContext(s.readCtx, ids)
+		if err != nil {
+			analysisProjectionReadError(s.readCtx, err)
+			return nil
+		}
+		return nodes
+	}
 	// Dedupe + skip empty up front to keep the chunk loop honest.
 	seen := make(map[string]struct{}, len(ids))
 	uniq := make([]string, 0, len(ids))
