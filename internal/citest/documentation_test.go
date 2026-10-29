@@ -72,9 +72,10 @@ func TestDocumentationUnsafeOwnershipAndContentStayFull(t *testing.T) {
 			f.write(path, "original prose\n")
 			f.base = f.commit()
 			text := "updated prose\n"
-			if name == "invalid_utf8" {
+			switch name {
+			case "invalid_utf8":
 				text = "invalid\xff\n"
-			} else if name == "nul" {
+			case "nul":
 				text = "binary\x00input\n"
 			}
 			f.write(path, text)
