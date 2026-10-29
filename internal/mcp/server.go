@@ -41,6 +41,7 @@ import (
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/telemetry"
 	"github.com/zzet/gortex/internal/tokens"
+	"github.com/zzet/gortex/internal/toolref"
 )
 
 // Version is set at build time.
@@ -245,17 +246,15 @@ type Server struct {
 	analysisGenerationReady bool
 	analysisPruneScheduled  atomic.Bool
 	analysisPruneRequested  atomic.Bool
-	// backgroundMaintenance joins the detached analysis-generation prune
-	// goroutine. Anyone closing the backend store must DrainBackground
-	// first: an in-flight prune batch survives sql.DB.Close on its pinned
-	// connection and its next WAL commit recreates store files
-	// mid-teardown. Add is gated by the mutex + drained flag so it never
-	// races DrainBackground's Wait, and a prune requested after the drain
-	// is dropped rather than run against a closing store.
+	// backgroundMaintenance owns analysis, cochange, prune and route-reader
+	// work through actual completion. Add is serialized with permanent close;
+	// cancellation is published before joins, never treated as quiescence.
 	backgroundMaintenance        sync.WaitGroup
 	backgroundMaintenanceMu      sync.Mutex
 	backgroundMaintenanceDrained bool
-	analysisPruneCancel          context.CancelFunc // guarded by backgroundMaintenanceMu
+	backgroundContext            context.Context    // initialized under backgroundMaintenanceMu
+	backgroundCancel             context.CancelFunc // guarded by backgroundMaintenanceMu
+	backgroundDrainOnce          sync.Once
 	analysisMaterializeMu        sync.Mutex
 	analysisMu                   sync.RWMutex
 	// answerAnalysis is the analysis receipt the answer path last observed
@@ -299,6 +298,7 @@ type Server struct {
 	cochangeMu     sync.RWMutex
 	cochangeByFile map[string]map[string]float64
 	cochangeCount  map[string]map[string]int
+	cochangeErr    error // terminal mine failure, guarded by cochangeMu
 
 	// autoIndexOnce guards the opt-in (GORTEX_AUTOINDEX=1) zero-config
 	// background index of an untracked cwd, fired at most once per session
@@ -1522,16 +1522,16 @@ Worktree and branch routing:
 
 ` + profiles.WorktreeBranchRoutingPolicy + `
 
-` + sharedParamLegend
+` + sharedParamLegend + "\n\n" + toolref.TransportText + " " + toolref.DegradedModeText
 
 // codingAgentInstructions is intentionally terse because some MCP hosts repeat
 // initialize instructions beside every rendered tool. It describes what to do,
 // not how the server versions or implements its tool surface.
-const codingAgentInstructions = `MUST use Gortex MCP. First explicit-file read per new user request: read(operation:"file", target:{file:"<path>"}, options:{new_user_task:true}); do not localize. Unknown file/symbol/evidence: explore(operation:"localize"); obey completion.required_action; stop at answer_ready. Diagnosis/change: explore(operation:"task"); 1 follow-up. Pre-edit: change(operation:"impact"); signature: change(operation:"verify"). Mutate only via edit/refactor. Post-edit: change(operation:"detect"), tests/guards/contract. capabilities only if fields unknown.
+const codingAgentInstructions = `When Gortex can serve the step: MUST use Gortex MCP. First explicit-file read per new user request: read(operation:"file", target:{file:"<path>"}, options:{new_user_task:true}); do not localize. Unknown file/symbol/evidence: explore(operation:"localize"); obey completion.required_action; stop at answer_ready. Diagnosis/change: explore(operation:"task"); 1 follow-up. Pre-edit: change(operation:"impact"); signature: change(operation:"verify"). Mutate only via edit/refactor. Post-edit: change(operation:"detect"), tests/guards/contract. capabilities only if fields unknown.
 
 Worktree and branch routing:
 
-` + profiles.WorktreeBranchRoutingPolicy
+` + profiles.WorktreeBranchRoutingPolicy + "\n" + toolref.TransportText + " " + toolref.DegradedModeText
 
 // ServerInstructionsUntracked is the inactive-state `instructions` variant
 // returned when a session's cwd is not covered by any tracked repo. Rather than
@@ -1572,8 +1572,9 @@ func ServerInstructionsPendingAutomaticCheckout(cwd string, roots ...string) str
 		target = "."
 	}
 	msg := fmt.Sprintf("Gortex is connected; checkout discovery is pending for %q.\n\n%s\n\n"+
+		"Retry after other work; if discovery is still pending after a few attempts, continue natively for this step and report the discovery lag.\n\n"+
 		"Worktree and branch routing:\n\n%s", target, agents.PendingAutomaticCheckoutGuidance, profiles.WorktreeBranchRoutingPolicy)
-	return appendTrackedRootsDiagnostic(msg, roots)
+	return appendTrackedRootsDiagnostic(msg+"\n\n"+toolref.TransportClause()+" "+toolref.DegradedModeLine(), roots)
 }
 
 // ServerInstructionsPendingFamilyLoad retains the terminal load failure as
@@ -1610,6 +1611,20 @@ func (s *Server) afterInitializeInstructions(ctx context.Context, _ any, req *mc
 	}
 	if result == nil {
 		return
+	}
+	result.Instructions = s.stateAwareInstructionsForPolicy(
+		ctx, SessionCWDFromContext(ctx), s.effectiveSessionPolicy(ctx))
+}
+
+// Modern clients discover the server without an initialize handshake. Apply
+// the same per-session instructions, including loading and pending-checkout
+// guidance, and read their identity from the SDK's parsed request metadata.
+func (s *Server) afterDiscoverInstructions(ctx context.Context, _ any, _ *mcp.DiscoverRequest, result *mcp.DiscoverResult) {
+	if s == nil || result == nil {
+		return
+	}
+	if info := server.RequestProtocolInfoFromContext(ctx); info != nil && info.Modern && info.ClientInfo != nil {
+		s.sessionFor(ctx).recordClientName(info.ClientInfo.Name)
 	}
 	result.Instructions = s.stateAwareInstructionsForPolicy(
 		ctx, SessionCWDFromContext(ctx), s.effectiveSessionPolicy(ctx))
@@ -1846,8 +1861,8 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	// Wire the process-wide tokenStats as the parent of every
 	// per-session counter so record() fanout aggregates daemon-wide.
 	s.sessions.setParentTokenStats(s.tokenStats)
-	// Per-connection state-aware initialize instructions: the after-init
-	// hook rewrites result.Instructions for THIS session's cwd — the terse
+	// Per-connection state-aware instructions: initialize and discovery
+	// hooks rewrite result.Instructions for THIS session's cwd — the terse
 	// activation affordance for an uncovered cwd, or the base guidance plus
 	// live workspace + warmup facts for a covered one. It fires for every
 	// MCP client straight from the handshake, including non-Claude-Code
@@ -1855,6 +1870,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	// rewrite for the proxy path would not reach the embedded stdio server).
 	initHooks := &server.Hooks{}
 	initHooks.AddAfterInitialize(s.afterInitializeInstructions)
+	initHooks.AddAfterDiscover(s.afterDiscoverInstructions)
 
 	// mcpServer is constructed after s exists so the per-session tool
 	// filter can close over s — toolSurfaceFilter varies the tools/list
@@ -3008,8 +3024,22 @@ func (s *Server) RunAnalysis() { s.runAnalysis(true) }
 // takes the lock. Passes are serialized by analysisRunMu, and a graph whose
 // installed snapshot still matches makes the pass a no-op.
 func (s *Server) runAnalysis(background bool) {
+	ctx, done, ok := s.admitBackground()
+	if !ok {
+		return
+	}
+	defer done()
+	s.runAnalysisOwned(ctx, background)
+}
+
+// runAnalysisOwned is called only by an admitted owner, including while it
+// waits for the serial pass lock. Cancellation never certifies completion.
+func (s *Server) runAnalysisOwned(ctx context.Context, background bool) {
 	s.analysisRunMu.Lock()
 	defer s.analysisRunMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
 	s.analysisPassActive.Store(true)
 	defer s.analysisPassActive.Store(false)
 	if s.analysisSnapshotStillCurrent() {
@@ -3020,7 +3050,9 @@ func (s *Server) runAnalysis(background bool) {
 		// Subscribers are still told, as after every pass: the call is the
 		// "rollups are settled" signal they wait for. Nothing was rebuilt, so
 		// the graph-invalidated broadcast and the per-graph resets stay out.
-		s.notifyBootstrapResourcesUpdated()
+		if ctx.Err() == nil {
+			s.notifyBootstrapResourcesUpdated()
+		}
 		return
 	}
 	runtimeactivity.Begin("analysis")
@@ -3035,9 +3067,18 @@ func (s *Server) runAnalysis(background bool) {
 		scheduleOSMemoryReleaseAfterBurst(s.logger, "mcp_analysis")
 	}()
 
-	analysisMetrics := s.populateAnalysis(true, background)
+	analysisMetrics := s.populateAnalysisContext(ctx, true, background)
+	if ctx.Err() != nil {
+		return // An interrupted attempt is not a settled bootstrap receipt.
+	}
 	hotspotsWarmup := s.warmOutlineHotspots()
-	outlineWarmup := s.warmOutlineSummaries(context.Background())
+	if ctx.Err() != nil {
+		return
+	}
+	outlineWarmup := s.warmOutlineSummaries(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 
 	// The graph was just rebuilt, so the lazy-enrichment ledger — symbol
 	// IDs whose incoming refs were confirmed against the *previous* graph
