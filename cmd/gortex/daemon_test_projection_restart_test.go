@@ -15,19 +15,19 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 type failingStartupTestProjection struct {
 	*store_sqlite.Store
-	file string
-	err  error
+	file     string
+	err      error
+	attempts int
 }
 
 func (s *failingStartupTestProjection) AddBatchChecked(nodes []*graph.Node, edges []*graph.Edge) error {
 	for _, node := range nodes {
 		if node.Kind == graph.KindFile && node.FilePath == s.file && node.Meta[indexer.PendingTestProjectionMeta] == nil {
+			s.attempts++
 			return s.err
 		}
 	}
@@ -108,13 +108,21 @@ func TestDaemonWarmRestartRepairsCanceledTestProjectionBeforeReady(t *testing.T)
 	}
 	writeErr := errors.New("injected startup test projection publication failure")
 	fault := &failingStartupTestProjection{Store: disk, file: caller.FilePath, err: writeErr}
-	cm, err := config.NewConfigManager(cfgFile)
+	// Match NewSharedServer: cfgFile is the workspace settings file, not
+	// the global tracked-repository configuration.
+	cm, err := config.NewConfigManager("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg := parser.NewRegistry()
-	reg.Register(languages.NewGoExtractor())
-	idx := indexer.New(fault, reg, config.Default().Index, zap.NewNop())
+	if len(cm.Global().Repos) != 1 || cm.Global().Repos[0].Path != root {
+		t.Fatalf("injected startup did not load the actual tracked repository: %+v", cm.Global().Repos)
+	}
+	conf, err := config.Load(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := state.indexer.Registry()
+	idx := indexer.New(fault, reg, conf.Index, zap.NewNop())
 	mi := indexer.NewMultiIndexer(fault, reg, idx.Search(), cm, zap.NewNop())
 	failedState := &daemonState{graph: fault, indexer: idx, multiIndexer: mi, configManager: cm}
 	failedReady, failedWatcher := false, false
@@ -122,6 +130,9 @@ func TestDaemonWarmRestartRepairsCanceledTestProjectionBeforeReady(t *testing.T)
 		failedWatcher = true
 		return nil
 	})
+	if fault.attempts == 0 || len(mi.AllMetadata()) != 1 || failed.reposChanged != 0 || failed.filesReindexed != 0 {
+		t.Fatalf("injected startup did not reach unchanged repair: attempts=%d repos=%d changed=%d files=%d", fault.attempts, len(mi.AllMetadata()), failed.reposChanged, failed.filesReindexed)
+	}
 	if watcher != nil || failedReady || failedWatcher || !errors.Is(failed.err, writeErr) || failed.canFinalize(ctx) || ctx.Err() != nil {
 		t.Fatalf("failed live-context startup was promoted: ready=%v watcher=%v error=%v", failedReady, failedWatcher, failed.err)
 	}

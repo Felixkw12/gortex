@@ -965,6 +965,7 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 	// prefixed strings retained by the cold interner generation.
 	rotateColdInternGeneration(logger, "parallel_parse")
 	timings.parse = time.Since(phaseStart)
+	timings.reposChanged = int(changedRepos.Load())
 	timings.filesReindexed = int(filesReindexed.Load())
 	logger.Info("daemon: warmup phase done",
 		zap.String("phase", "parallel_parse"),
@@ -1004,7 +1005,6 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 	// The in-memory backend reaches here too, but its snapshot replay
 	// already restored the derived edges, so the skip is equally safe.
 	anyChanged := changedRepos.Load() > 0
-	timings.reposChanged = int(changedRepos.Load())
 	logger.Info("daemon: warmup change detection",
 		zap.Int64("changed_repos", changedRepos.Load()),
 		zap.Int("tracked_repos", len(repos)),
