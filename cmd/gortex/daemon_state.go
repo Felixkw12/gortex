@@ -308,6 +308,9 @@ func boundedStartupError(err error) string {
 // already compute — those logs stay untouched; this just also keeps the
 // values around instead of discarding them.
 type warmupTimings struct {
+	// err prevents an incomplete repair from being promoted to enriched by
+	// the outer startup owner even when its context remains live.
+	err               error
 	prelude           time.Duration
 	prepareResolve    time.Duration
 	contractRehydrate time.Duration
@@ -331,6 +334,10 @@ type warmupTimings struct {
 	// enrichScheduled is the number of repos whose deferred semantic
 	// enrichment was actually dispatched, as returned by RunDeferredPassesAll.
 	enrichScheduled int
+}
+
+func (w *warmupTimings) canFinalize(ctx context.Context) bool {
+	return ctx.Err() == nil && w != nil && w.err == nil
 }
 
 // warmupDeltaFrontier carries the exact file/derived frontier out of the
@@ -510,8 +517,8 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 	finishBatch := startWarmupStep(logger, "begin_parallel_batch")
 	state.multiIndexer.BeginParallelBatch()
 	defer func() {
-		if ctx.Err() != nil {
-			// Cancellation must release batch mode without launching derived
+		if ctx.Err() != nil || timings.err != nil {
+			// Cancellation or failed repair must release batch mode without launching derived
 			// passes. The topology callback still joins workers and seals its
 			// coordinated bulk connection before returning.
 			state.multiIndexer.ResetBatch()
@@ -972,6 +979,18 @@ func warmupDaemonStateContext(ctx context.Context, state *daemonState, logger *z
 		"elapsed_human": parseStats.Elapsed,
 		"repos_per_sec": parseStats.ItemsPerSec,
 	})
+
+	// A prior orderly cancellation may have resolved calls but skipped their
+	// test-edge projection. Repair that exact durable frontier before readiness,
+	// even when unchanged file mtimes allow the normal derived-pass fast path.
+	finishTestProjectionResume := startWarmupStep(logger, "test_projection_resume")
+	projectionResumeErr := state.multiIndexer.ResumePendingTestProjectionsContext(ctx)
+	finishTestProjectionResume(zap.Error(projectionResumeErr))
+	if projectionResumeErr != nil {
+		timings.err = projectionResumeErr
+		logger.Error("daemon: pending test projection repair incomplete", zap.Error(projectionResumeErr))
+		return nil, timings
+	}
 
 	prepareStart := time.Now()
 	logger.Info("daemon: warmup step start", zap.String("step", "prepare_resolve"))

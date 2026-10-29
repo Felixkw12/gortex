@@ -1067,14 +1067,15 @@ func (mi *MultiIndexer) runMasterResolveHookedContext(ctx context.Context, scope
 		zap.Int("pending_scanned", stats.PendingBefore),
 		zap.Int("pending_admitted", stats.PendingAfter),
 		zap.Error(err))
+	retargetedFiles := master.TakeRetargetedTestCallFiles()
 	if cancelErr := ctx.Err(); cancelErr != nil {
 		// A canceled resolve must not start another graph projection while
 		// shutdown joins this owner. The successful warmup/repair paths still
 		// reconcile their retargeted callers below.
-		return cancelErr
+		return mi.preserveCanceledTestProjection(ctx, retargetedFiles, nil)
 	}
-	if projectionErr := mi.reconcileRetargetedTestCallsContext(ctx, master.TakeRetargetedTestCallFiles()); projectionErr != nil {
-		return projectionErr
+	if projectionErr := mi.reconcileRetargetedTestCallsContext(ctx, retargetedFiles); projectionErr != nil {
+		return mi.preserveCanceledTestProjection(ctx, retargetedFiles, projectionErr)
 	}
 	return err
 }
