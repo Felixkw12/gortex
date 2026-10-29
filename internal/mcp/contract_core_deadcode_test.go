@@ -69,8 +69,24 @@ func TestContractCoreScopedDeadCodePreservesMaskAndSelectedView(t *testing.T) {
 			require.Equal(t, want, got, "scope=%v contract IDs=%v", repos, ids)
 			if repos == nil || len(repos) > 0 {
 				require.Positive(t, queries, "binding must keep indexed filtered queries")
+			} else {
+				require.Zero(t, queries, "explicit empty ownership does no query work")
 			}
 			require.Zero(t, allNodes, "nil scope is an indexed unscoped query, not an AllNodes fallback")
+			if repos == nil || slices.Contains(repos, "a") {
+				deadIDs := make([]string, 0, len(got))
+				for _, entry := range got {
+					deadIDs = append(deadIDs, entry.ID)
+				}
+				require.Contains(t, deadIDs, "a/dead")
+				require.Contains(t, deadIDs, "a/bean", "masked incoming edge cannot keep a symbol alive")
+				require.NotContains(t, deadIDs, "a/live", "a real foreign caller still proves use")
+				if ids == nil || ids["contract"] {
+					require.Contains(t, deadIDs, "a/contract", "masked contract endpoint cannot prove use")
+				} else {
+					require.NotContains(t, deadIDs, "a/contract", "an explicitly visible caller must remain authoritative")
+				}
+			}
 			require.NoError(t, contractCoreReadError(ctx))
 			// Also exercise a composed view that hides the backend capability. It
 			// must use its own nodes rather than tunnelling to the physical store.
