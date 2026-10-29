@@ -114,7 +114,7 @@ func TestDaemonWarmRestartRepairsCanceledTestProjectionBeforeReady(t *testing.T)
 	}
 	reg := parser.NewRegistry()
 	reg.Register(languages.NewGoExtractor())
-	idx := indexer.New(fault, reg, cm.Global().Index, zap.NewNop())
+	idx := indexer.New(fault, reg, config.Default().Index, zap.NewNop())
 	mi := indexer.NewMultiIndexer(fault, reg, idx.Search(), cm, zap.NewNop())
 	failedState := &daemonState{graph: fault, indexer: idx, multiIndexer: mi, configManager: cm}
 	failedReady, failedWatcher := false, false
