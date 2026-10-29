@@ -1050,7 +1050,7 @@ func (mi *MultiIndexer) runMasterResolveHookedContext(ctx context.Context, scope
 	}
 	mt := time.Now()
 	stats, err := master.ResolveAllContext(ctx)
-	if err == nil {
+	if err == nil && ctx.Err() == nil {
 		// The dataflow placeholders are lifted after every whole resolve,
 		// as a single-repository whole index and the per-save path do.
 		materializeDataflowParamsInGraph(mi.graph)
@@ -1067,7 +1067,15 @@ func (mi *MultiIndexer) runMasterResolveHookedContext(ctx context.Context, scope
 		zap.Int("pending_scanned", stats.PendingBefore),
 		zap.Int("pending_admitted", stats.PendingAfter),
 		zap.Error(err))
-	mi.reconcileRetargetedTestCalls(master.TakeRetargetedTestCallFiles())
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		// A canceled resolve must not start another graph projection while
+		// shutdown joins this owner. The successful warmup/repair paths still
+		// reconcile their retargeted callers below.
+		return cancelErr
+	}
+	if projectionErr := mi.reconcileRetargetedTestCallsContext(ctx, master.TakeRetargetedTestCallFiles()); projectionErr != nil {
+		return projectionErr
+	}
 	return err
 }
 
@@ -1102,13 +1110,22 @@ func (mi *MultiIndexer) runMasterResolveFilesWithEvidence(files []string, useLSP
 // them, so a call that binds later than its caller's projection would
 // otherwise never gain its EdgeTests. No-op on an empty frontier.
 func (mi *MultiIndexer) reconcileRetargetedTestCalls(files []string) {
-	if len(files) == 0 {
-		return
+	_ = mi.reconcileRetargetedTestCallsContext(context.Background(), files)
+}
+
+func (mi *MultiIndexer) reconcileRetargetedTestCallsContext(ctx context.Context, files []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	_, emitted := markTestSymbolsAndEmitEdgesScoped(mi.graph, nil, files...)
+	if len(files) == 0 {
+		return nil
+	}
+	_, emitted, err := markTestSymbolsAndEmitEdgesForFilesContext(ctx, mi.graph, files)
 	mi.logger.Info("DEFERRED-TIMING test-edges reconcile for retargeted callers",
 		zap.Int("files", len(files)),
-		zap.Int("edges", emitted))
+		zap.Int("edges", emitted),
+		zap.Error(err))
+	return err
 }
 
 // runMasterResolveNames rebinds pending references parked under the given

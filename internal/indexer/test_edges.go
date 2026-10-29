@@ -1,11 +1,42 @@
 package indexer
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
 )
+
+// markTestSymbolsAndEmitEdgesForFilesContext keeps cancellation between complete
+// file projections. Never interrupt the eviction/replacement pair inside a
+// projection: already completed groups remain valid if shutdown cancels the
+// remaining frontier. The ordinary non-cancellable callers keep their single
+// projection and its existing counts.
+func markTestSymbolsAndEmitEdgesForFilesContext(ctx context.Context, g graph.Store, files []string) (marked, emitted int, err error) {
+	if err = ctx.Err(); err != nil || g == nil || len(files) == 0 {
+		return 0, 0, err
+	}
+	g.ResolveMutex().Lock()
+	defer g.ResolveMutex().Unlock()
+	if err = ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	if ctx.Done() == nil {
+		marked, emitted = markTestSymbolsAndEmitEdgesForFilesLocked(g, files)
+		return marked, emitted, nil
+	}
+	for start := 0; start < len(files); start += testMetadataLookupBatchSize {
+		if err = ctx.Err(); err != nil {
+			return marked, emitted, err
+		}
+		end := min(start+testMetadataLookupBatchSize, len(files))
+		m, e := markTestSymbolsAndEmitEdgesForFilesLocked(g, files[start:end])
+		marked += m
+		emitted += e
+	}
+	return marked, emitted, ctx.Err()
+}
 
 // Keep graph reads bounded without falling back to one backend query per file
 // or annotation. SQLite applies its own lower SQL-variable chunks inside each
