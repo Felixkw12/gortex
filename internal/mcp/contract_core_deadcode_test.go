@@ -13,8 +13,8 @@ import (
 
 type deadCodeFilteredSpy struct {
 	graph.Reader
-	backend graph.FilteredScopedDeadCodeReader
-	queries *int
+	backend  graph.FilteredScopedDeadCodeReader
+	queries  *int
 	allNodes *int
 }
 
