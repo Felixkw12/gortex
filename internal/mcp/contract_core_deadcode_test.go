@@ -15,6 +15,12 @@ type deadCodeFilteredSpy struct {
 	graph.Reader
 	backend graph.FilteredScopedDeadCodeReader
 	queries *int
+	allNodes *int
+}
+
+func (r *deadCodeFilteredSpy) AllNodes() []*graph.Node {
+	(*r.allNodes)++
+	return r.Reader.AllNodes()
 }
 
 func (r *deadCodeFilteredSpy) DeadCodeCandidatesInReposFiltered(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, repos []string, filter graph.OutlineEdgeFilter) ([]*graph.Node, error) {
@@ -27,7 +33,7 @@ func (r *deadCodeFilteredSpy) IfaceImplementsRowsInReposFiltered(repos []string,
 }
 func (r *deadCodeFilteredSpy) BindReadContext(ctx context.Context) graph.Reader {
 	bound := graph.BindReadContext(r.Reader, ctx)
-	return &deadCodeFilteredSpy{Reader: bound, backend: bound.(graph.FilteredScopedDeadCodeReader), queries: r.queries}
+	return &deadCodeFilteredSpy{Reader: bound, backend: bound.(graph.FilteredScopedDeadCodeReader), queries: r.queries, allNodes: r.allNodes}
 }
 
 func TestContractCoreScopedDeadCodePreservesMaskAndSelectedView(t *testing.T) {
@@ -51,7 +57,8 @@ func TestContractCoreScopedDeadCodePreservesMaskAndSelectedView(t *testing.T) {
 		for _, repos := range [][]string{nil, {"a"}, {"b"}, {}} {
 			ctx := withContractCoreReadErrors(t.Context())
 			queries := 0
-			spy := &deadCodeFilteredSpy{Reader: store, backend: store, queries: &queries}
+			allNodes := 0
+			spy := &deadCodeFilteredSpy{Reader: store, backend: store, queries: &queries, allNodes: &allNodes}
 			fast := graph.BindReadContext(newContractCoreEdges(spy, ctx, ids), ctx)
 			// The old consumer sees no optional shortcuts and must walk the same
 			// selected reader's filtered adjacency. It is independent of SQL predicates.
@@ -60,9 +67,10 @@ func TestContractCoreScopedDeadCodePreservesMaskAndSelectedView(t *testing.T) {
 			got := analysis.FindDeadCode(fast, nil, nil, opts)
 			want := analysis.FindDeadCode(slow, nil, nil, opts)
 			require.Equal(t, want, got, "scope=%v contract IDs=%v", repos, ids)
-			if len(repos) > 0 {
+			if repos == nil || len(repos) > 0 {
 				require.Positive(t, queries, "binding must keep indexed filtered queries")
 			}
+			require.Zero(t, allNodes, "nil scope is an indexed unscoped query, not an AllNodes fallback")
 			require.NoError(t, contractCoreReadError(ctx))
 			// Also exercise a composed view that hides the backend capability. It
 			// must use its own nodes rather than tunnelling to the physical store.

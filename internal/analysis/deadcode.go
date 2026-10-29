@@ -600,10 +600,10 @@ func collectDeadCodeCandidates(g graph.Reader, opt FindDeadCodeOptions) (candida
 	for _, k := range kinds {
 		allowed[k] = incomingUsageKinds(k)
 	}
-	if opt.RepoPrefixes != nil {
-		if scoped, ok := g.(graph.ScopedDeadCodeReader); ok {
-			return scoped.DeadCodeCandidatesInRepos(kinds, allowed, opt.RepoPrefixes), nil
-		}
+	if scoped, ok := g.(graph.ScopedDeadCodeReader); ok {
+		// Nil is the capability's explicit unscoped query, not a reason to
+		// bypass visibility-aware indexed filtering with an AllNodes scan.
+		return scoped.DeadCodeCandidatesInRepos(kinds, allowed, opt.RepoPrefixes), nil
 	}
 	if dc, ok := g.(graph.DeadCodeCandidator); ok {
 		return filterDeadCodeRepos(dc.DeadCodeCandidates(kinds, allowed), opt.RepoPrefixes), nil

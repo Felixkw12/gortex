@@ -36,10 +36,8 @@ func filterDeadCodeRepos(nodes []*graph.Node, prefixes []string) []*graph.Node {
 }
 
 func deadCodeFileNodes(g graph.Reader, prefixes []string) iter.Seq[*graph.Node] {
-	if prefixes != nil {
-		if scoped, ok := g.(graph.ScopedDeadCodeReader); ok {
-			return scoped.NodesByKindInRepos(graph.KindFile, prefixes)
-		}
+	if scoped, ok := g.(graph.ScopedDeadCodeReader); ok {
+		return scoped.NodesByKindInRepos(graph.KindFile, prefixes)
 	}
 	allowed := deadCodeRepoSet(prefixes)
 	return func(yield func(*graph.Node) bool) {
@@ -52,10 +50,8 @@ func deadCodeFileNodes(g graph.Reader, prefixes []string) iter.Seq[*graph.Node] 
 }
 
 func scopedIfaceRequiredMethods(g graph.Reader, prefixes []string) map[string]map[string]bool {
-	if prefixes != nil {
-		if scoped, ok := g.(graph.ScopedDeadCodeReader); ok {
-			return buildIfaceRequiredMethodsFromRows(scoped.IfaceImplementsRowsInRepos(prefixes))
-		}
+	if scoped, ok := g.(graph.ScopedDeadCodeReader); ok {
+		return buildIfaceRequiredMethodsFromRows(scoped.IfaceImplementsRowsInRepos(prefixes))
 	}
 	// Legacy/composed readers retain the complete interface relation. Only
 	// scoped candidates consume it, so foreign implementing types are inert.
