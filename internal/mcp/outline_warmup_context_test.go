@@ -25,7 +25,7 @@ type heldWarmHotspotStore struct {
 }
 
 func (s *heldWarmHotspotStore) BindReadContext(ctx context.Context) graph.Reader {
-	return &heldWarmHotspotStore{Store: s.Store.WithReadContext(ctx), owner: s.owner, ctx: ctx, entered: s.entered, release: s.release, once: s.once}
+	return &heldWarmHotspotStore{Store: s.WithReadContext(ctx), owner: s.owner, ctx: ctx, entered: s.entered, release: s.release, once: s.once}
 }
 
 func (s *heldWarmHotspotStore) NodeIDsByKinds(kinds []graph.NodeKind) []string {
