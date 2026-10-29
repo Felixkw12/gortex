@@ -86,7 +86,7 @@ func (g *failingTestProjectionPublication) AddBatchChecked(nodes []*graph.Node, 
 	if g.err != nil {
 		return g.err
 	}
-	g.Graph.AddBatch(nodes, edges)
+	g.AddBatch(nodes, edges)
 	return nil
 }
 
