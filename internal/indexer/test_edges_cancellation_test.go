@@ -54,8 +54,13 @@ func TestRetargetedTestProjectionCancellationKeepsCompletedGroupsRepairable(t *t
 	}
 	// Retry the same frontier normally, including already completed work.
 	g.cancel = nil
-	if _, _, err = markTestSymbolsAndEmitEdgesForFilesContext(context.Background(), g, files); err != nil {
+	repairCtx, finishRepair := context.WithCancel(context.Background())
+	defer finishRepair()
+	if _, _, err = markTestSymbolsAndEmitEdgesForFilesContext(repairCtx, g, files); err != nil {
 		t.Fatal(err)
+	}
+	if g.reads != 3 {
+		t.Fatalf("normal repair did not visit both bounded groups: %d reads", g.reads)
 	}
 	if findEdge(g, graph.EdgeTests, last, "prod::Subject") == nil || findEdge(g, graph.EdgeTests, last, "old::Subject") != nil {
 		t.Fatal("normal repair did not replace the remaining stale projection")
