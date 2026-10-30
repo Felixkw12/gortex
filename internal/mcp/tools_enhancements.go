@@ -2572,6 +2572,9 @@ func (s *Server) handleFindDeadCode(ctx context.Context, req mcp.CallToolRequest
 
 	reader := s.readerFor(ctx)
 	opts.RepoPrefixes = s.deadCodeRepoPrefixes(ctx)
+	if scope, active := s.scopeOptionsWithRepoNarrow(ctx, repoAllowFromContext(ctx)); active {
+		opts.NodeScope = &graph.NodeScope{WorkspaceID: scope.WorkspaceID, ProjectID: scope.ProjectID, RepoAllow: scope.RepoAllow}
+	}
 	// Keep scope capabilities on the context-bound request reader. Unsupported
 	// composed readers retain their exact visibility-aware fallback.
 	var processes *analysis.ProcessResult

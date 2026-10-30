@@ -11,6 +11,18 @@ import (
 
 var _ graph.ScopedDeadCodeReader = (*Store)(nil)
 var _ graph.FilteredScopedDeadCodeReader = (*Store)(nil)
+var _ graph.NodeScopedDeadCodeReader = (*Store)(nil)
+var _ graph.FilteredNodeScopedDeadCodeReader = (*Store)(nil)
+
+func (s *Store) DeadCodeCandidatesInScope(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope graph.NodeScope) []*graph.Node {
+	nodes, _ := s.DeadCodeCandidatesInScopeFiltered(kinds, incoming, prefixes, scope, graph.OutlineEdgeFilter{})
+	return nodes
+}
+
+func (s *Store) IfaceImplementsRowsInScope(prefixes []string, scope graph.NodeScope) []graph.IfaceImplementsRow {
+	rows, _ := s.IfaceImplementsRowsInScopeFiltered(prefixes, scope, graph.OutlineEdgeFilter{})
+	return rows
+}
 
 func sortedDeadCodeRepos(prefixes []string) []string {
 	if prefixes == nil {
@@ -30,6 +42,10 @@ func deadCodeScopedVerdictPageSQL(allowed int) string {
 }
 
 func deadCodeFilteredVerdictPageSQL(allowed int, scoped bool, filter graph.OutlineEdgeFilter) (string, []any) {
+	return deadCodeNodeScopeVerdictPageSQL(allowed, scoped, nil, filter)
+}
+
+func deadCodeNodeScopeVerdictPageSQL(allowed int, scoped bool, scope *graph.NodeScope, filter graph.OutlineEdgeFilter) (string, []any) {
 	probe := `NOT EXISTS (SELECT 1 FROM edges e `
 	source := ""
 	if len(filter.ExcludeNodeKinds) > 0 {
@@ -49,8 +65,14 @@ func deadCodeFilteredVerdictPageSQL(allowed int, scoped bool, filter graph.Outli
 	} else {
 		q += ` WHERE n.view_gen = ?`
 	}
+	args := append(edgeArgs, viaArgs...)
+	if scope != nil {
+		predicate, scopeArgs := outlineScopePredicate(*scope, "n")
+		q += ` AND ` + predicate
+		args = append(args, scopeArgs...)
+	}
 	q += ` AND n.id > ? AND n.kind = ? ORDER BY n.id LIMIT ?`
-	return q, append(edgeArgs, viaArgs...)
+	return q, args
 }
 
 const deadCodeScopedFilesPageSQL = `SELECT ` + lookupNodeCols + ` FROM nodes INDEXED BY nodes_by_repo
@@ -76,6 +98,14 @@ func (s *Store) DeadCodeCandidatesInReposFiltered(kinds []graph.NodeKind, incomi
 }
 
 func (s *Store) deadCodeCandidatesInReposFiltered(ctx context.Context, kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, filter graph.OutlineEdgeFilter) ([]*graph.Node, error) {
+	return s.deadCodeCandidatesInScopeFiltered(ctx, kinds, incoming, prefixes, nil, filter)
+}
+
+func (s *Store) DeadCodeCandidatesInScopeFiltered(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope graph.NodeScope, filter graph.OutlineEdgeFilter) ([]*graph.Node, error) {
+	return s.deadCodeCandidatesInScopeFiltered(s.readContext(), kinds, incoming, prefixes, &scope, filter)
+}
+
+func (s *Store) deadCodeCandidatesInScopeFiltered(ctx context.Context, kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope *graph.NodeScope, filter graph.OutlineEdgeFilter) ([]*graph.Node, error) {
 	repos := sortedDeadCodeRepos(prefixes)
 	if prefixes == nil {
 		repos = []string{""} // One global pass; no ownership predicate or argument.
@@ -85,7 +115,14 @@ func (s *Store) deadCodeCandidatesInReposFiltered(ctx context.Context, kinds []g
 	for _, kind := range kinds {
 		var candidates []*graph.Node
 		allowed := anaDedupeEdgeKinds(incoming[kind])
-		q, filterArgs := deadCodeFilteredVerdictPageSQL(len(allowed), prefixes != nil, filter)
+		q, filterArgs := deadCodeNodeScopeVerdictPageSQL(len(allowed), prefixes != nil, scope, filter)
+		// SELECT-list edge exclusions precede WHERE generation/ownership;
+		// the exact node scope follows those WHERE arguments.
+		var scopeArgs []any
+		if scope != nil {
+			_, scopeArgs = outlineScopePredicate(*scope, "n")
+			filterArgs = filterArgs[:len(filterArgs)-len(scopeArgs)]
+		}
 		for _, prefix := range repos {
 			after := ""
 			for {
@@ -101,6 +138,7 @@ func (s *Store) deadCodeCandidatesInReposFiltered(ctx context.Context, kinds []g
 				if prefixes != nil {
 					args = append(args, prefix)
 				}
+				args = append(args, scopeArgs...)
 				args = append(args, after, string(kind), deadCodePageSize)
 				dead, scanned, lastID, err := s.scanDeadCodeVerdictPage(ctx, q, args...)
 				if err != nil {
@@ -141,6 +179,14 @@ func (s *Store) IfaceImplementsRowsInReposFiltered(prefixes []string, filter gra
 }
 
 func (s *Store) ifaceImplementsRowsInReposFiltered(ctx context.Context, prefixes []string, filter graph.OutlineEdgeFilter) ([]graph.IfaceImplementsRow, error) {
+	return s.ifaceImplementsRowsInScopeFiltered(ctx, prefixes, nil, filter)
+}
+
+func (s *Store) IfaceImplementsRowsInScopeFiltered(prefixes []string, scope graph.NodeScope, filter graph.OutlineEdgeFilter) ([]graph.IfaceImplementsRow, error) {
+	return s.ifaceImplementsRowsInScopeFiltered(s.readContext(), prefixes, &scope, filter)
+}
+
+func (s *Store) ifaceImplementsRowsInScopeFiltered(ctx context.Context, prefixes []string, scope *graph.NodeScope, filter graph.OutlineEdgeFilter) ([]graph.IfaceImplementsRow, error) {
 	repos := sortedDeadCodeRepos(prefixes)
 	if prefixes == nil {
 		repos = []string{""}
@@ -165,6 +211,11 @@ WHERE implementing.view_gen = ? AND implementing.repo_prefix = ? AND n.kind = ? 
 			args = []any{string(graph.EdgeImplements), s.viewGen, prefix, string(graph.KindInterface)}
 		}
 		edgeSQL, edgeArgs := outlineEdgePredicate(filter, "implementing", "n")
+		if scope != nil {
+			predicate, scopeArgs := outlineScopePredicate(*scope, "implementing")
+			q += ` AND implementing.id IS NOT NULL AND ` + predicate
+			args = append(args, scopeArgs...)
+		}
 		viaSQL, viaArgs := outlineViaPredicate(filter.ExcludeVia)
 		args = append(args, edgeArgs...)
 		args = append(args, viaArgs...)
@@ -179,6 +230,43 @@ WHERE implementing.view_gen = ? AND implementing.repo_prefix = ? AND n.kind = ? 
 		out = append(out, part...)
 	}
 	return out, nil
+}
+
+func (s *Store) NodesByKindInScope(kind graph.NodeKind, prefixes []string, scope graph.NodeScope) iter.Seq[*graph.Node] {
+	return func(yield func(*graph.Node) bool) {
+		// File metadata is needed for framework-entrypoint exclusions. Filter
+		// in SQL before decoding it, retaining the exact selected generation.
+		predicate, scopeArgs := outlineScopePredicate(scope, "n")
+		q := `SELECT ` + lookupNodeCols + ` FROM nodes n WHERE n.view_gen = ? AND ` + predicate
+		if prefixes != nil {
+			if len(prefixes) == 0 {
+				return
+			}
+			q += ` AND n.repo_prefix IN (` + inPlaceholders(len(prefixes)) + `)`
+		}
+		q += ` AND n.id > ? AND n.kind = ? ORDER BY n.id LIMIT ?`
+		after := ""
+		for {
+			args := append([]any{s.viewGen}, scopeArgs...)
+			for _, prefix := range prefixes {
+				args = append(args, prefix)
+			}
+			args = append(args, after, string(kind), deadCodePageSize)
+			page, scanned, lastID, err := s.scanNodePage(s.readContext(), q, args...)
+			if err != nil {
+				return
+			}
+			for _, node := range page {
+				if !yield(node) {
+					return
+				}
+			}
+			if scanned < deadCodePageSize {
+				return
+			}
+			after = lastID
+		}
+	}
 }
 
 func (s *Store) NodesByKindInRepos(kind graph.NodeKind, prefixes []string) iter.Seq[*graph.Node] {

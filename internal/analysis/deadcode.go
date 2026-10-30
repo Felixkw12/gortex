@@ -64,6 +64,9 @@ type HotspotEntry struct {
 // — none of them have a meaningful "is this code dead?" answer, and
 // surfacing them drowns the real dead-function signal in noise.
 type FindDeadCodeOptions struct {
+	// NodeScope is an additional exact metadata boundary, applied before
+	// candidate method checks. Nil preserves the caller's existing view.
+	NodeScope *graph.NodeScope
 	// RepoPrefixes scopes candidates, implementing types, entry-point files
 	// and processes. Incoming callers/interfaces remain global evidence.
 	// Nil preserves the unscoped analysis; a non-nil empty set returns none.
@@ -221,7 +224,7 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	// Backends that implement graph.IfaceImplementsScanner serve this
 	// from one join; the fallback walks NodesByKind + EdgesByKind
 	// just like before.
-	ifaceRequiredMethods := scopedIfaceRequiredMethods(g, opt.RepoPrefixes)
+	ifaceRequiredMethods := scopedIfaceRequiredMethods(g, opt.RepoPrefixes, opt.NodeScope)
 
 	// Pick the candidate-set source. When the backend implements
 	// DeadCodeCandidator, the "no incoming usage edge" filter runs
@@ -262,7 +265,7 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	// NodesByKind(KindFile) so on disk backends we don't have to
 	// materialise AllNodes() just to find the entry-point files.
 	entryPointFiles := make(map[string]bool)
-	for n := range deadCodeFileNodes(g, opt.RepoPrefixes) {
+	for n := range deadCodeFileNodes(g, opt.RepoPrefixes, opt.NodeScope) {
 		if n != nil && isEntryPointNode(n) {
 			entryPointFiles[n.FilePath] = true
 		}
@@ -561,18 +564,23 @@ func collectDeadCodeCandidates(g graph.Reader, opt FindDeadCodeOptions) (candida
 	for _, k := range kinds {
 		allowed[k] = incomingUsageKinds(k)
 	}
+	if opt.NodeScope != nil {
+		if scoped, ok := g.(graph.NodeScopedDeadCodeReader); ok {
+			return scoped.DeadCodeCandidatesInScope(kinds, allowed, opt.RepoPrefixes, *opt.NodeScope), nil
+		}
+	}
 	if scoped, ok := g.(graph.ScopedDeadCodeReader); ok {
 		// Nil is the capability's explicit unscoped query, not a reason to
 		// bypass visibility-aware indexed filtering with an AllNodes scan.
-		return scoped.DeadCodeCandidatesInRepos(kinds, allowed, opt.RepoPrefixes), nil
+		return filterDeadCodeNodeScope(scoped.DeadCodeCandidatesInRepos(kinds, allowed, opt.RepoPrefixes), opt.NodeScope), nil
 	}
 	if dc, ok := g.(graph.DeadCodeCandidator); ok {
-		return filterDeadCodeRepos(dc.DeadCodeCandidates(kinds, allowed), opt.RepoPrefixes), nil
+		return filterDeadCodeNodeScope(filterDeadCodeRepos(dc.DeadCodeCandidates(kinds, allowed), opt.RepoPrefixes), opt.NodeScope), nil
 	}
 
 	// Fallback: pull every node and the batched in-edge map up front.
 	// Same shape as before the DeadCodeCandidator capability landed.
-	nodes := filterDeadCodeRepos(g.AllNodes(), opt.RepoPrefixes)
+	nodes := filterDeadCodeNodeScope(filterDeadCodeRepos(g.AllNodes(), opt.RepoPrefixes), opt.NodeScope)
 	nodeIDs := make([]string, 0, len(nodes))
 	for _, n := range nodes {
 		nodeIDs = append(nodeIDs, n.ID)

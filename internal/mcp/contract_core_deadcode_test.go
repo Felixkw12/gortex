@@ -106,3 +106,36 @@ func TestContractCoreScopedDeadCodeRetainsCancellationEvidence(t *testing.T) {
 	require.Empty(t, reader.IfaceImplementsRowsInRepos([]string{"a"}))
 	require.Empty(t, slices.Collect(reader.NodesByKindInRepos(graph.KindFile, []string{"a"})))
 }
+
+func TestContractCoreExactWorkspaceDeadCodeKeepsMasksAndFallback(t *testing.T) {
+	store := openContractCoreCapStore(t)
+	store.AddBatch([]*graph.Node{
+		{ID: "own/dead", Name: "privateDead", Kind: graph.KindFunction, WorkspaceID: "ws", RepoPrefix: "stale-owner", FilePath: "own.go", Language: "go"},
+		{ID: "own/live", Name: "privateLive", Kind: graph.KindFunction, WorkspaceID: "ws", RepoPrefix: "a", FilePath: "own.go", Language: "go"},
+		{ID: "own/masked", Name: "privateMasked", Kind: graph.KindFunction, WorkspaceID: "ws", RepoPrefix: "a", FilePath: "own.go", Language: "go"},
+		{ID: "foreign/caller", Name: "caller", Kind: graph.KindFunction, WorkspaceID: "foreign", RepoPrefix: "b", FilePath: "foreign.go", Language: "go"},
+	}, []*graph.Edge{{From: "foreign/caller", To: "own/live", Kind: graph.EdgeCalls}, {From: "foreign/caller", To: "own/masked", Kind: graph.EdgeMatches}})
+	scope := graph.NodeScope{WorkspaceID: "ws"}
+	for _, prefixes := range [][]string{nil, {"a"}, {}} {
+		ctx := withContractCoreReadErrors(t.Context())
+		fast := graph.BindReadContext(newContractCoreEdges(store, ctx, nil), ctx)
+		fallback := graph.BindReadContext(newContractCoreEdges(legacyOutlineReader{store}, ctx, nil), ctx)
+		opts := analysis.FindDeadCodeOptions{NodeScope: &scope, RepoPrefixes: prefixes}
+		got := analysis.FindDeadCode(fast, nil, nil, opts)
+		require.Equal(t, analysis.FindDeadCode(fallback, nil, nil, opts), got)
+		ids := make([]string, 0, len(got))
+		for _, e := range got {
+			ids = append(ids, e.ID)
+		}
+		if prefixes == nil {
+			require.ElementsMatch(t, []string{"own/dead", "own/masked"}, ids)
+		}
+		if prefixes != nil && len(prefixes) == 1 {
+			require.Equal(t, []string{"own/masked"}, ids)
+		}
+		if prefixes != nil && len(prefixes) == 0 {
+			require.Empty(t, got)
+		}
+		require.NoError(t, contractCoreReadError(ctx))
+	}
+}
