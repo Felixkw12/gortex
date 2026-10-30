@@ -120,7 +120,6 @@ Tool names in installed instructions are examples, subject to the tools actually
 
 After upgrading, `gortex instructions switch full` (or your selected profile) refreshes an already installed managed global inline block and the active profile. `instructions regen` and daemon startup refresh profile files, not every existing inline instruction file. Rerun your usual `gortex init` command in repositories with managed project instruction blocks to refresh those blocks. Start a new agent/MCP session afterward; existing sessions retain their loaded guidance and tool surface.
 
-
 **Two modes** (`mode`):
 
 - `defer` (the default mode for `core`) — non-allowed tools are kept out of the cold `tools/list` but stay reachable through `tools_search`, which returns their schema inline and promotes them (firing `notifications/tools/list_changed`). The lean-but-complete surface: nothing is lost, the rare tool is one discovery call away.
