@@ -16,6 +16,7 @@ func TestInstalledGuidanceFollowsActualSessionToolPolicy(t *testing.T) {
 	// Reproduce the installed full-profile + reported MCP environment together.
 	// A named modern client must not turn this explicit legacy choice into a
 	// compact surface, and installed compact examples must not demand its aliases.
+	t.Setenv(profiles.ActiveEnv, "full")
 	dir := t.TempDir()
 	require.NoError(t, profiles.Generate(dir))
 	_, err := profiles.Switch(dir, "full")
