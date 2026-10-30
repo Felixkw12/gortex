@@ -1,5 +1,5 @@
 # golangci-lint configuration (schema v2).
-# CI pins golangci-lint to v2.13.1 (.github/workflows/ci.yml).
+# CI pins golangci-lint to v2.14.0 (.github/workflows/ci.yml).
 version: "2"
 
 linters:

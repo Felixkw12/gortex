@@ -245,7 +245,7 @@ func save(path string, m map[string]llm.CustomProvider) error {
 
 // validate enforces the invariants every custom provider must satisfy:
 // a non-empty name that does not shadow a built-in, an http/https
-// base_url, a model, and a recognised schema_mode.
+// base_url, a model, and a recognised schema_mode and prompt_profile.
 func validate(name string, cp llm.CustomProvider) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("name is empty")
@@ -267,6 +267,9 @@ func validate(name string, cp llm.CustomProvider) error {
 	case "", "json_schema", "json_object", "prompt", "prompt_only", "none":
 	default:
 		return fmt.Errorf("unknown schema_mode %q (want json_schema|json_object|prompt)", cp.SchemaMode)
+	}
+	if _, err := llm.ParsePromptProfile(cp.PromptProfile); err != nil {
+		return err
 	}
 	return nil
 }

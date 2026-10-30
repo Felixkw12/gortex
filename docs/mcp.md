@@ -45,7 +45,7 @@ With the opt-in, daemon-unavailable launches—including `gortex mcp --index ...
 
 ## Compact MCP surface
 
-The compact surface consolidates the legacy catalogue into 21 domain tools with compact, stable schemas. Every MCP connection with a non-empty `clientInfo.name` selects it automatically in `hide` mode unless a higher-precedence forwarded, operator, or instruction-profile policy overrides it. Empty and pre-initialize sessions retain the server default. Select it explicitly with the neutral `compact` preset alias:
+The compact surface consolidates the legacy catalogue into 21 domain tools with compact, stable schemas. Every MCP client connection selects it automatically in `hide` mode unless a higher-precedence forwarded, operator, or instruction-profile policy overrides it — whether or not its `initialize` carried a `clientInfo.name`. Only internal session-less callers (the HTTP dashboard and `/v1` REST routes) retain the server default. Select it explicitly with the neutral `compact` preset alias:
 
 ```bash
 GORTEX_TOOLS=compact gortex mcp
@@ -112,9 +112,13 @@ Eight built-in presets:
 
 For legacy presets, `tool_profile` and `tools_search` are always kept. The compact surface uses `capabilities` instead and is closed: it always contains exactly its 21 public tools, so `allow` / `deny` deltas are ignored for `facade-v1`. Select a legacy or custom surface when per-tool deltas are required.
 
-**Client-aware default.** With no higher-precedence selection, every connection with a non-empty MCP `clientInfo.name` gets the compact 21-tool surface in `hide` mode. Empty and pre-initialize sessions retain the server default. Client identity and wire format are separate: an unknown named client still gets the compact tools but remains on JSON unless it is independently GCX-capable. `GORTEX_TOOLS` always overrides. The `gortex mcp` proxy forwards its `GORTEX_TOOLS` / `--tools` to the daemon in the handshake, so a client's preset applies over the shared daemon (it can both narrow and widen the surface, not just subtract).
+**Client-aware default.** With no higher-precedence selection, every MCP client connection gets the compact 21-tool surface in `hide` mode. `clientInfo.name` is informational and does not select the surface: an empty name gets the same tools as a named client. Only internal session-less callers (the HTTP dashboard and `/v1` REST routes) retain the server default. Client identity and wire format are separate: an unknown named client still gets the compact tools but remains on JSON unless it is independently GCX-capable. `GORTEX_TOOLS` always overrides. The `gortex mcp` proxy forwards its `GORTEX_TOOLS` / `--tools` to the daemon in the handshake, so a client's preset applies over the shared daemon (it can both narrow and widen the surface, not just subtract).
 
 **Instruction profiles.** The machine's active instruction profile (`gortex instructions switch <core|localization|full>` — see [`cli.md`](cli.md#gortex-instructions--instruction-profiles)) can carry a tool preset; sessions pick it up between the forwarded spec and the client-aware default. Full precedence: **forwarded spec (`GORTEX_TOOLS` / `--tools`) > operator-pinned `mcp.tools` config > active instruction profile > client-aware default > server default**. The shipped `core` profile carries no preset, so nothing changes until a machine explicitly switches; profile changes apply to new sessions only.
+
+Tool names in installed instructions are examples, subject to the tools actually advertised for the session. An explicit legacy preset such as `GORTEX_TOOLS=core,+distill_session,+query_notes,+query_memories` keeps its legacy editors; the absence of the compact `change` alias does not disable those callable editors. Follow the server's session guidance, including read-only policies and explicit denials.
+
+After upgrading, `gortex instructions switch full` (or your selected profile) refreshes an already installed managed global inline block and the active profile. `instructions regen` and daemon startup refresh profile files, not every existing inline instruction file. Rerun your usual `gortex init` command in repositories with managed project instruction blocks to refresh those blocks. Start a new agent/MCP session afterward; existing sessions retain their loaded guidance and tool surface.
 
 **Two modes** (`mode`):
 
@@ -235,7 +239,7 @@ Four additional push channels modeled on `subscribe_diagnostics` — per-session
 
 | Tool | Description |
 |------|-------------|
-| `subscribe_workspace_readiness` | `notifications/workspace_readiness` — daemon warmup phase transitions (snapshot_loaded → parallel_parse → deferred_passes_all → global_resolve → end_batch → watcher_started → ready). Last-known phase replayed to late subscribers. A graph tool *called during warmup* does not need this subscription to cope: it returns an in-band `warming` block plus best-effort partial results instead of blocking or erroring |
+| `subscribe_workspace_readiness` | `notifications/workspace_readiness` — daemon warmup phase transitions (snapshot_loaded → parallel_parse → deferred_passes_all → global_resolve → end_batch → watcher_started → ready), plus one `{event:"repo_state", repo, repo_path, state:"ready"}` event each time a configured repository registers. Last-known phase replayed to late subscribers. A graph tool *called during warmup* does not need this subscription to cope: for a session whose repository is already registered it returns an in-band `warming` block plus best-effort partial results; for a session whose repository warmup has not registered yet it returns `repo_loading` (see [Startup states](#startup-states)) |
 | `unsubscribe_workspace_readiness` | Opt back out — idempotent |
 | `subscribe_daemon_health` | `notifications/daemon_health` — periodic ticker (default 15 s, `interval_ms` clamped to 1 s..5 min) snapshots uptime, alloc/sys/heap, num_goroutine, num_gc, tracked_repos, sessions, lsp_alive, graph nodes/edges. Ticker only runs while ≥1 subscriber is attached |
 | `unsubscribe_daemon_health` | Opt back out — idempotent |
@@ -243,6 +247,21 @@ Four additional push channels modeled on `subscribe_diagnostics` — per-session
 | `unsubscribe_stale_refs` | Opt back out — idempotent |
 | `subscribe_graph_invalidated` | `notifications/graph_invalidated` — coarse "the graph was rebuilt, drop cached results" signal. `{node_count, edge_count, reason, ts}`; unfiltered |
 | `unsubscribe_graph_invalidated` | Opt back out — idempotent |
+
+## Startup states
+
+After a daemon start, a repository is served once warmup registers it, which on a large store is minutes after the socket accepts connections. Until then a session whose working directory is inside a configured repository (or above one, or in a linked worktree of one) is neither tracked nor untracked, and gets its own answers:
+
+| State | When | `tools/call` | `initialize` instructions |
+|---|---|---|---|
+| loading | configured, warmup job queued or running | `repo_loading`, `retryable:true`, with `phase`, `percent`, `repo`, `repo_path` | a LOADING preamble ahead of the ordinary instructions |
+| failed | the warmup job ended without registering it | `repo_unavailable`, `retryable:false`, with `reason` | how to repair it |
+| missing | the configured path does not exist | `repo_unavailable`, `retryable:false` | how to repair it |
+| ready | registered | served normally | ordinary |
+
+While loading, `index_health` (also `workspace(operation:"index")`), `capabilities`, `tools_search` and the `subscribe_*` / `unsubscribe_*` tools answer; `index_health` lists only the caller's repository. `track_repository`, `index_repository` and `workspace_admin(operation:"track")` for the repository answer `{status:"already_configured", state:"loading"}`; once its load has failed they run normally, because tracking it again is the repair. Every other tool call, `resources/read` and `prompts/get` returns `repo_loading`, and mutations stay refused.
+
+Tools start working **in place** when the repository registers: no reconnect is needed. The session's cached scope is dropped at registration, and a session whose `initialize` reported the repository as loading receives one `notifications/message` saying it is ready. A directory outside every configured repository still gets `repo_not_tracked`. The control-socket probe that hooks and the CLI pre-flight read reports the same per-repository `state` (`loading`, `ready`, `failed`, `missing`), the hook lets native Read/Grep/Edit through for a loading repository instead of denying them, and the CLI maps `repo_loading` to "the daemon is still loading <repo>": on a terminal it waits up to `--loading-wait` (default 30 s), otherwise it exits with code 75 (`EX_TEMPFAIL`).
 
 ## Request lifetime (why a call can never hang)
 
@@ -258,9 +277,16 @@ call as *unknown* and re-read before assuming it did or did not land.
 | Tool call / resource read / prompt fetch (all transports) | 60 s | `GORTEX_MCP_TOOL_TIMEOUT` (Go duration; `off` disables) |
 | Daemon socket, per JSON-RPC request | 60 s, terminal `-32001` | — |
 | Daemon socket, concurrent dispatches | 8 | `GORTEX_MCP_MAX_CONCURRENT_DISPATCHES` (max 64) |
+| Daemon socket, dispatch queue wait | 5 s, then terminal `-32002` with `queue_wait_ms` | `GORTEX_MCP_DISPATCH_QUEUE_WAIT` (Go duration, max 30 s; `0`/`off` restores the instant refusal) |
 | Control RPC (`daemon status` / `search_symbols` / `proxy`) | 30 s, terminal `timeout` | — |
 | Control RPC (`shutdown`) | unbounded on the daemon — the store flush precedes the ack. `gortex daemon stop` bounds its own wait at 30 s, then watches the process for up to 2 min and force-kills | — |
 | Control RPC (`track` / `untrack` / `reload` / `enrich_*`) | unbounded by design | — |
+
+When every dispatch slot is busy, a request waits up to the queue budget for
+one; at most 16× the dispatch cap may wait, and the wait counts against the
+request timeout. A source edit gives its slot back while it waits for its graph
+refresh to publish, so editing agents do not hold slots that other requests
+need.
 
 The handler bound fires just inside any deadline the transport already imposed,
 so the client receives the tool-shaped diagnosis rather than an opaque transport
@@ -455,7 +481,7 @@ Gortex captures every large tool response into a bounded per-session ring; these
 | `find_clones` | Near-duplicate function/method clusters from the MinHash + LSH `similar_to` layer; `dead_only: true` finds dead duplicates of live code |
 | `index_health` | Health score, parse failures, stale files, language coverage, tracked-repo path liveness (`tracked_repo_paths_ok` + `missing_repo_paths` — a repo whose directory was deleted still holds its registration and silently drops out of workspace-wide answers), per-(repo, provider) semantic-enrichment lifecycle (`semantic_enrichment`: running / completed / partial / abandoned / failed with edge counts, plus a `semantic_enrichment_ok` rollup) — a green file count with a `partial` enrichment state means LSP-tier edges are incomplete. `path_liveness` asks the same question one level down, per file: it stats the paths the graph itself claims and reports how many indexed files no longer exist on disk (`orphan_files` / `orphan_rate` / `orphans_by_repo`, sampled with `truncated: true` past 20k files). `stale_files` only covers files the daemon still tracks, so a deletion it never witnessed shows up here and nowhere else; a non-zero `orphan_files` caps `health_score`. On a SQLite-backed daemon a `planner_stats` object reports the query planner's own view of the store: `nodes` / `edges` carry `believed` (the leading token of the index's `sqlite_stat1` row) against `actual_from_counters` (the `repo_index_state` counter sum across ALL view generations, flagged by `counters_known`; no counter row describes the external-call bucket or nodes carrying no repo prefix, and a leftover empty-prefix row on a store that later became multi-repo is summed on top of the per-repo rows, so the pair is an approximation of index cardinality and a difference between the two is not a measured discrepancy), `receivers` carries a `bounded: true` LIMIT-capped probe of the Go receiver index plus `complete` (false means the probe stopped at its cap, so `actual` is a lower bound and must not be compared with `believed`) and is omitted entirely when the receiver index is not in the schema — a bulk load has dropped it, or this store never had it, and a `believed: 0` there would read as the poisoned near-zero row rather than as an absent index. `stale` says whether the graph has outgrown what the planner believes — which can invert join order on receiver/edge queries — while `reason` names every verdict, staleness or not: `bulk_window_active` is why a cold load in progress reports zeros. `last_refresh_at` / `last_refresh_reason` appear once this process has rebuilt them. The field is read-only: statistics refresh at the next repository index, commit/HEAD move, whole-graph resolve or generation build, never from reading this payload — and that refresh is cooperative, so a busy writer, a spent per-pass budget or a per-index timeout defers the rest of the work to the following boundary (which resumes where the last one stopped) rather than stalling the pipeline that noticed |
 | `get_symbol_history` | Symbols modified this session with counts; flags churning (3+ edits) |
-The `analyze` dispatcher also accepts a set of **facade-aliased kinds** that route to the captured legacy handler instead of the dispatcher switch: `processes` → `get_processes`, `communities` → `get_communities`, `contracts` → `contracts`, `architecture` → `get_architecture`, `clones` → `find_clones`, `health` → `audit_health`, `inspections` → `run_inspections`, `recent_changes` → `get_recent_changes`, and the other entries of the facade analyze migration table (see `mcp-facade-v1.md`). These aliases are **surface-independent**: they work for named (facade-v1), unnamed (legacy), and session-less HTTP callers alike, with no `tools_search` promotion — the HTTP dashboard endpoints depend on this under the `core`/`defer` default.
+The `analyze` dispatcher also accepts a set of **facade-aliased kinds** that route to the captured legacy handler instead of the dispatcher switch: `processes` → `get_processes`, `communities` → `get_communities`, `contracts` → `contracts`, `architecture` → `get_architecture`, `clones` → `find_clones`, `health` → `audit_health`, `inspections` → `run_inspections`, `recent_changes` → `get_recent_changes`, and the other entries of the facade analyze migration table (see `mcp-facade-v1.md`). These aliases are **surface-independent**: they work for client (facade-v1), explicitly legacy-preset, and session-less HTTP callers alike, with no `tools_search` promotion — the HTTP dashboard endpoints depend on this under the `core`/`defer` default.
 
 
 The in-graph coverage tools above (`analyze kind=coverage*`, `index_health` language coverage) have an offline, whole-corpus counterpart for regression testing: the `gortex eval parity` CLI benchmarks per-language *resolved cross-file-dependent* coverage against a frozen baseline and is CI-fenced three ways — a per-language coverage floor, a frozen at-or-beyond-parity language count, and per-feature extraction goldens. See [features.md](features.md#coverage-churn-ownership).

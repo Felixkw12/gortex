@@ -74,6 +74,11 @@ func (s *Store) PurgeRepo(prefix string) error {
 	if prefix == "" {
 		return fmt.Errorf("store_sqlite: PurgeRepo refuses empty repo prefix (would delete shared global externals / solo-repo data)")
 	}
+	// The sweep is generation-unscoped; invalidate the base so every view's
+	// analysis and process-local mutation witness observes the removal.
+	if s.viewGen != baseViewGeneration {
+		return s.atBase().PurgeRepo(prefix)
+	}
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -116,6 +121,7 @@ func (s *Store) PurgeRepo(prefix string) error {
 	changed := len(ids) > 0
 	for _, table := range purgeSidecarTables {
 		res, err := tx.Exec(`DELETE FROM `+table+` WHERE repo_prefix = ?`, prefix)
+		noteTableRows(table, res, err)
 		if err != nil {
 			return fmt.Errorf("store_sqlite: PurgeRepo %s: %w", table, err)
 		}
@@ -124,7 +130,7 @@ func (s *Store) PurgeRepo(prefix string) error {
 		}
 	}
 
-	res, err := tx.Exec(`DELETE FROM nodes WHERE repo_prefix = ?`, prefix)
+	res, err := countNodeWrite(tx.Exec(`DELETE FROM nodes WHERE repo_prefix = ?`, prefix))
 	if err != nil {
 		return fmt.Errorf("store_sqlite: PurgeRepo nodes: %w", err)
 	}
@@ -137,6 +143,7 @@ func (s *Store) PurgeRepo(prefix string) error {
 	}
 	s.finishAnalysisMutationLocked(len(ids) > 0)
 	if changed {
+		s.payloadInputAdminRevision.Add(1)
 		s.markMutationReceiptsIncompleteLocked()
 	}
 	return nil
@@ -300,6 +307,7 @@ func (s *Store) RekeyRepoPrefix(oldPrefix, newPrefix string) error {
 	changed := false
 	for _, table := range rekeyMoveTables {
 		res, err := tx.Exec(`UPDATE OR REPLACE `+table+` SET repo_prefix = ? WHERE repo_prefix = ?`, newPrefix, oldPrefix)
+		noteTableRows(table, res, err)
 		if err != nil {
 			return fmt.Errorf("store_sqlite: RekeyRepoPrefix move %s: %w", table, err)
 		}
@@ -309,6 +317,7 @@ func (s *Store) RekeyRepoPrefix(oldPrefix, newPrefix string) error {
 	}
 	for _, table := range rekeyDropTables {
 		res, err := tx.Exec(`DELETE FROM `+table+` WHERE repo_prefix = ?`, oldPrefix)
+		noteTableRows(table, res, err)
 		if err != nil {
 			return fmt.Errorf("store_sqlite: RekeyRepoPrefix drop %s: %w", table, err)
 		}
@@ -343,6 +352,7 @@ func (s *Store) RekeyRepoPrefix(oldPrefix, newPrefix string) error {
 		return err
 	}
 	if changed {
+		s.payloadInputAdminRevision.Add(1)
 		s.markMutationReceiptsIncompleteLocked()
 	}
 	return nil
@@ -392,7 +402,9 @@ func deleteByIDColumnsTx(tx *sql.Tx, table string, cols, ids []string) error {
 			for i, id := range batch {
 				args[i] = id
 			}
-			if _, err := tx.Exec(`DELETE FROM `+table+` WHERE `+col+` IN (`+placeholders+`)`, args...); err != nil {
+			result, err := tx.Exec(`DELETE FROM `+table+` WHERE `+col+` IN (`+placeholders+`)`, args...)
+			noteTableRows(table, result, err)
+			if err != nil {
 				return err
 			}
 		}

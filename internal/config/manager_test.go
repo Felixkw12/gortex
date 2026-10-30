@@ -141,11 +141,22 @@ func TestEffectiveExclude_IncludeForceReincludesGitignored(t *testing.T) {
 
 	got := cm.EffectiveExclude("repo-inc")
 	assert.Contains(t, got, "Pods/", "the .gitignore exclude is present")
-	assert.Equal(t, "!Pods/", got[len(got)-1], "the force-include negation lands last so it wins")
+	assert.NotContains(t, got, "!Pods/", "force-includes are not gitignore negations")
+	cfg := cm.GetRepoConfig("repo-inc")
+	assert.Equal(t, []string{"Pods/"}, cfg.Index.Include)
+	assert.Equal(t, cfg.Index.Include, cfg.Watch.Include)
 
-	// The compiled matcher must NOT exclude the force-included tree.
-	assert.False(t, excludes.New(got).MatchRel("Pods/"),
-		"a force-included gitignored dir must be re-included")
+	assert.False(t, excludes.NewWithIncludes(got, cfg.Index.Include).MatchRel("Pods/"),
+		"an unanchored literal include reopens its target when its parent is open")
+	// Root the include to reopen only this specific excluded tree.
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gortex.yaml"),
+		[]byte("include:\n  - /Pods/\n"), 0644))
+	cm.LoadWorkspaceConfig("repo-inc", repoDir)
+	cfg = cm.GetRepoConfig("repo-inc")
+	assert.Equal(t, []string{"/Pods/"}, cfg.Index.Include)
+	assert.Equal(t, cfg.Index.Include, cfg.Watch.Include)
+	assert.False(t, excludes.NewWithIncludes(got, cfg.Index.Include).MatchRel("Pods/"),
+		"an anchored force-included gitignored dir must be re-included")
 }
 
 func TestEffectiveExclude_FallsBackToBuiltin(t *testing.T) {
@@ -799,4 +810,26 @@ func TestWorkspaceParseAgreementWithSurfaces(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrepareWorkspaceConfigKeepsIndependentSnapshot(t *testing.T) {
+	cm, err := NewConfigManager(filepath.Join(t.TempDir(), "config.yaml"))
+	require.NoError(t, err)
+	owner, other := t.TempDir(), t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(owner, ".gortex.yaml"), []byte("workspace: owner\nexclude:\n  - owner-only\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(other, ".gortex.yaml"), []byte("workspace: other\n"), 0o644))
+	cm.LoadWorkspaceConfig("src", owner)
+	before, revision := cm.GetRepoConfig("src"), cm.Revision()
+	prepared, publish := cm.PrepareWorkspaceConfig("src", other, nil)
+	assert.Equal(t, "other", prepared.Workspace)
+	assert.Equal(t, before, cm.GetRepoConfig("src"))
+	assert.Equal(t, revision, cm.Revision(), "preparation must not publish a prefix binding")
+	// Publishing uses the prepared parse rather than rereading the changed file.
+	require.NoError(t, os.WriteFile(filepath.Join(other, ".gortex.yaml"), []byte("workspace: changed\n"), 0o644))
+	publish("src")
+	assert.Equal(t, "other", cm.GetRepoConfig("src").Workspace)
+	assert.Equal(t, "other", prepared.Workspace)
+	cm.LoadWorkspaceConfig("src", owner)
+	assert.Equal(t, "owner", cm.GetRepoConfig("src").Workspace)
+	assert.Equal(t, "other", prepared.Workspace, "another publisher must not change the caller's config")
 }

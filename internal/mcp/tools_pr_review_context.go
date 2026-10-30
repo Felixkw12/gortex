@@ -259,9 +259,9 @@ func (s *Server) handlePRReviewContext(ctx context.Context, req mcp.CallToolRequ
 
 	// --- contracts gate (always evaluated for the verdict) ---
 	if len(ids) > 0 {
-		contracts := s.computeContractImpact(ids)
+		contracts := s.computeContractImpactContext(ctx, ids)
 		out.Contracts = contracts
-		out.Gates = append(out.Gates, prReviewContractGate(contracts))
+		out.Gates = append(out.Gates, optionalContractReviewGate(contractConsumerStatusFromContext(ctx), contracts))
 	}
 
 	// --- section: verify_change gate (result computed above) ---
@@ -465,7 +465,7 @@ func (s *Server) buildPRReviewSimulation(ctx context.Context, req mcp.CallToolRe
 
 	sessionID := strings.TrimSpace(req.GetString("session_id", ""))
 	if sessionID == "" {
-		sessionID = SessionIDFromContext(ctx)
+		sessionID = OverlayCohortIDFromContext(ctx)
 	}
 	if sessionID == "" {
 		return &prReviewSimulation{
@@ -489,9 +489,9 @@ func (s *Server) buildPRReviewSimulation(ctx context.Context, req mcp.CallToolRe
 	}
 
 	// Run the chain on top of the named session's overlay. buildSimulation
-	// reads the session via the request context, so thread the explicit
-	// session id onto the context it consumes.
-	simCtx := WithSessionID(ctx, sessionID)
+	// reads the overlay cohort via the request context, so thread the
+	// explicit session id onto the context it consumes.
+	simCtx := WithOverlayCohortID(ctx, sessionID)
 	sim, simErr := s.buildSimulation(simCtx, edits, true)
 	if simErr != nil {
 		if ctxErr := requestContextError(simCtx, simErr); ctxErr != nil {

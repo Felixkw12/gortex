@@ -75,6 +75,14 @@ func EqualPaths(a, b string) bool {
 	return foldPath(a, CaseInsensitivePaths) == foldPath(b, CaseInsensitivePaths)
 }
 
+// IdentityKey returns the folded identity EqualPaths compares, for use as a
+// map key: two paths EqualPaths accepts share one key. Lexical only — it never
+// touches the filesystem, so aliases such as /tmp and /private/tmp keep
+// distinct keys unless the caller canonicalises first.
+func IdentityKey(p string) string {
+	return foldPath(p, CaseInsensitivePaths)
+}
+
 // HasPathPrefix reports whether path is root itself or lies beneath it,
 // comparing on folded identity and respecting path-component boundaries:
 // "/Users/me/Doc" is not under "/Users/me/Documents". The volume root

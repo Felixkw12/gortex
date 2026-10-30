@@ -29,11 +29,10 @@ type Config struct {
 	// "openai", "ollama", "claudecli" (subprocess against the
 	// user's `claude` binary), "codex" (subprocess against the
 	// user's OpenAI `codex` binary), "gemini" (Google Gemini REST
-	// API), "bedrock" (AWS Bedrock Converse API, SigV4-signed),
-	// "deepseek" (DeepSeek Chat Completions, OpenAI-compatible),
-	// "requesty" (Requesty gateway, OpenAI-compatible) or "opper"
-	// (Opper gateway, OpenAI-compatible).
-	// Empty defaults to "local".
+	// API), "bedrock" (AWS Bedrock Converse API, SigV4-signed) or
+	// "deepseek" (DeepSeek Chat Completions, OpenAI-compatible) — or the
+	// name of a custom provider or gateway preset (e.g. "requesty"; see
+	// ActiveCustom). Empty defaults to "local".
 	Provider string `mapstructure:"provider" yaml:"provider,omitempty"`
 
 	// MaxSteps caps the agent tool-loop. Provider-agnostic. Defaults
@@ -65,14 +64,14 @@ type Config struct {
 	// DeepSeek configures the hosted DeepSeek Chat Completions
 	// provider (api.deepseek.com, OpenAI-compatible wire format).
 	DeepSeek RemoteConfig `mapstructure:"deepseek" yaml:"deepseek,omitempty"`
-	// Requesty configures the hosted Requesty gateway provider
-	// (router.requesty.ai, OpenAI-compatible wire format). Model ids
-	// carry a vendor prefix, e.g. "openai/gpt-4o-mini".
+	// Requesty is the legacy `llm.requesty:` block.
+	//
+	// Deprecated: requesty is served by the gateway preset of the same
+	// name. The block keeps working — its model / api_key_env / base_url
+	// / effort override the preset's defaults (see ActiveCustom) — but
+	// new configs need nothing beyond `provider: requesty`, or a custom
+	// provider (`gortex provider add requesty --preset requesty ...`).
 	Requesty RemoteConfig `mapstructure:"requesty" yaml:"requesty,omitempty"`
-	// Opper configures the hosted Opper gateway provider
-	// (api.opper.ai, OpenAI-compatible wire format). Model ids are
-	// bare pool names, e.g. "gpt-5.4-mini" or "claude-sonnet-4-6".
-	Opper RemoteConfig `mapstructure:"opper" yaml:"opper,omitempty"`
 	// Codex configures the OpenAI Codex CLI subprocess provider.
 	Codex CodexConfig `mapstructure:"codex" yaml:"codex,omitempty"`
 	// Copilot configures the GitHub Copilot CLI subprocess provider
@@ -96,6 +95,15 @@ type Config struct {
 	// add/remove` (providers.json) — the config loader merges the two.
 	// Selecting one is just setting Provider to its name.
 	Custom map[string]CustomProvider `mapstructure:"custom" yaml:"custom,omitempty"`
+
+	// modelOverride / effortOverride carry a GORTEX_LLM_MODEL /
+	// GORTEX_LLM_EFFORT value (or a WithModel routing pick) aimed at an
+	// active custom provider. They are kept apart from the Custom map
+	// because MergeEnv runs before the providers.json entries are merged
+	// in (registry.Augment), and are applied on top of whichever entry
+	// ActiveCustom resolves.
+	modelOverride  string
+	effortOverride string
 }
 
 // CustomProvider describes a user-registered OpenAI-compatible LLM
@@ -132,6 +140,11 @@ type CustomProvider struct {
 	// Headers are extra HTTP headers applied to every request (e.g. an
 	// OpenRouter `HTTP-Referer`).
 	Headers map[string]string `mapstructure:"headers" yaml:"headers,omitempty" json:"headers,omitempty"`
+	// PromptProfile selects the search-assist prompt tier: "small"
+	// (default — the verbose, rule-heavy prompts written for small local
+	// models) or "frontier" (the terse prompts for hosted frontier
+	// models). Set "frontier" when the endpoint serves a frontier model.
+	PromptProfile string `mapstructure:"prompt_profile" yaml:"prompt_profile,omitempty" json:"prompt_profile,omitempty"`
 	// Pricing is optional USD-per-1M-token pricing, surfaced by
 	// `gortex provider show` and EstimateCost. Purely informational.
 	Pricing ProviderPricing `mapstructure:"pricing" yaml:"pricing,omitempty" json:"pricing,omitempty"`
@@ -408,24 +421,17 @@ const (
 	defaultDeepSeekModel   = "deepseek-chat"
 	defaultDeepSeekBaseURL = "https://api.deepseek.com"
 	defaultDeepSeekKeyEnv  = "DEEPSEEK_API_KEY"
-
-	defaultRequestyModel   = "openai/gpt-4o-mini"
-	defaultRequestyBaseURL = "https://router.requesty.ai/v1"
-	defaultRequestyKeyEnv  = "REQUESTY_API_KEY"
-
-	defaultOpperModel   = "gpt-5.4-mini"
-	defaultOpperBaseURL = "https://api.opper.ai/v3/compat"
-	defaultOpperKeyEnv  = "OPPER_API_KEY"
 )
 
 // builtinProviders is the set of reserved provider names — the ones
 // provider.New dispatches by a fixed case. A custom provider may not
-// shadow these.
+// shadow these. Gateway presets are deliberately absent: a custom
+// provider of a preset's name replaces the preset.
 var builtinProviders = map[string]bool{
 	"local": true, "anthropic": true, "openai": true, "azure": true,
 	"ollama": true, "claudecli": true, "codex": true, "copilot": true,
 	"cursor": true, "opencode": true, "gemini": true, "bedrock": true,
-	"deepseek": true, "requesty": true, "opper": true,
+	"deepseek": true,
 }
 
 // IsBuiltinProvider reports whether name is a reserved built-in provider
@@ -433,6 +439,36 @@ var builtinProviders = map[string]bool{
 // is matched case-insensitively after trimming.
 func IsBuiltinProvider(name string) bool {
 	return builtinProviders[strings.ToLower(strings.TrimSpace(name))]
+}
+
+// ActiveCustom returns the OpenAI-compatible entry the active provider
+// name resolves to, with any env / routing model and effort overrides
+// applied. Resolution order: a built-in provider name never resolves
+// here (ok is false); otherwise the user's custom provider of that name
+// (providers.json or inline `llm.custom`) wins, and only then a gateway
+// preset (see Preset). ok is false when nothing matches.
+func (c Config) ActiveCustom() (CustomProvider, bool) {
+	name := c.ProviderName()
+	if IsBuiltinProvider(name) {
+		return CustomProvider{}, false
+	}
+	cp, ok := c.Custom[name]
+	if !ok {
+		cp, ok = Preset(name)
+		if ok {
+			cp = c.withLegacyPresetBlock(name, cp)
+		}
+	}
+	if !ok {
+		return CustomProvider{}, false
+	}
+	if c.modelOverride != "" {
+		cp.Model = c.modelOverride
+	}
+	if c.effortOverride != "" {
+		cp.ReasoningEffort = c.effortOverride
+	}
+	return cp, true
 }
 
 // ProviderName returns the effective provider, applying the "local"
@@ -473,12 +509,8 @@ func (c Config) ActiveModel() string {
 		return c.Bedrock.ModelID
 	case "deepseek":
 		return c.DeepSeek.Model
-	case "requesty":
-		return c.Requesty.Model
-	case "opper":
-		return c.Opper.Model
 	default:
-		if cp, ok := c.Custom[c.ProviderName()]; ok {
+		if cp, ok := c.ActiveCustom(); ok {
 			return cp.Model
 		}
 		return c.Local.Model
@@ -518,20 +550,13 @@ func (c Config) WithModel(model string) Config {
 		c.Bedrock.ModelID = model
 	case "deepseek":
 		c.DeepSeek.Model = model
-	case "requesty":
-		c.Requesty.Model = model
-	case "opper":
-		c.Opper.Model = model
 	default:
-		// For a custom provider, copy-on-write the Custom map so routing
-		// (which derives per-request configs via WithModel) never
-		// mutates the shared base config.
-		if cp, ok := c.Custom[c.ProviderName()]; ok {
-			nc := make(map[string]CustomProvider, len(c.Custom))
-			maps.Copy(nc, c.Custom)
-			cp.Model = model
-			nc[c.ProviderName()] = cp
-			c.Custom = nc
+		// For a custom provider, record the model as an override rather
+		// than writing the Custom map, so routing (which derives
+		// per-request configs via WithModel) never mutates the shared
+		// base config.
+		if _, ok := c.ActiveCustom(); ok {
+			c.modelOverride = model
 			return c
 		}
 		c.Local.Model = model
@@ -566,15 +591,11 @@ func (c Config) IsEnabled() bool {
 		return strings.TrimSpace(c.Bedrock.ModelID) != ""
 	case "deepseek":
 		return strings.TrimSpace(c.DeepSeek.Model) != ""
-	case "requesty":
-		return strings.TrimSpace(c.Requesty.Model) != ""
-	case "opper":
-		return strings.TrimSpace(c.Opper.Model) != ""
 	default:
-		// A registered custom OpenAI-compatible provider is enabled
-		// once it carries a model; the API key (if any) is validated at
-		// construction time.
-		if cp, ok := c.Custom[c.ProviderName()]; ok {
+		// A custom OpenAI-compatible provider or gateway preset is
+		// enabled once it carries a model; the API key (if any) is
+		// validated at construction time.
+		if cp, ok := c.ActiveCustom(); ok {
 			return strings.TrimSpace(cp.Model) != ""
 		}
 		return false
@@ -620,12 +641,13 @@ func (c Config) MergeEnv() Config {
 			c.Bedrock.ModelID = v
 		case "deepseek":
 			c.DeepSeek.Model = v
-		case "requesty":
-			c.Requesty.Model = v
-		case "opper":
-			c.Opper.Model = v
-		default:
+		case "local":
 			c.Local.Model = v
+		default:
+			// A custom provider or gateway preset — possibly an entry
+			// registry.Augment merges in after this runs, so the value
+			// rides as an override.
+			c.modelOverride = v
 		}
 	}
 	if v := os.Getenv("GORTEX_LLM_CLAUDECLI_BINARY"); v != "" {
@@ -671,10 +693,10 @@ func (c Config) MergeEnv() Config {
 			c.Gemini.Effort = v
 		case "deepseek":
 			c.DeepSeek.Effort = v
-		case "requesty":
-			c.Requesty.Effort = v
-		case "opper":
-			c.Opper.Effort = v
+		default:
+			if !IsBuiltinProvider(c.ProviderName()) {
+				c.effortOverride = v // custom provider / preset → reasoning_effort
+			}
 		}
 	}
 	if v := os.Getenv("GORTEX_LLM_CTX"); v != "" {
@@ -814,28 +836,6 @@ func (c Config) ApplyDefaults() Config {
 		c.DeepSeek.BaseURL = defaultDeepSeekBaseURL
 	}
 
-	// requesty
-	if c.Requesty.Model == "" {
-		c.Requesty.Model = defaultRequestyModel
-	}
-	if c.Requesty.APIKeyEnv == "" {
-		c.Requesty.APIKeyEnv = defaultRequestyKeyEnv
-	}
-	if c.Requesty.BaseURL == "" {
-		c.Requesty.BaseURL = defaultRequestyBaseURL
-	}
-
-	// opper
-	if c.Opper.Model == "" {
-		c.Opper.Model = defaultOpperModel
-	}
-	if c.Opper.APIKeyEnv == "" {
-		c.Opper.APIKeyEnv = defaultOpperKeyEnv
-	}
-	if c.Opper.BaseURL == "" {
-		c.Opper.BaseURL = defaultOpperBaseURL
-	}
-
 	return c
 }
 
@@ -861,7 +861,6 @@ func (c Config) MergedWith(fb Config) Config {
 	c.Bedrock = c.Bedrock.mergedWith(fb.Bedrock)
 	c.DeepSeek = c.DeepSeek.mergedWith(fb.DeepSeek)
 	c.Requesty = c.Requesty.mergedWith(fb.Requesty)
-	c.Opper = c.Opper.mergedWith(fb.Opper)
 	c.Codex = c.Codex.mergedWith(fb.Codex)
 	c.Copilot = c.Copilot.mergedWith(fb.Copilot)
 	c.Cursor = c.Cursor.mergedWith(fb.Cursor)

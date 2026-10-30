@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/agents"
+	"github.com/zzet/gortex/internal/indexer"
 )
 
 // The commit ledger exists because a tool call has two independent terminal
@@ -86,13 +87,21 @@ const mutationIDParamDescription = "Optional idempotency key. Retrying with the 
 
 var mutationCommitSequence atomic.Uint64
 
+// mutationDiskCommitSequence orders disk commits. It is stamped after the
+// rename and before the commit's refresh ticket is admitted, so a fresh
+// publication of a larger value captured the path after the smaller one's
+// bytes landed.
+var mutationDiskCommitSequence atomic.Uint64
+
 // errMutationNotApplied is returned by commitFileMutation when the request was
 // cancelled before the disk commit. Callers surface it as a terminal refusal so
 // the client knows retrying is safe.
 var errMutationNotApplied = errors.New("mutation not applied")
 
 type mutationCommitRecord struct {
-	mu sync.RWMutex
+	mu                     sync.RWMutex
+	owner                  *Server
+	pendingSourceRecovered bool
 
 	id      string
 	tool    string
@@ -106,6 +115,9 @@ type mutationCommitRecord struct {
 
 	disk  string
 	graph string
+	// commitSeq is the mutationDiskCommitSequence value of the disk commit,
+	// zero until committed.
+	commitSeq uint64
 	// graphRecorded says whether graph carries an outcome or is still the
 	// seed beginMutationCommit wrote. The status string cannot answer that on
 	// its own: "stale" means both "the reindex reported without confirming an
@@ -121,6 +133,7 @@ type mutationCommitRecord struct {
 	checkoutID          string
 	checkoutIncarnation string
 	errText             string
+	graphReason         string
 
 	startedAt   time.Time
 	committedAt time.Time
@@ -143,9 +156,11 @@ type mutationCommitSnapshot struct {
 	// on. Ordering matters for the listing: it is filled from the same
 	// snapshot the flag is derived from, so the two cannot disagree.
 	GraphRecorded       bool   `json:"-"`
+	CommitSeq           uint64 `json:"-"`
 	NewSHA              string `json:"new_sha,omitempty"`
 	BytesWritten        int    `json:"bytes_written,omitempty"`
 	Error               string `json:"error,omitempty"`
+	Reason              string `json:"reason,omitempty"`
 	StartedAt           string `json:"started_at,omitempty"`
 	CommittedAt         string `json:"committed_at,omitempty"`
 	ReindexReceipt      string `json:"reindex_receipt,omitempty"`
@@ -166,9 +181,11 @@ func (r *mutationCommitRecord) snapshot() mutationCommitSnapshot {
 		DiskStatus:          r.disk,
 		GraphStatus:         r.graph,
 		GraphRecorded:       r.graphRecorded,
+		CommitSeq:           r.commitSeq,
 		NewSHA:              r.newSHA,
 		BytesWritten:        r.bytesWritten,
 		Error:               r.errText,
+		Reason:              r.graphReason,
 		ReindexReceipt:      r.reindexReceipt,
 		ReindexGeneration:   r.reindexGeneration,
 		AppliedGeneration:   r.appliedGeneration,
@@ -192,7 +209,12 @@ func (r *mutationCommitRecord) diskStatus() string {
 
 func (r *mutationCommitRecord) markNotApplied(err error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer func() {
+		r.mu.Unlock()
+		if r.owner != nil {
+			r.owner.retireSettledPendingSource(r)
+		}
+	}()
 	r.disk = mutationDiskNotApplied
 	r.graph = mutationGraphStale
 	r.graphRecorded = true
@@ -203,7 +225,12 @@ func (r *mutationCommitRecord) markNotApplied(err error) {
 
 func (r *mutationCommitRecord) markFailed(err error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer func() {
+		r.mu.Unlock()
+		if r.owner != nil {
+			r.owner.retireSettledPendingSource(r)
+		}
+	}()
 	r.disk = mutationDiskFailed
 	r.graph = mutationGraphStale
 	r.graphRecorded = true
@@ -216,6 +243,9 @@ func (r *mutationCommitRecord) markCommitted(newSHA string, bytesWritten int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.disk = mutationDiskCommitted
+	if r.commitSeq == 0 {
+		r.commitSeq = mutationDiskCommitSequence.Add(1)
+	}
 	r.newSHA = newSHA
 	r.bytesWritten = bytesWritten
 	r.committedAt = time.Now()
@@ -226,11 +256,36 @@ func (r *mutationCommitRecord) markCommitted(newSHA string, bytesWritten int) {
 // does not un-write a committed file, and conflating the two is the reporting
 // bug this ledger exists to fix.
 func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
+	r.recordGraphForReceipt("", outcome)
+}
+
+// An asynchronous observer may apply only to the receipt it sampled. Empty
+// expectedReceipt is reserved for the mutation handler binding its outcome.
+func (r *mutationCommitRecord) recordGraphForReceipt(expectedReceipt string, outcome mutationReindexOutcome) {
 	if r == nil {
 		return
 	}
+	// Keep the binding and the outcome atomic with respect to ledger readers.
+	// Eviction already takes these locks in ledger -> record order.
+	var ledger *mutationCommitLedger
+	if r.owner != nil {
+		ledger = &r.owner.mutationCommits
+		ledger.mu.Lock()
+	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer func() {
+		r.mu.Unlock()
+		if ledger != nil {
+			ledger.mu.Unlock()
+		}
+		if r.owner != nil {
+			r.owner.refreshPendingSourceRecord(r)
+		}
+	}()
+	if expectedReceipt != "" && (r.reindexReceipt != expectedReceipt ||
+		(r.graphRecorded && r.graph != mutationGraphPending)) {
+		return
+	}
 	// Concurrent pollers can hold an earlier pending snapshot after another
 	// poller observed completion. Never regress that same ticket to pending.
 	if outcome.Pending && r.graphRecorded && r.graph != mutationGraphPending && r.reindexReceipt != "" && r.reindexReceipt == outcome.Receipt {
@@ -238,6 +293,17 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 	}
 	r.graph = graphStatusFor(outcome)
 	r.graphRecorded = true
+	r.graphReason = ""
+	if r.reindexReceipt != outcome.Receipt {
+		r.pendingSourceRecovered = false
+	}
+	if ledger != nil {
+		ledger.unbindFreshnessLocked(r)
+		// A detached completion must not resurrect an evicted commit.
+		if outcome.Receipt != "" && ledger.byID[r.id] == r {
+			ledger.byReindexReceipt[outcome.Receipt] = r
+		}
+	}
 	r.reindexReceipt = outcome.Receipt
 	r.reindexGeneration = outcome.Generation
 	r.appliedGeneration = outcome.AppliedGeneration
@@ -251,6 +317,29 @@ func (r *mutationCommitRecord) recordGraph(outcome mutationReindexOutcome) {
 	} else if r.disk == mutationDiskCommitted {
 		r.errText = ""
 	}
+}
+
+func (r *mutationCommitRecord) markSourceRecoveredForReceipt(expectedReceipt string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if expectedReceipt != "" && r.reindexReceipt == expectedReceipt {
+		r.pendingSourceRecovered = true
+	}
+}
+
+// A missing bound ticket is terminal failure, never publication evidence. The
+// identity/state recheck avoids overriding a concurrent rebind or completion.
+func (r *mutationCommitRecord) markReceiptLost(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if id == "" || r.reindexReceipt != id ||
+		(r.graph != mutationGraphPending && (r.graph != mutationGraphStale || r.graphRecorded)) {
+		return
+	}
+	r.graph = mutationGraphFailed
+	r.graphRecorded = true
+	r.graphReason = "receipt_lost"
+	r.errText = "graph freshness receipt " + id + " is no longer retained"
 }
 
 // retainResponse stores the successful payload for idempotent replay. Only
@@ -284,15 +373,6 @@ func (r *mutationCommitRecord) replayResponse() (map[string]any, bool) {
 	return clone, true
 }
 
-func (r *mutationCommitRecord) pendingReindexReceipt() string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.graph != mutationGraphPending {
-		return ""
-	}
-	return r.reindexReceipt
-}
-
 // graphStatusFor collapses a reindex outcome into the graph half of a receipt.
 func graphStatusFor(outcome mutationReindexOutcome) string {
 	switch {
@@ -312,10 +392,11 @@ func graphStatusFor(outcome mutationReindexOutcome) string {
 // bounding it matters more here than lock-free reads on a path that already
 // performs a filesystem write.
 type mutationCommitLedger struct {
-	mu      sync.Mutex
-	byID    map[string]*mutationCommitRecord
-	byKey   map[string]*mutationCommitRecord
-	ordered []*mutationCommitRecord
+	mu               sync.Mutex
+	byID             map[string]*mutationCommitRecord
+	byKey            map[string]*mutationCommitRecord
+	byReindexReceipt map[string]*mutationCommitRecord
+	ordered          []*mutationCommitRecord
 }
 
 func (l *mutationCommitLedger) put(record *mutationCommitRecord) {
@@ -324,13 +405,27 @@ func (l *mutationCommitLedger) put(record *mutationCommitRecord) {
 	if l.byID == nil {
 		l.byID = make(map[string]*mutationCommitRecord)
 		l.byKey = make(map[string]*mutationCommitRecord)
+		l.byReindexReceipt = make(map[string]*mutationCommitRecord)
 	}
 	l.evictLocked(time.Now())
 	l.byID[record.id] = record
 	if record.key != "" {
 		l.byKey[record.key] = record
 	}
+	record.mu.RLock()
+	if record.reindexReceipt != "" {
+		l.byReindexReceipt[record.reindexReceipt] = record
+	}
+	record.mu.RUnlock()
 	l.ordered = append(l.ordered, record)
+}
+
+// unbindFreshnessLocked requires the ledger lock and the record's read or
+// write lock. Another commit may have claimed the same receipt in the interim.
+func (l *mutationCommitLedger) unbindFreshnessLocked(record *mutationCommitRecord) {
+	if l.byReindexReceipt[record.reindexReceipt] == record {
+		delete(l.byReindexReceipt, record.reindexReceipt)
+	}
 }
 
 // evictLocked drops expired entries first, then the oldest survivors if the
@@ -340,6 +435,9 @@ func (l *mutationCommitLedger) evictLocked(now time.Time) {
 	for _, record := range l.ordered {
 		record.mu.RLock()
 		expired := now.Sub(record.startedAt) > mutationCommitRetention
+		if expired {
+			l.unbindFreshnessLocked(record)
+		}
 		record.mu.RUnlock()
 		if expired {
 			delete(l.byID, record.id)
@@ -354,6 +452,9 @@ func (l *mutationCommitLedger) evictLocked(now time.Time) {
 	for len(l.ordered) >= maxMutationCommits {
 		oldest := l.ordered[0]
 		l.ordered = l.ordered[1:]
+		oldest.mu.RLock()
+		l.unbindFreshnessLocked(oldest)
+		oldest.mu.RUnlock()
 		delete(l.byID, oldest.id)
 		if oldest.key != "" && l.byKey[oldest.key] == oldest {
 			delete(l.byKey, oldest.key)
@@ -372,6 +473,13 @@ func (l *mutationCommitLedger) byMutationID(key string) (*mutationCommitRecord, 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	record, ok := l.byKey[key]
+	return record, ok
+}
+
+func (l *mutationCommitLedger) byFreshnessReceipt(id string) (*mutationCommitRecord, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	record, ok := l.byReindexReceipt[id]
 	return record, ok
 }
 
@@ -476,6 +584,7 @@ func (n *mutationCommitNote) verdict() mutationCommitVerdict {
 // still reachable.
 func (s *Server) beginMutationCommit(ctx context.Context, tool, mutationID, fingerprint, relPath, absPath string) *mutationCommitRecord {
 	record := &mutationCommitRecord{
+		owner:       s,
 		id:          fmt.Sprintf("commit-%d", mutationCommitSequence.Add(1)),
 		tool:        tool,
 		key:         mutationID,
@@ -492,6 +601,7 @@ func (s *Server) beginMutationCommit(ctx context.Context, tool, mutationID, fing
 		record.checkoutID = state.checkoutID
 		record.checkoutIncarnation = state.incarnation
 	}
+	s.pendingSourceFiles.register(record)
 	s.mutationCommits.put(record)
 	mutationCommitNoteFrom(ctx).observe(record)
 	return record
@@ -530,7 +640,15 @@ func (s *Server) commitFileMutation(
 	}
 	if err := prepareCheckoutMutation(ctx, absPath); err != nil {
 		record.markNotApplied(err)
-		return record, fmt.Errorf("%w: %w", errMutationNotApplied, err)
+		refusal := fmt.Errorf("%w: %w", errMutationNotApplied, err)
+		// Prepare is also used by multi-file callers. Publish only here, at
+		// a proven single-file no-bytes boundary, never from the lease itself.
+		// The lifecycle additionally requires its authenticated active-lease
+		// proof and current identity/revision; a generic Stale is insufficient.
+		if singleFilePrecommitRefusal(ctx, tool) && s.lifecycle != nil && s.lifecycle.RecordCheckoutMutationRefusal(ctx, err) {
+			return record, &nativeCheckoutPrecommitRefusal{err: refusal}
+		}
+		return record, refusal
 	}
 	// Preparing may wait for durable route invalidation. Cancellation during
 	// that wait still guarantees that this handler has not written any bytes.
@@ -538,6 +656,7 @@ func (s *Server) commitFileMutation(
 		record.markNotApplied(err)
 		return record, fmt.Errorf("%w: %w", errMutationNotApplied, err)
 	}
+	indexer.StampPublicationPhase(ctx, indexer.PublicationDiskWriteStarted)
 	if err := agents.AtomicWriteFile(absPath, data, perm); err != nil {
 		record.markFailed(err)
 		return record, err
@@ -551,14 +670,40 @@ func (s *Server) commitFileMutation(
 	return record, nil
 }
 
+// nativeCheckoutPrecommitRefusal is private to the guarded no-bytes branch.
+// Wrapping preserves both the durable receipt's cancellation semantics and
+// errors.Is for the original typed refusal.
+type nativeCheckoutPrecommitRefusal struct{ err error }
+
+func (e *nativeCheckoutPrecommitRefusal) Error() string { return e.err.Error() }
+func (e *nativeCheckoutPrecommitRefusal) Unwrap() error { return e.err }
+
+func singleFilePrecommitRefusal(ctx context.Context, tool string) bool {
+	state := checkoutMutationFromContext(ctx)
+	if state == nil || !state.singleFile || state.committedPath != "" || ctx.Err() != nil {
+		return false
+	}
+	switch tool {
+	case "edit_file", "write_file", "edit_symbol":
+		return true
+	default:
+		return false
+	}
+}
+
 // mutationNotAppliedMessage is the terminal refusal for a write that was
 // cancelled before it started. It says "nothing changed" plainly, because that
 // is the one case where a client may retry without checking anything.
 func mutationNotAppliedMessage(what string, record *mutationCommitRecord, err error) string {
-	return fmt.Sprintf(
+	message := fmt.Sprintf(
 		"%s cancelled before the disk commit — nothing was written and the file is unchanged (disk_status=not_applied, receipt=%s): %v. "+
 			"Retrying is safe.",
 		what, record.id, err)
+	var refused *nativeCheckoutPrecommitRefusal
+	if errors.As(err, &refused) {
+		message = checkoutMutationRecoveryMessage(strings.TrimSuffix(message, "."), err, true)
+	}
+	return message
 }
 
 // attachMutationCommit puts the disk half of the receipt on a success payload.

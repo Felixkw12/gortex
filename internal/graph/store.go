@@ -164,12 +164,16 @@ type Store interface {
 	// ReindexEdge is the legacy To-only mutation. Callers that change Kind
 	// must use ReindexEdges and provide EdgeReindex.OldKind.
 	ReindexEdge(e *Edge, oldTo string)
-	// Batched siblings of the per-edge mutators. Same semantics, but
-	// disk backends amortise the per-call transaction overhead by
-	// committing in implementation-chosen chunks (the in-memory
-	// backend just loops). The resolver fans out per-edge mutations
-	// across thousands of edges in a single ResolveAll pass, so the
-	// per-call form was unusable on disk backends without these.
+	// ReindexEdges frees moving stored identities before assigning destinations.
+	// A stationary destination keeps its payload, including a same-batch refresh;
+	// the first mover wins a fresh key. Repeated stationary updates apply in order.
+	// Simple intermediate chains are supported. Cross-store convergence is not
+	// guaranteed for distinct copied rows that converge at a fresh key and then
+	// move it again, or reuse an identity an earlier row already moved, whether
+	// that identity was stored or created earlier in the batch.
+	// Losing candidates create no resolver receipt work. Disk backends may commit
+	// bounded chunks independently; the two-phase guarantee is per chunk, not
+	// across chunk boundaries. A loop of per-edge calls is not equivalent.
 	// Callers MUST first mutate the *Edge fields they want persisted
 	// (To / Kind / Origin / …) before handing the entry over — these
 	// methods read the post-mutation Edge state and update the
@@ -675,6 +679,15 @@ type SymbolFTSRepoReplacer interface {
 // fallback; SQLite implements it natively.
 type FileBatchEvicter interface {
 	EvictFiles(filePaths []string) (nodesRemoved, edgesRemoved int)
+}
+
+// FileIdentityBatchEvicter replaces the same bounded file frontier while also
+// removing explicitly identified legacy file-owned nodes. Callers include those
+// identities in their prior-state/restub frontier first. Their native path may
+// also anchor shared targets, so evicting that whole spelling is not equivalent.
+// Additional IDs never widen the operation to another payload generation.
+type FileIdentityBatchEvicter interface {
+	EvictFilesWithNodeIDs(filePaths, nodeIDs []string) (nodesRemoved, edgesRemoved int)
 }
 
 // ContentHit is one result from a ContentSearcher query: the content
@@ -2031,6 +2044,12 @@ type EdgeAdjacencyForKinds interface {
 // save).
 type ExternalCallCandidates interface {
 	ExternalCallCandidateEdges() []*Edge
+}
+
+// ExternalCallCandidateIterator is the bounded, early-stoppable form of
+// ExternalCallCandidates. Callbacks may mutate the store between pages.
+type ExternalCallCandidateIterator interface {
+	ExternalCallCandidateEdgesSeq() iter.Seq[*Edge]
 }
 
 // CommunityCrossingsByKind is an optional capability backends MAY

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/zzet/gortex/internal/agents"
 )
 
 // external_agent.go handles lifecycle hooks for the non-Claude agents
@@ -108,7 +110,7 @@ func buildStaleIndexHint(cwd string) string {
 		exact, contained := classifyCwd(abs, status.TrackedRepos)
 		if exact == nil && len(contained) == 0 {
 			if pendingAutomaticCheckout(abs, status.TrackedRepos) {
-				return fmt.Sprintf("[Gortex] cwd `%s` is a Git checkout awaiting automatic discovery; do not run `gortex track`. Wait for reconciliation and reconnect.", abs)
+				return fmt.Sprintf("[Gortex] checkout discovery is pending for cwd `%s`. %s", abs, agents.PendingAutomaticCheckoutGuidance)
 			}
 			return fmt.Sprintf("[Gortex] cwd `%s` is not tracked — run `gortex track %s` to enable graph context here.", abs, abs)
 		}

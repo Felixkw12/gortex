@@ -3,9 +3,11 @@ package indexer
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/mod/modfile"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/contracts"
@@ -59,12 +62,15 @@ type RepoMetadata struct {
 // retries from repeating successful payload/vector phases and keeps the stable
 // mutation lane closed until every external side effect commits.
 type repositoryUntrackState struct {
-	mu          sync.Mutex
-	metadata    *RepoMetadata
-	indexer     *Indexer
-	coordinator *repositoryMutationCoordinator
-	contract    DerivedInvalidationPlan
-	finalize    func(*RepoMetadata) error
+	retainAdmission bool
+	mu              sync.Mutex
+	metadata        *RepoMetadata
+	indexer         *Indexer
+	coordinator     *repositoryMutationCoordinator
+	contract        DerivedInvalidationPlan
+	finalize        func(*RepoMetadata) error
+
+	goModuleAffected bool
 
 	indexerClosed   bool
 	payloadPurged   bool
@@ -77,19 +83,43 @@ type repositoryUntrackState struct {
 
 // MultiIndexer orchestrates indexing across multiple repositories.
 type MultiIndexer struct {
-	graph     graph.Store
-	registry  *parser.Registry
-	search    search.Backend
-	embedder  embedding.Provider
-	repos     map[string]*RepoMetadata // repoPrefix → metadata
-	indexers  map[string]*Indexer      // repoPrefix → per-repo indexer
-	configMgr *config.ConfigManager
-	logger    *zap.Logger
+	graph               graph.Store
+	contractCoreRuntime atomic.Pointer[ContractCoreRuntimeHooks]
+	// contractSources caches the accepted bytes each journal fingerprinted,
+	// by source fingerprint, for contract analysis reads.
+	contractSources     *contractAcceptedSourceCache
+	contractSourcesOnce sync.Once
+	contractBaselineMu  sync.Mutex
+	contractBaselines   map[string]int
+	registry            *parser.Registry
+	search              search.Backend
+	embedder            embedding.Provider
+	repos               map[string]*RepoMetadata // repoPrefix → metadata
+	indexers            map[string]*Indexer      // repoPrefix → per-repo indexer
+	configMgr           *config.ConfigManager
+	logger              *zap.Logger
+	loggedCollisions    sync.Map
+	canonicalRoot       func(string) string
 	// newIndexer is instance-local so lifecycle tests can observe a constructor
 	// failure without publishing the candidate Indexer. Production instances set
 	// it to New; every per-repository construction flows through this factory.
 	newIndexer func(graph.Store, *parser.Registry, config.IndexConfig, *zap.Logger) *Indexer
 	mu         sync.RWMutex
+
+	goModuleMu           sync.Mutex
+	goModuleChecked      time.Time
+	goModuleRevision     uint64
+	goModuleGeneration   uint64
+	goModuleRepoCount    int
+	goModuleCache        map[string]string
+	goModuleReplacements map[string][]resolver.GoModuleReplacement
+	goModuleFiles        map[string]goModuleFileStamp
+	goModuleStampedAt    time.Time
+	goModuleRules        map[string][]resolver.CrossWorkspaceDepRule
+	goModuleRetry        resolver.GoModuleDepRetry
+	npmPackageMu         sync.Mutex
+	npmPackageCache      *npmPackageSnapshot
+
 	// pendingRepositoryUntracks is guarded by mu. Entries are installed before
 	// a live repo is hidden and removed only after payload, vector, config, and
 	// derived-contract cleanup have all succeeded.
@@ -100,6 +130,15 @@ type MultiIndexer struct {
 	// an old watcher instance on a second lane.
 	repositoryMutationMu sync.Mutex
 	repositoryMutations  map[string]*repositoryMutationCoordinator
+	// Set only by the explicit daemon-managed watcher constructor, for this
+	// MultiIndexer's lifetime. Default/custom watcher callers do not opt in.
+	configManagedExcludes atomic.Bool
+
+	// outputAuthority is the process-wide output-generation authority the stack
+	// installed (NewSharedServer). Every per-repository Indexer this
+	// MultiIndexer owns resolves to it, so the owned lanes and the standalone
+	// Indexer's orphan lane admit through one authority rather than two.
+	outputAuthority atomic.Pointer[OutputGenerationAuthority]
 	// lifecycleClosed is guarded by repositoryMutationMu so closing admission
 	// is atomic with stable-lane creation. closeMu serializes idempotent teardown.
 	lifecycleClosed   bool
@@ -113,6 +152,13 @@ type MultiIndexer struct {
 	// explicit/global derived runs from interleaving with one another.
 	batchMutationGate sync.RWMutex
 	globalPassMu      sync.Mutex
+
+	// repoLoads records where each configured repository stands on its way
+	// into repos after a start: queued or running while warmup works on it,
+	// then ready, failed or missing. It is read lock-free (see
+	// repo_load_state.go) because the MCP admission gate and the probe consult
+	// it on every frame and must never wait behind mu.
+	repoLoads repoLoadTable
 
 	// shadowAdmission is process-wide, not per MultiIndexer. Every cold repo
 	// competes for the same weighted in-memory budget; repos that do not fit
@@ -355,10 +401,12 @@ func (mi *MultiIndexer) newPerRepoIndexerGuardedWithMode(
 		factory = New
 	}
 	idx := factory(mi.graph, mi.registry, cfg, mi.logger)
+	idx.contractCoreRuntime.Store(mi.contractCoreRuntime.Load())
 	idx.shadowAdmission = mi.shadowAdmission
 	idx.parseAdmission.Store(mi.parseAdmission.Load())
 	idx.nativeParseAdmission.Store(mi.nativeParseAdmission.Load())
 	idx.repositoryMutationOwner = mi
+	idx.installGoResolverContext()
 	idx.search = mi.search
 	if mi.embedder != nil {
 		idx.SetEmbedder(mi.embedder)
@@ -601,7 +649,7 @@ func (mi *MultiIndexer) withDeferredRepositoryMutation(idx *Indexer, lanesHeld b
 	}
 	// BeginDeferredPasses previously ignored its context. Do not introduce
 	// cancellation of an admitted pipeline as an incidental ownership change.
-	return idx.coordinateRepositoryMutation(context.Background(), func() error {
+	return idx.coordinateRepositoryMutation(context.Background(), OutputEntryDeferredPasses, func() error {
 		fn()
 		return nil
 	})
@@ -913,8 +961,9 @@ func (mi *MultiIndexer) resolveDeferredMutations(receipt *graph.MutationReceipt,
 			mi.runMasterResolveFiles(resolutionFiles, false)
 			// Evicted definitions' pending references live outside the file
 			// frontier (their name is no longer declared in any frontier
-			// file); rebind them by the names the receipt recorded.
-			mi.runMasterResolveNames(receipt.EvictedNames)
+			// file); rebind them by the names the receipt recorded that no
+			// definition file re-declares.
+			mi.runMasterResolveNames(vanishedReceiptNames(mi.graph, receipt))
 		}
 		// Resolve only files that can create or bind unresolved edges. Resolved
 		// edge sources still materialise their cross_repo_* generation without
@@ -958,6 +1007,10 @@ func (mi *MultiIndexer) newMasterResolver(useLSP bool) *resolver.Resolver {
 	master.SetNpmDependencyLookup(mi.npmDependencyLookup())
 	master.SetPathAliasResolver(mi.pathAliasResolver())
 	master.SetWorkspaceMembership(mi.workspaceMembershipResolver())
+	master.SetGoPackageOwnershipInventoryFactory(mi.prepareGoPackageOwnership)
+	master.SetGoModules(mi.trackedGoModules())
+	master.SetGoModuleReplacementLookup(mi.trackedGoModuleReplacements)
+	master.SetCrossWorkspaceDepLookup(mi.crossWorkspacePassLookup())
 	return master
 }
 
@@ -997,6 +1050,11 @@ func (mi *MultiIndexer) runMasterResolveHookedContext(ctx context.Context, scope
 	}
 	mt := time.Now()
 	stats, err := master.ResolveAllContext(ctx)
+	if err == nil && ctx.Err() == nil {
+		// The dataflow placeholders are lifted after every whole resolve,
+		// as a single-repository whole index and the per-save path do.
+		materializeDataflowParamsInGraph(mi.graph)
+	}
 	mi.logger.Info("DEFERRED-TIMING master.ResolveAll",
 		zap.Duration("elapsed", time.Since(mt)),
 		zap.Bool("scoped", scoped),
@@ -1009,15 +1067,33 @@ func (mi *MultiIndexer) runMasterResolveHookedContext(ctx context.Context, scope
 		zap.Int("pending_scanned", stats.PendingBefore),
 		zap.Int("pending_admitted", stats.PendingAfter),
 		zap.Error(err))
-	mi.reconcileRetargetedTestCalls(master.TakeRetargetedTestCallFiles())
+	retargetedFiles := master.TakeRetargetedTestCallFiles()
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		// A canceled resolve must not start another graph projection while
+		// shutdown joins this owner. The successful warmup/repair paths still
+		// reconcile their retargeted callers below.
+		return mi.preserveCanceledTestProjection(ctx, retargetedFiles, nil)
+	}
+	if projectionErr := mi.reconcileRetargetedTestCallsContext(ctx, retargetedFiles); projectionErr != nil {
+		return mi.preserveCanceledTestProjection(ctx, retargetedFiles, projectionErr)
+	}
 	return err
 }
 
 func (mi *MultiIndexer) runMasterResolveFiles(files []string, useLSP bool) {
+	mi.runMasterResolveFilesWithEvidence(files, useLSP, nil)
+}
+
+// runMasterResolveFilesWithEvidence is runMasterResolveFiles for a repository
+// mutation's catch-up: evidence, when non-nil, is the repository's resolver
+// holding the mutation's pre-eviction evidence (resolveWithDeferredEvidence),
+// which the master resolver inherits for this one resolve.
+func (mi *MultiIndexer) runMasterResolveFilesWithEvidence(files []string, useLSP bool, evidence *resolver.Resolver) {
 	master := mi.newMasterResolver(useLSP)
 	if master == nil {
 		return
 	}
+	master.InheritIncrementalEvidence(evidence)
 	mt := time.Now()
 	stats := master.ResolveFilesAndIncoming(files)
 	mi.logger.Info("DEFERRED-TIMING master.ResolveFilesAndIncoming",
@@ -1035,13 +1111,22 @@ func (mi *MultiIndexer) runMasterResolveFiles(files []string, useLSP bool) {
 // them, so a call that binds later than its caller's projection would
 // otherwise never gain its EdgeTests. No-op on an empty frontier.
 func (mi *MultiIndexer) reconcileRetargetedTestCalls(files []string) {
-	if len(files) == 0 {
-		return
+	_ = mi.reconcileRetargetedTestCallsContext(context.Background(), files)
+}
+
+func (mi *MultiIndexer) reconcileRetargetedTestCallsContext(ctx context.Context, files []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	_, emitted := markTestSymbolsAndEmitEdgesScoped(mi.graph, nil, files...)
+	if len(files) == 0 {
+		return nil
+	}
+	_, emitted, err := markTestSymbolsAndEmitEdgesForFilesContext(ctx, mi.graph, files)
 	mi.logger.Info("DEFERRED-TIMING test-edges reconcile for retargeted callers",
 		zap.Int("files", len(files)),
-		zap.Int("edges", emitted))
+		zap.Int("edges", emitted),
+		zap.Error(err))
+	return err
 }
 
 // runMasterResolveNames rebinds pending references parked under the given
@@ -1570,6 +1655,12 @@ func (mi *MultiIndexer) scopedGlobalPassesEnabled() bool {
 }
 
 func (mi *MultiIndexer) EndBatch() {
+	mi.EndBatchContext(context.Background())
+}
+
+// EndBatchContext releases batch mode and gives its derived work the owning
+// producer's cancellation. ResetBatch remains the no-derived-work exit.
+func (mi *MultiIndexer) EndBatchContext(ctx context.Context) {
 	mi.batchMutationGate.Lock()
 	defer mi.batchMutationGate.Unlock()
 
@@ -1585,7 +1676,10 @@ func (mi *MultiIndexer) EndBatch() {
 
 	// Keep the transition write side through the complete global pass: a
 	// watcher admitted before or during EndBatch runs wholly before or after it.
-	mi.runGlobalGraphPasses(context.Background(), state.scope, state.censusEligible)
+	if ctx.Err() != nil {
+		return
+	}
+	mi.runGlobalGraphPasses(ctx, state.scope, state.censusEligible)
 }
 
 // ResetBatch clears deferred-batch mode WITHOUT running the graph-wide
@@ -1926,14 +2020,18 @@ func (mi *MultiIndexer) runGlobalGraphPassesTopologyHeld(
 	passStart("cross_repo_edges")
 	crStart := time.Now()
 	crossRepoEdges := 0
+	skipped := false
 	if fullCoverage {
-		crossRepoEdges = resolver.DetectCrossRepoEdges(mi.graph)
+		crossRepoEdges, skipped = resolver.DetectCrossRepoEdgesWithSkip(mi.graph)
 	} else {
 		crossRepoEdges = resolver.DetectCrossRepoEdgesForRepos(mi.graph, scanRepoPrefixes)
 	}
-	mi.logger.Info("global pass: cross-repo edges",
-		zap.Int("edges", crossRepoEdges),
-		zap.Duration("elapsed", time.Since(crStart)))
+	fields := []zap.Field{zap.Int("edges", crossRepoEdges)}
+	if skipped {
+		fields = append(fields, zap.String("skipped", "single_repo"))
+	}
+	fields = append(fields, zap.Duration("elapsed", time.Since(crStart)))
+	mi.logger.Info("global pass: cross-repo edges", fields...)
 	mi.logger.Info("global passes complete",
 		zap.Duration("total", time.Since(globalStart)))
 }
@@ -2048,19 +2146,149 @@ func (mi *MultiIndexer) filterReposByScope(repos []config.RepoEntry, workspaceSl
 	return out
 }
 
+func (idx *Indexer) installGoResolverContext() {
+	mi := idx.repositoryMutationOwner
+	if mi == nil {
+		return
+	}
+	idx.resolver.SetGoModuleLookup(mi.trackedGoModules)
+	idx.resolver.SetGoModuleReplacementLookup(func() map[string][]resolver.GoModuleReplacement {
+		replacements := mi.trackedGoModuleReplacements()
+		if idx.rootPath == "" || mi.GetMetadata(idx.repoPrefix) != nil {
+			return replacements
+		}
+		// Cold resolution precedes publication of this caller's root.
+		mi.goModuleMu.Lock()
+		roots := make(map[string]string, len(mi.goModuleFiles)+1)
+		for repo, file := range mi.goModuleFiles {
+			roots[repo] = file.root
+		}
+		mi.goModuleMu.Unlock()
+		roots[idx.repoPrefix] = idx.rootPath
+		return mi.readGoModuleReplacements(roots)
+	})
+	// Construction can hold mi.mu. Initialize the cached lookup lazily at
+	// first resolution, after construction and caller config loading finish.
+	var once sync.Once
+	var lookup resolver.CrossWorkspaceDepLookup
+	idx.resolver.SetCrossWorkspaceDepLookup(func(workspace string) []resolver.CrossWorkspaceDepRule {
+		once.Do(func() { lookup = mi.crossWorkspaceLookup() })
+		rules := lookup(workspace)
+		if mi.GetMetadata(idx.repoPrefix) != nil || workspace != idx.WorkspaceID() || mi.configMgr == nil {
+			return rules
+		}
+		rules = append([]resolver.CrossWorkspaceDepRule(nil), rules...)
+		for _, dep := range mi.configMgr.GetRepoConfig(idx.repoPrefix).CrossWorkspaceDeps {
+			if dep.Workspace != "" {
+				rules = append(rules, resolver.CrossWorkspaceDepRule{Workspace: dep.Workspace, Modules: append([]string(nil), dep.Modules...)})
+			}
+		}
+		return rules
+	})
+}
+
+// trackedGoModules caches root identities by config revision and root go.mod
+// stat. Configured roots keep cold-shadow imports recognizable before publish.
+func (mi *MultiIndexer) trackedGoModules() map[string]string {
+	modules, _ := mi.goModuleSnapshot()
+	return modules
+}
+
+func (mi *MultiIndexer) goModuleSnapshot() (map[string]string, uint64) {
+	mi.goModuleMu.Lock()
+	defer mi.goModuleMu.Unlock()
+	var revision uint64
+	if mi.configMgr != nil {
+		revision = mi.configMgr.Revision()
+	}
+	count := mi.crossWorkspaceRepoCount()
+	now := time.Now()
+	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && now.Sub(mi.goModuleChecked) < time.Second {
+		return mi.goModuleCache, mi.goModuleGeneration
+	}
+	mi.goModuleChecked = now
+	roots := make(map[string]string)
+	if mi.configMgr != nil {
+		for _, entry := range mi.configMgr.Global().ReposSnapshot() {
+			roots[config.ResolvePrefix(entry)] = entry.Path
+		}
+	}
+	for prefix, meta := range mi.AllMetadata() {
+		if meta != nil && meta.RootPath != "" {
+			roots[prefix] = meta.RootPath
+		}
+	}
+	files := make(map[string]goModuleFileStamp, len(roots))
+	for prefix, root := range roots {
+		stamp := goModuleFileStamp{root: root}
+		if info, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+			stamp.size, stamp.modified = info.Size(), info.ModTime().UnixNano()
+		}
+		files[prefix] = stamp
+	}
+	if mi.goModuleCache != nil && mi.goModuleRevision == revision && mi.goModuleRepoCount == count && maps.Equal(mi.goModuleFiles, files) && !goModuleStampsRacy(mi.goModuleFiles, mi.goModuleStampedAt) {
+		return mi.goModuleCache, mi.goModuleGeneration
+	}
+	modules := readTrackedGoModules(roots)
+	replacements := mi.readGoModuleReplacements(roots)
+	sameReplacements := maps.EqualFunc(replacements, mi.goModuleReplacements, slices.Equal[[]resolver.GoModuleReplacement])
+	mi.goModuleReplacements = replacements
+	mi.goModuleFiles, mi.goModuleStampedAt = files, now
+	sameRules := true
+	if mi.configMgr != nil && (mi.goModuleCache == nil || mi.goModuleRevision != revision || mi.goModuleRepoCount != count) {
+		rules, _ := mi.collectCrossWorkspaceRules()
+		sameRules = maps.EqualFunc(rules, mi.goModuleRules, func(a, b []resolver.CrossWorkspaceDepRule) bool {
+			return slices.EqualFunc(a, b, func(a, b resolver.CrossWorkspaceDepRule) bool {
+				return a.Workspace == b.Workspace && slices.Equal(a.Modules, b.Modules)
+			})
+		})
+		mi.goModuleRules = rules
+	}
+	mi.goModuleRevision, mi.goModuleRepoCount = revision, count
+	if mi.goModuleCache != nil && maps.Equal(modules, mi.goModuleCache) && sameReplacements && sameRules {
+		return mi.goModuleCache, mi.goModuleGeneration
+	}
+	mi.goModuleCache = modules
+	mi.goModuleGeneration++
+	return modules, mi.goModuleGeneration
+}
+
+type goModuleFileStamp struct {
+	root           string
+	size, modified int64
+}
+
+// goModuleStampsRacy reports whether any go.mod changed within
+// manifestRacyWindow of when its stamp was taken. Such a stamp cannot prove
+// the file unchanged, so the snapshot reads the files again; equal contents
+// keep the cached map and its generation.
+func goModuleStampsRacy(files map[string]goModuleFileStamp, stampedAt time.Time) bool {
+	racy := stampedAt.Add(-manifestRacyWindow).UnixNano()
+	for _, stamp := range files {
+		if stamp.modified >= racy {
+			return true
+		}
+	}
+	return false
+}
+
+func readTrackedGoModules(roots map[string]string) map[string]string {
+	modules := make(map[string]string, len(roots))
+	for prefix, root := range roots {
+		if module := readGoModModule(root); module != "" {
+			modules[prefix] = module
+		}
+	}
+	return modules
+}
+
 // readGoModModule reads the module path from a go.mod file.
 func readGoModModule(repoPath string) string {
 	data, err := os.ReadFile(filepath.Join(repoPath, "go.mod"))
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "module ") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "module"))
-		}
-	}
-	return ""
+	return modfile.ModulePath(data)
 }
 
 // rebuildColdRefFacts seeds the durable resolved-reference sidecar once for
@@ -2106,7 +2334,11 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 		absPath  string
 		identity *RepoIdentity
 	}
-	trackedModules := make(map[string]string)
+	var configLookup config.RepoPathLookup
+	if mi.configMgr != nil {
+		configLookup = mi.configMgr.Global().SnapshotRepoPaths()
+	}
+	moduleRoots := make(map[string]string)
 	resolved := make([]resolvedRepo, 0, len(repos))
 	seenPrefix := make(map[string]string, len(repos)) // prefix → absPath
 	var resolveErrors []string
@@ -2127,7 +2359,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 		}
 		identity, _ := DetectIdentity(absPath)
 		e := entry
-		prefix, cfg := mi.resolveTrackPrefix(&e, absPath, identity)
+		prefix, cfg := mi.resolveTrackPrefix(&e, absPath, identity, configLookup, mi.configuredPrefixCheck())
 		// Two distinct checkouts can still land on the same derived prefix
 		// (e.g. two worktrees declaring the same workspace). resolveTrackPrefix
 		// only sees already-tracked repos, so guard against collisions within
@@ -2140,13 +2372,23 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 			}
 			prefix += "-" + shortPathHash(absPath)
 			e.Name = prefix
+			// This prefix is minted for THIS batch and is not the one the
+			// lifecycle registered an owner under, so the receipt opened for
+			// it below finds no owner and the repository is left unwitnessed
+			// (openSourceWitness). That is the honest direction — the nodes
+			// this pass writes carry the disambiguated prefix too, so no pin
+			// taken on the colliding prefix is reading them — but a request
+			// against the disambiguated prefix gets ErrBaseCorpusUnwitnessed
+			// rather than an exactness label until an owner is registered for
+			// the name this batch chose.
 		}
 		seenPrefix[prefix] = absPath
 		resolved = append(resolved, resolvedRepo{entry: e, prefix: prefix, cfg: cfg, absPath: absPath, identity: identity})
-		if mod := readGoModModule(absPath); mod != "" {
-			trackedModules[prefix] = mod
-			mi.logger.Debug("tracked repo module", zap.String("repo", prefix), zap.String("module", mod))
-		}
+		moduleRoots[prefix] = absPath
+	}
+	trackedModules := readTrackedGoModules(moduleRoots)
+	for prefix, mod := range trackedModules {
+		mi.logger.Debug("tracked repo module", zap.String("repo", prefix), zap.String("module", mod))
 	}
 
 	if len(resolved) == 0 {
@@ -2167,181 +2409,248 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 	mi.batchMutationGate.RLock()
 	defer mi.batchMutationGate.RUnlock()
 
+	// One receipt per OUTPUT OWNER this batch writes, opened after every lane
+	// is held and before any payload moves. The whole batch is one decision: if
+	// a newer mutation takes over any of these owners while it runs, the batch
+	// cannot fulfil that owner's generation.
+	//
+	// Owners are deduplicated, and not by prefix. Two tracked entries can name
+	// one repository root (two config entries with different explicit Names and
+	// one Path: resolveTrackPrefix honours an explicit Name verbatim, so the
+	// prefix collision guard above never fires). legacyOutputTargetFor keys the
+	// owner on the root, so both entries name ONE generation-zero output.
+	// Issuing two receipts for it would make the second supersede the first and
+	// refuse a cold index that fully succeeded.
+	batchTargets := make([]OutputMutationTarget, 0, len(resolved))
+	seenOutputOwner := make(map[string]bool, len(resolved))
+	for _, repo := range resolved {
+		target := legacyOutputTargetFor(outputStoreIdentity(mi.graph), repo.prefix, repo.absPath, "prefix:"+repo.prefix)
+		if seenOutputOwner[target.OwnerKey] {
+			continue
+		}
+		seenOutputOwner[target.OwnerKey] = true
+		batchTargets = append(batchTargets, target)
+	}
+
 	var finalResults map[string]*IndexResult
 	laneErr := mi.withRepositoryMutationLanes(context.Background(), prefixes, func() error {
-		// The one topology writer covers parse, publication, deferred/cross-repo
-		// tails, ref-facts, and global derivation.
-		batchMode := mi.currentBatchMode()
-		finishTopologyMutation := reach.BeginTopologyMutation(mi.graph)
-		defer finishTopologyMutation(true)
+		receipts, receiptErr := mi.outputGenerationAuthority().BeginAll(
+			context.Background(), OutputEntryIndexMultiRepo, batchTargets)
+		if receiptErr != nil {
+			return receiptErr
+		}
+		settled := false
+		defer func() {
+			if !settled {
+				receipts.Abandon()
+			}
+		}()
+		// Preventive half: refuse before the cold batch writes anything if any
+		// owner was already taken over while admission blocked on its gates.
+		if err := receipts.Current(); err != nil {
+			return err
+		}
+		batchErr := func() error {
+			// The one topology writer covers parse, publication, deferred/cross-repo
+			// tails, ref-facts, and global derivation.
+			batchMode := mi.currentBatchMode()
+			finishTopologyMutation := reach.BeginTopologyMutation(mi.graph)
+			defer finishTopologyMutation(true)
 
-		pipelineResults, pipelineErr := func() (map[string]*IndexResult, error) {
-			resultCh := make(chan repoResult, len(resolved))
-			var wg sync.WaitGroup
-			coordinatedBulk, _ := mi.graph.(graph.CoordinatedBulkLoader)
-			coordinatedBulkActive := coordinatedBulk != nil && coordinatedBulk.BeginCoordinatedBulkLoad()
-			defer func() {
+			pipelineResults, pipelineErr := func() (map[string]*IndexResult, error) {
+				resultCh := make(chan repoResult, len(resolved))
+				var wg sync.WaitGroup
+				coordinatedBulk, _ := mi.graph.(graph.CoordinatedBulkLoader)
+				coordinatedBulkActive := coordinatedBulk != nil && coordinatedBulk.BeginCoordinatedBulkLoad()
+				defer func() {
+					if coordinatedBulkActive {
+						if err := coordinatedBulk.EndCoordinatedBulkLoad(); err != nil {
+							mi.logger.Error("multi-repo bulk-load cleanup failed", zap.Error(err))
+						}
+					}
+				}()
+
+				for _, rr := range resolved {
+					wg.Add(1)
+					go func(r resolvedRepo) {
+						defer wg.Done()
+
+						idx := mi.newPerRepoIndexerGuardedWithMode(r.cfg.Index, batchMode)
+						idx.SetRepoPrefix(r.prefix)
+						entryCopy := r.entry
+						idx.SetWorkspaceID(resolveWorkspaceID(&entryCopy, r.cfg, r.prefix))
+						idx.SetProjectID(resolveProjectID(&entryCopy, r.cfg, r.prefix))
+						idx.SetTrackedRepoModules(trackedModules)
+						// Defer the per-repo cross-cutting passes (ResolveAll,
+						// semantic enrich, contract extract+commit) so they don't
+						// race against each other across goroutines on the shared
+						// graph. They run serially below via RunDeferredPasses after
+						// wg.Wait(). The graph-wide derivation passes run once after
+						// the loop via the shared global-pass pipeline.
+						idx.SetDeferResolve(true)
+
+						result, err := idx.indexCtxRaw(WithIndexOrigin(context.Background(), "index_all"), r.absPath)
+						if err != nil {
+							idx.Close()
+							resultCh <- repoResult{prefix: r.prefix, err: fmt.Errorf("indexing %s: %w", r.absPath, err)}
+							return
+						}
+						if result == nil {
+							idx.Close()
+							resultCh <- repoResult{prefix: r.prefix, err: fmt.Errorf("indexing %s returned a nil result", r.absPath)}
+							return
+						}
+						result.RepoPrefix = r.prefix
+
+						meta := &RepoMetadata{
+							RepoPrefix:    r.prefix,
+							RootPath:      r.absPath,
+							Identity:      r.identity,
+							LastIndexTime: time.Now(),
+							FileCount:     result.FileCount,
+							NodeCount:     result.NodeCount,
+							EdgeCount:     result.EdgeCount,
+							ParseErrors:   result.Errors,
+							FileMtimes:    idx.publishFileMtimes(),
+
+							IsWorktree: ResolveWorktree(r.absPath).IsWorktree,
+						}
+
+						resultCh <- repoResult{prefix: r.prefix, result: result, idx: idx, meta: meta}
+					}(rr)
+				}
+
+				go func() {
+					wg.Wait()
+					close(resultCh)
+				}()
+
+				results := make(map[string]*IndexResult)
+				indexErrors := resolveErrors
+				completed := make([]repoResult, 0, len(resolved))
+
+				// Drain workers without holding the registry lock. Constructors and future
+				// worker tails may need read access to MultiIndexer state; pinning mi.mu
+				// across the channel range turns any such read into a producer/consumer
+				// deadlock and blocks unrelated registry readers for the whole warmup.
+				for rr := range resultCh {
+					if rr.err != nil {
+						mi.logger.Error("failed to index repo", zap.String("prefix", rr.prefix), zap.Error(rr.err))
+						indexErrors = append(indexErrors, rr.err.Error())
+						continue
+					}
+					completed = append(completed, rr)
+					results[rr.prefix] = rr.result
+				}
+				oldIndexers := make([]*Indexer, 0, len(completed))
+				mi.mu.Lock()
+				for _, rr := range completed {
+					if old := mi.indexers[rr.prefix]; old != nil && old != rr.idx {
+						oldIndexers = append(oldIndexers, old)
+					}
+					mi.repos[rr.prefix] = rr.meta
+					mi.indexers[rr.prefix] = rr.idx
+				}
+				mi.mu.Unlock()
+				for _, old := range oldIndexers {
+					old.Close()
+				}
 				if coordinatedBulkActive {
 					if err := coordinatedBulk.EndCoordinatedBulkLoad(); err != nil {
-						mi.logger.Error("multi-repo bulk-load cleanup failed", zap.Error(err))
+						return nil, fmt.Errorf("multi-repo bulk-load finalize: %w", err)
+					}
+					coordinatedBulkActive = false
+				}
+				for _, rr := range completed {
+					if err := mi.postPublishGoModules(context.Background(), rr.idx, true); err != nil {
+						mi.logger.Warn("post-publish Go module follow-up", zap.Error(err))
 					}
 				}
+
+				// Do not publish a completed pipeline when no repository reached the
+				// deferred stages. Besides making the failure deterministic, this prevents
+				// global passes from deriving edges from a partially-drained failed batch.
+				if len(indexErrors) > 0 && len(results) == 0 {
+					sort.Strings(indexErrors)
+					return nil, fmt.Errorf("all repos failed to index: %s", strings.Join(indexErrors, "; "))
+				}
+
+				// Complete cold multi-repo indexing through the same coordinated pipeline
+				// used by daemon warmup:
+				//   1. materialise go.mod contracts once, then run one shared base resolve;
+				//   2. enrich repositories in bounded language-aware batches (large Go
+				//      repositories remain exclusive), committing contracts only after each
+				//      batch drains;
+				//   3. use the mutation receipt to perform only the exact catch-up needed for
+				//      semantic/contract mutations.
+				//
+				// The old loop called idx.RunDeferredPasses with
+				// skipResolveInDeferred=false, so every repository performed ResolveAll over
+				// the entire shared graph. At R repositories and E edges that was O(R*E) and
+				// was the dominant cold-index regression. runDeferredGoMod is generation-
+				// idempotent, so RunDeferredPassesAll does not repeat the pre-resolve work.
+				deferCtx := context.Background()
+				if err := mi.RunPreEnrichResolve(deferCtx, nil, nil); err != nil {
+					return results, fmt.Errorf("multi-repo pre-enrichment resolve: %w", err)
+				}
+				completedIndexers := make([]*Indexer, 0, len(completed))
+				for _, rr := range completed {
+					completedIndexers = append(completedIndexers, rr.idx)
+				}
+				deferredResult := mi.finishColdDeferredPasses(deferCtx, completedIndexers)
+				mi.logger.Info("multi-repo coordinated deferred passes complete",
+					zap.Int("repos_indexed", len(results)),
+					zap.Int("repos_failed", len(indexErrors)),
+					zap.Int("enrich_scheduled", deferredResult.EnrichScheduled),
+					zap.Bool("exact_cross_repo_complete", deferredResult.ExactCrossRepoComplete))
+
+				// ResolveAll normally seeds ref_facts after a full resolve. The coordinated
+				// cold path intentionally bypasses per-repository ResolveAll, so seed the
+				// successful repository set once after every base, semantic catch-up, and
+				// cross-repository mutation has settled. Sorting makes the boundary stable
+				// for tracing/tests; SQLite consumes the whole slice in one transaction.
+				successfulPrefixes := make([]string, 0, len(results))
+				for prefix := range results {
+					successfulPrefixes = append(successfulPrefixes, prefix)
+				}
+				sort.Strings(successfulPrefixes)
+				if err := mi.rebuildColdRefFacts(deferCtx, successfulPrefixes); err != nil {
+					return results, fmt.Errorf("multi-repo reference-fact rebuild: %w", err)
+				}
+
+				// Graph-wide derivation passes run exactly once after every repo
+				// has been parsed, every per-repo and cross-repo resolver has lifted
+				// placeholder edges, and contract bridges are in place. RunDeferredPasses
+				// intentionally skips these so we don't pay an O(global) walk per
+				// repo (was the dominant cost at R≈100+).
+				mi.runGlobalGraphPassesTopologyHeld(context.Background(), nil, false)
+
+				return results, nil
 			}()
-
-			for _, rr := range resolved {
-				wg.Add(1)
-				go func(r resolvedRepo) {
-					defer wg.Done()
-
-					idx := mi.newPerRepoIndexerGuardedWithMode(r.cfg.Index, batchMode)
-					idx.SetRepoPrefix(r.prefix)
-					entryCopy := r.entry
-					idx.SetWorkspaceID(resolveWorkspaceID(&entryCopy, r.cfg, r.prefix))
-					idx.SetProjectID(resolveProjectID(&entryCopy, r.cfg, r.prefix))
-					idx.SetTrackedRepoModules(trackedModules)
-					// Defer the per-repo cross-cutting passes (ResolveAll,
-					// semantic enrich, contract extract+commit) so they don't
-					// race against each other across goroutines on the shared
-					// graph. They run serially below via RunDeferredPasses after
-					// wg.Wait(). The graph-wide derivation passes run once after
-					// the loop via the shared global-pass pipeline.
-					idx.SetDeferResolve(true)
-
-					result, err := idx.indexCtxRaw(context.Background(), r.absPath)
-					if err != nil {
-						idx.Close()
-						resultCh <- repoResult{prefix: r.prefix, err: fmt.Errorf("indexing %s: %w", r.absPath, err)}
-						return
-					}
-					if result == nil {
-						idx.Close()
-						resultCh <- repoResult{prefix: r.prefix, err: fmt.Errorf("indexing %s returned a nil result", r.absPath)}
-						return
-					}
-					result.RepoPrefix = r.prefix
-
-					meta := &RepoMetadata{
-						RepoPrefix:    r.prefix,
-						RootPath:      r.absPath,
-						Identity:      r.identity,
-						LastIndexTime: time.Now(),
-						FileCount:     result.FileCount,
-						NodeCount:     result.NodeCount,
-						EdgeCount:     result.EdgeCount,
-						ParseErrors:   result.Errors,
-						FileMtimes:    idx.publishFileMtimes(),
-
-						IsWorktree: ResolveWorktree(r.absPath).IsWorktree,
-					}
-
-					resultCh <- repoResult{prefix: r.prefix, result: result, idx: idx, meta: meta}
-				}(rr)
-			}
-
-			go func() {
-				wg.Wait()
-				close(resultCh)
-			}()
-
-			results := make(map[string]*IndexResult)
-			indexErrors := resolveErrors
-			completed := make([]repoResult, 0, len(resolved))
-
-			// Drain workers without holding the registry lock. Constructors and future
-			// worker tails may need read access to MultiIndexer state; pinning mi.mu
-			// across the channel range turns any such read into a producer/consumer
-			// deadlock and blocks unrelated registry readers for the whole warmup.
-			for rr := range resultCh {
-				if rr.err != nil {
-					mi.logger.Error("failed to index repo", zap.String("prefix", rr.prefix), zap.Error(rr.err))
-					indexErrors = append(indexErrors, rr.err.Error())
-					continue
-				}
-				completed = append(completed, rr)
-				results[rr.prefix] = rr.result
-			}
-			oldIndexers := make([]*Indexer, 0, len(completed))
-			mi.mu.Lock()
-			for _, rr := range completed {
-				if old := mi.indexers[rr.prefix]; old != nil && old != rr.idx {
-					oldIndexers = append(oldIndexers, old)
-				}
-				mi.repos[rr.prefix] = rr.meta
-				mi.indexers[rr.prefix] = rr.idx
-			}
-			mi.mu.Unlock()
-			for _, old := range oldIndexers {
-				old.Close()
-			}
-			if coordinatedBulkActive {
-				if err := coordinatedBulk.EndCoordinatedBulkLoad(); err != nil {
-					return nil, fmt.Errorf("multi-repo bulk-load finalize: %w", err)
-				}
-				coordinatedBulkActive = false
-			}
-
-			// Do not publish a completed pipeline when no repository reached the
-			// deferred stages. Besides making the failure deterministic, this prevents
-			// global passes from deriving edges from a partially-drained failed batch.
-			if len(indexErrors) > 0 && len(results) == 0 {
-				sort.Strings(indexErrors)
-				return nil, fmt.Errorf("all repos failed to index: %s", strings.Join(indexErrors, "; "))
-			}
-
-			// Complete cold multi-repo indexing through the same coordinated pipeline
-			// used by daemon warmup:
-			//   1. materialise go.mod contracts once, then run one shared base resolve;
-			//   2. enrich repositories in bounded language-aware batches (large Go
-			//      repositories remain exclusive), committing contracts only after each
-			//      batch drains;
-			//   3. use the mutation receipt to perform only the exact catch-up needed for
-			//      semantic/contract mutations.
-			//
-			// The old loop called idx.RunDeferredPasses with
-			// skipResolveInDeferred=false, so every repository performed ResolveAll over
-			// the entire shared graph. At R repositories and E edges that was O(R*E) and
-			// was the dominant cold-index regression. runDeferredGoMod is generation-
-			// idempotent, so RunDeferredPassesAll does not repeat the pre-resolve work.
-			deferCtx := context.Background()
-			if err := mi.RunPreEnrichResolve(deferCtx, nil, nil); err != nil {
-				return results, fmt.Errorf("multi-repo pre-enrichment resolve: %w", err)
-			}
-			completedIndexers := make([]*Indexer, 0, len(completed))
-			for _, rr := range completed {
-				completedIndexers = append(completedIndexers, rr.idx)
-			}
-			deferredResult := mi.finishColdDeferredPasses(deferCtx, completedIndexers)
-			mi.logger.Info("multi-repo coordinated deferred passes complete",
-				zap.Int("repos_indexed", len(results)),
-				zap.Int("repos_failed", len(indexErrors)),
-				zap.Int("enrich_scheduled", deferredResult.EnrichScheduled),
-				zap.Bool("exact_cross_repo_complete", deferredResult.ExactCrossRepoComplete))
-
-			// ResolveAll normally seeds ref_facts after a full resolve. The coordinated
-			// cold path intentionally bypasses per-repository ResolveAll, so seed the
-			// successful repository set once after every base, semantic catch-up, and
-			// cross-repository mutation has settled. Sorting makes the boundary stable
-			// for tracing/tests; SQLite consumes the whole slice in one transaction.
-			successfulPrefixes := make([]string, 0, len(results))
-			for prefix := range results {
-				successfulPrefixes = append(successfulPrefixes, prefix)
-			}
-			sort.Strings(successfulPrefixes)
-			if err := mi.rebuildColdRefFacts(deferCtx, successfulPrefixes); err != nil {
-				return results, fmt.Errorf("multi-repo reference-fact rebuild: %w", err)
-			}
-
-			// Graph-wide derivation passes run exactly once after every repo
-			// has been parsed, every per-repo and cross-repo resolver has lifted
-			// placeholder edges, and contract bridges are in place. RunDeferredPasses
-			// intentionally skips these so we don't pay an O(global) walk per
-			// repo (was the dominant cost at R≈100+).
-			mi.runGlobalGraphPassesTopologyHeld(context.Background(), nil, false)
-
-			return results, nil
+			finalResults = pipelineResults
+			return pipelineErr
 		}()
-		finalResults = pipelineResults
-		return pipelineErr
+		if batchErr != nil {
+			return batchErr
+		}
+		settled = true
+		// Fulfilment is refused when a newer mutation took over any of these
+		// owners while the batch ran; the batch then reports that refusal
+		// instead of announcing a completed cold index.
+		if err := receipts.Complete(); err != nil {
+			return err
+		}
+		// Every completed repository's journal is accepted, failed files
+		// included: the cold pass staged a failure envelope for each of them
+		// (indexCtxRaw), so the accepted namespace excludes exactly that set.
+		for prefix, result := range finalResults {
+			if result != nil {
+				if err := mi.acceptInstalledContractCoreInputs(context.Background(), prefix); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	})
 	return finalResults, laneErr
 }
@@ -2356,16 +2665,46 @@ func (mi *MultiIndexer) IndexRepo(repoPrefix string) (*IndexResult, error) {
 	}
 	var result *IndexResult
 	var indexErr error
+	// The third door into generation zero: a direct lane acquisition that does
+	// not go through Indexer.coordinateRepositoryMutation. It names its output
+	// generation through the same authority, inside the lane.
+	target := legacyOutputTargetFor(outputStoreIdentity(mi.graph), repoPrefix, mi.repoRootPath(repoPrefix), "prefix:"+repoPrefix)
 	err := mi.repositoryMutationCoordinator(repoPrefix).runExclusive(context.Background(), func() error {
-		finishTopologyMutation := reach.BeginTopologyMutation(mi.graph)
-		defer finishTopologyMutation(true)
-		result, indexErr = mi.indexRepoRaw(repoPrefix)
-		return indexErr
+		receipt, receiptErr := mi.outputGenerationAuthority().Begin(
+			context.Background(), OutputEntryIndexRepo, target)
+		if receiptErr != nil {
+			return receiptErr
+		}
+		if err := runUnderOutputReceipt(receipt, func() error {
+			finishTopologyMutation := reach.BeginTopologyMutation(mi.graph)
+			defer finishTopologyMutation(true)
+			result, indexErr = mi.indexRepoRaw(repoPrefix)
+			return indexErr
+		}); err != nil {
+			return err
+		}
+		// The outer receipt has settled: accept the cold namespace's journal
+		// inside the lane, as every other cold door does, and announce it.
+		return mi.acceptInstalledContractCoreInputs(context.Background(), repoPrefix)
 	})
 	if err != nil {
 		return result, err
 	}
 	return result, indexErr
+}
+
+// repoRootPath reports one tracked repository's root, empty when it is not
+// tracked. It takes only the registry read lock and never waits on a lane.
+func (mi *MultiIndexer) repoRootPath(repoPrefix string) string {
+	if mi == nil {
+		return ""
+	}
+	mi.mu.RLock()
+	defer mi.mu.RUnlock()
+	if meta := mi.repos[repoPrefix]; meta != nil {
+		return meta.RootPath
+	}
+	return ""
 }
 
 // indexRepoRaw replaces one live Indexer while its stable repository lane is held.
@@ -2381,7 +2720,6 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 	// Replace only the base handle's generation before re-indexing. A lone repo
 	// is stored prefixed from its first index, but immutable commit/dirty/ref
 	// payload generations may carry the same prefix and must remain intact.
-	evictRepoCurrentGeneration(mi.graph, repoPrefix)
 
 	mi.configMgr.LoadWorkspaceConfig(repoPrefix, meta.RootPath)
 	cfg := mi.configMgr.GetRepoConfig(repoPrefix)
@@ -2401,11 +2739,23 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 	// split: a repo is prefixed from its first index, and adding another is
 	// purely additive.
 	idx.SetRepoPrefix(repoPrefix)
-	entry := mi.configMgr.Global().FindRepoByPrefix(repoPrefix)
+	entry := mi.configMgr.RepoPathLookup()(meta.RootPath)
 	idx.SetWorkspaceID(resolveWorkspaceID(entry, cfg, repoPrefix))
 	idx.SetProjectID(resolveProjectID(entry, cfg, repoPrefix))
 
-	result, err := idx.indexCtxRaw(context.Background(), meta.RootPath)
+	if _, err := idx.beginInstalledContractCoreInputs(context.Background()); err != nil {
+		return nil, err
+	}
+	if journal := idx.contractCoreInputs; journal != nil {
+		if backend, ok := journal.backend.(*contractCoreStorageBackend); ok {
+			if err := backend.beginFullCoreNamespace(context.Background()); err != nil {
+				return nil, err
+			}
+		}
+	}
+	restubGoModuleRepoIncoming(mi.graph, repoPrefix)
+	evictRepoCurrentGeneration(mi.graph, repoPrefix)
+	result, err := idx.indexCtxRaw(WithIndexOrigin(context.Background(), "index_repo"), meta.RootPath)
 	if err != nil {
 		return nil, fmt.Errorf("indexing %s: %w", meta.RootPath, err)
 	}
@@ -2435,8 +2785,10 @@ func (mi *MultiIndexer) indexRepoRaw(repoPrefix string) (*IndexResult, error) {
 		oldIdx.Close()
 	}
 
-	// TODO: After re-indexing, run CrossRepoResolver.ResolveForRepo(repoPrefix)
-	// to update cross-repo edges. This will be implemented in Task 7.1.
+	mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(repoPrefix))
+	if err := mi.postPublishGoModules(context.Background(), idx, false); err != nil {
+		mi.logger.Warn("post-publish Go module follow-up", zap.Error(err))
+	}
 
 	mi.ReconcileContractEdges()
 
@@ -2479,7 +2831,7 @@ func (mi *MultiIndexer) RefreshRepoConfigs() int {
 		idx := mi.indexers[prefix]
 		mi.mu.RUnlock()
 		if idx != nil {
-			idx.SetExcludePatterns(cfg.Index.Exclude)
+			idx.SetIgnorePatterns(cfg.Index.Exclude, cfg.Index.Include)
 		}
 	}
 	return len(roots)
@@ -2542,9 +2894,11 @@ func (mi *MultiIndexer) incrementalDiscoverRepo(repoPrefix string, paths []strin
 		}
 		var result *IndexResult
 		err := coordinator.runExclusive(context.Background(), func() error {
-			var rawErr error
-			result, rawErr = mi.incrementalDiscoverRepoRaw(repoPrefix, paths)
-			return rawErr
+			return idx.withOutputGeneration(context.Background(), OutputEntryIncrementalDiscoverRepo, func() error {
+				var rawErr error
+				result, rawErr = mi.incrementalDiscoverRepoRaw(repoPrefix, paths)
+				return rawErr
+			})
 		})
 		if err == errRepositoryMutationCoordinatorClosed {
 			continue
@@ -2645,6 +2999,13 @@ func (mi *MultiIndexer) incrementalReindexRepoRawMode(repoPrefix string, paths [
 		return nil, fmt.Errorf("repository mutation executor has no live indexer: %s", repoPrefix)
 	}
 
+	// Refresh the producer under its already-held repository lane. A watcher
+	// admission refresh alone would still leave unignored source excluded by
+	// the long-lived Indexer's construction-time matcher.
+	if mi.configManagedExcludes.Load() {
+		idx.refreshEffectiveExcludePatterns(mi.configMgr.EffectiveExclude(repoPrefix), mi.configMgr.EffectiveInclude(repoPrefix))
+	}
+
 	// The stable per-repository lane is held before this executor runs. Take
 	// the global reachability topology gate second and keep it through the
 	// resolver, metadata, and derived tails to avoid lane/gate inversion.
@@ -2652,6 +3013,14 @@ func (mi *MultiIndexer) incrementalReindexRepoRawMode(repoPrefix string, paths [
 	topologyChanged := true
 	defer func() { finishTopologyMutation(topologyChanged) }()
 
+	for _, path := range paths {
+		if filepath.Base(path) == "go.mod" {
+			mi.goModuleMu.Lock()
+			mi.goModuleChecked = time.Time{}
+			mi.goModuleMu.Unlock()
+			break
+		}
+	}
 	result, receipt, batch, err := idx.incrementalReindexPathsWithReceiptMode(meta.RootPath, paths, mode)
 	if err != nil {
 		return nil, fmt.Errorf("reindexing %s: %w", meta.RootPath, err)
@@ -2689,12 +3058,71 @@ func (mi *MultiIndexer) incrementalReindexRepoRawMode(repoPrefix string, paths [
 	mi.mu.Unlock()
 
 	idx.observeIncrementalCatchup("derived", result.DerivedInvalidation.Files)
-	mi.runIncrementalDerivedPassesTopologyHeld(context.Background(), map[string]DerivedInvalidationPlan{
+	mi.runIncrementalDerivedPassesWithPriorTopologyHeld(context.Background(), map[string]DerivedInvalidationPlan{
 		repoPrefix: result.DerivedInvalidation,
-	})
+	}, result.capabilityPrior)
 
 	topologyChanged = incrementalTopologyChanged(result)
 	return result, nil
+}
+
+// PrefixCollisionError reports a prefix already owned by another repository.
+type PrefixCollisionError struct {
+	Prefix       string
+	ExistingPath string
+	Path         string
+	OwnerMissing bool
+}
+
+// NewPrefixCollisionError samples owner availability once, outside formatting.
+func NewPrefixCollisionError(prefix, owner, root string) *PrefixCollisionError {
+	_, err := os.Stat(owner)
+	return &PrefixCollisionError{Prefix: prefix, ExistingPath: owner, Path: root, OwnerMissing: os.IsNotExist(err)}
+}
+
+func (e *PrefixCollisionError) Error() string {
+	if e.OwnerMissing {
+		return fmt.Sprintf("repository prefix %q is already used by %s, which no longer exists; inspect `gortex untrack %s` before tracking %s again",
+			e.Prefix, e.ExistingPath, e.ExistingPath, e.Path)
+	}
+	return fmt.Sprintf("repository prefix %q is already used by %s; use `gortex track --name <other> %s` for a new entry, or set a unique name in the global config and reload", e.Prefix, e.ExistingPath, e.Path)
+}
+
+// trackedLocked reports whether path is already tracked under any prefix,
+// or returns a PrefixCollisionError when prefix belongs to another
+// repository. The same-path scan runs first, so a repository tracked under
+// another name (for example after `track --name`) stays a no-op.
+// Callers hold mi.mu.
+func (mi *MultiIndexer) trackedLocked(prefix, path string) (bool, error) {
+	for _, meta := range mi.repos {
+		if meta != nil && pathkey.SamePathIdentity(meta.RootPath, path) {
+			return true, nil
+		}
+	}
+	existing, ok := mi.repos[prefix]
+	if ok && existing != nil && !sameDirectory(existing.RootPath, path) {
+		return true, NewPrefixCollisionError(prefix, existing.RootPath, path)
+	}
+	return ok, nil
+}
+
+// logCollision warns about a configured repository that is not loaded
+// because another repository owns its prefix.
+func (mi *MultiIndexer) logCollision(err error) {
+	if err == nil {
+		return
+	}
+	if _, logged := mi.loggedCollisions.LoadOrStore(err.Error(), struct{}{}); !logged {
+		mi.logger.Warn("repository not loaded", zap.Error(err))
+	}
+}
+
+// sameDirectory reports whether two existing paths are the same directory,
+// for example a symlinked spelling. It stats both paths.
+func sameDirectory(a, b string) bool {
+	ai, aerr := os.Stat(a)
+	bi, berr := os.Stat(b)
+	return aerr == nil && berr == nil && os.SameFile(ai, bi)
 }
 
 // TrackRepo validates the path, detects identity, indexes, and adds to config.
@@ -2702,21 +3130,12 @@ func (mi *MultiIndexer) TrackRepo(entry config.RepoEntry) (*IndexResult, error) 
 	return mi.TrackRepoCtx(context.Background(), entry)
 }
 
-// resolveTrackPrefix determines the repo prefix that absPath should be
-// registered under and loads the per-repo `.gortex.yaml` config keyed to
-// that prefix. It is the single place that decides whether a git
-// worktree of an already-tracked repo becomes an INDEPENDENT instance
-// (see WorktreeInstanceName); the track and reconcile paths both call it
-// before their "already tracked?" check so a worktree that joins a
-// different workspace than the canonical no longer silently coalesces
-// into it.
-//
-// When a separate instance is created the derived `<base>@<tag>` prefix
-// is written back into entry.Name so it is persisted to config and
-// reproduced deterministically on the next daemon warmup. entry is
-// mutated in place; callers pass a pointer to the value they will add to
-// the global config.
-func (mi *MultiIndexer) resolveTrackPrefix(entry *config.RepoEntry, absPath string, identity *RepoIdentity) (string, *config.Config) {
+// resolveTrackPrefix prepares workspace config and resolves workspace/forced
+// instancing when the caller has not pinned Name. CheckoutLifecycle.Register
+// pins existing and family admin-name prefixes before reaching this fallback.
+// The prepared config is published only after live and configured ownership
+// checks succeed. A derived instance name is written back to entry for config.
+func (mi *MultiIndexer) resolveTrackPrefix(entry *config.RepoEntry, absPath string, identity *RepoIdentity, lookup config.RepoPathLookup, checkConfigured func(string, string) error) (string, *config.Config) {
 	base := config.ResolvePrefix(*entry)
 	if base == "" || base == "." {
 		if identity != nil {
@@ -2727,43 +3146,57 @@ func (mi *MultiIndexer) resolveTrackPrefix(entry *config.RepoEntry, absPath stri
 		return base, config.Default()
 	}
 
-	// Load the repo's `.gortex.yaml` under the base prefix first so we can
-	// read its declared workspace before deciding the final prefix.
-	mi.configMgr.LoadWorkspaceConfig(base, absPath)
-	cfg := mi.configMgr.GetRepoConfig(base)
-
-	// An explicit Name already pins the prefix — honour it verbatim. This
-	// is also the warm-restart fast path: once a worktree instance has
-	// been persisted with its derived Name, every later load short-circuits
-	// here without re-deriving.
-	if entry.Name != "" {
-		return base, cfg
-	}
-
+	// Read the workspace once, before acquiring the registry lock. The same
+	// snapshot supplies both membership and the eventual config publication.
+	cfg, publish := mi.configMgr.PrepareWorkspaceConfig(base, absPath, lookup)
 	declaredWS := entry.Workspace
-	if declaredWS == "" && cfg != nil {
+	if declaredWS == "" {
 		declaredWS = cfg.Workspace
 	}
 
-	name, separate := WorktreeInstanceName(absPath, base, declaredWS, entry.AsWorktree)
-	if !separate {
-		return base, cfg
+	prefix := base
+	if entry.Name == "" {
+		if name, separate := WorktreeInstanceName(absPath, base, declaredWS, entry.AsWorktree); separate {
+			prefix = name
+			mi.mu.RLock()
+			existing, ok := mi.repos[prefix]
+			mi.mu.RUnlock()
+			if ok && existing != nil && !pathkey.SamePathIdentity(existing.RootPath, absPath) {
+				prefix = WorktreeInstanceCollisionName(name, absPath)
+			}
+			entry.Name = prefix // persist the decision so warmup reproduces it
+		}
 	}
 
-	// Guard against two different checkouts colliding on the same derived
-	// name (e.g. two worktrees that both declare workspace `x`): keep the
-	// first, suffix the rest with a path hash.
-	prefix := name
-	mi.mu.RLock()
-	existing, ok := mi.repos[prefix]
-	mi.mu.RUnlock()
-	if ok && existing != nil && !pathkey.SamePathIdentity(existing.RootPath, absPath) {
-		prefix = name + "-" + shortPathHash(absPath)
+	// Configured owners can be absent from the live registry during warmup.
+	if checkConfigured(prefix, absPath) != nil {
+		return prefix, mi.configMgr.GetRepoConfig(prefix)
 	}
+	// Re-check ownership before publishing the prepared snapshot.
+	mi.mu.Lock()
+	tracked, collision := mi.trackedLocked(prefix, absPath)
+	if collision != nil || tracked && !mi.ownsPrefixLocked(prefix, absPath) {
+		mi.mu.Unlock()
+		return prefix, mi.configMgr.GetRepoConfig(prefix)
+	}
+	publish(prefix)
+	mi.mu.Unlock()
+	// Hand the indexer the manager's shared exclude snapshot, as main does by
+	// rebuilding after publication: policy refreshes compare slice identity,
+	// so a private copy would read as a changed policy on the first pass.
+	// Another root can publish the same prefix after the unlock; keep the
+	// prepared list unless the shared one has the same content.
+	if effective := mi.configMgr.EffectiveExclude(prefix); slices.Equal(effective, cfg.Exclude) {
+		cfg.Exclude, cfg.Index.Exclude, cfg.Watch.Exclude = effective, effective, effective
+	}
+	return prefix, cfg
+}
 
-	entry.Name = prefix // persist the decision so warmup reproduces it
-	mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
-	return prefix, mi.configMgr.GetRepoConfig(prefix)
+// ownsPrefixLocked reports whether path is the repository registered under
+// prefix. Callers hold mi.mu.
+func (mi *MultiIndexer) ownsPrefixLocked(prefix, path string) bool {
+	existing := mi.repos[prefix]
+	return existing != nil && (pathkey.SamePathIdentity(existing.RootPath, path) || sameDirectory(existing.RootPath, path))
 }
 
 // EffectiveRepoPrefix returns the prefix a repo entry is tracked under,
@@ -2787,9 +3220,14 @@ func EffectiveRepoPrefix(cm *config.ConfigManager, entry config.RepoEntry) strin
 	}
 	declaredWS := entry.Workspace
 	if declaredWS == "" && cm != nil {
-		cm.LoadWorkspaceConfig(base, absPath)
-		if cfg := cm.GetRepoConfig(base); cfg != nil {
+		// Read only the workspace name. On a malformed or
+		// unreadable file, use the last good parse for this root.
+		if cfg, err := config.ParseWorkspaceFile(filepath.Join(absPath, ".gortex.yaml")); err == nil {
 			declaredWS = cfg.Workspace
+		} else if !os.IsNotExist(err) {
+			if ws := cm.LastGoodWorkspace(base, absPath); ws != nil {
+				declaredWS = ws.Workspace
+			}
 		}
 	}
 	name, _ := WorktreeInstanceName(absPath, base, declaredWS, entry.AsWorktree)
@@ -2808,6 +3246,28 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 func (mi *MultiIndexer) trackRepoSourceCtx(
 	ctx context.Context, entry config.RepoEntry, content source.ContentSource,
 ) (*IndexResult, error) {
+	prepared, err := mi.prepareTrackRepo(entry)
+	if err != nil || prepared == nil {
+		return nil, err
+	}
+	return mi.trackPreparedRepoSourceCtx(ctx, prepared, content)
+}
+
+// preparedTrackRepo carries one tracking attempt, not a namespace reservation
+// or an immutable configuration snapshot. It must not be cached across attempts.
+type preparedTrackRepo struct {
+	entry           config.RepoEntry
+	absPath         string
+	identity        *RepoIdentity
+	prefix          string
+	cfg             *config.Config
+	checkConfigured func(string, string) error
+}
+
+// prepareTrackRepo resolves the existing pre-index inputs and runs the existing
+// hook. It does not itself construct or register an Indexer; config loading and
+// the hook remain side effects, so this is not a pure preflight operation.
+func (mi *MultiIndexer) prepareTrackRepo(entry config.RepoEntry) (*preparedTrackRepo, error) {
 	absPath, err := filepath.Abs(entry.Path)
 	if err != nil {
 		return nil, fmt.Errorf("resolving path %s: %w", entry.Path, err)
@@ -2846,7 +3306,8 @@ func (mi *MultiIndexer) trackRepoSourceCtx(
 	// slugs declared inside the repo (without it every repo would fall
 	// back to `workspace = repoPrefix`, making shared-workspace cross-repo
 	// matching impossible to express).
-	prefix, cfg := mi.resolveTrackPrefix(&entry, absPath, identity)
+	checkConfigured := mi.configuredPrefixCheck()
+	prefix, cfg := mi.resolveTrackPrefix(&entry, absPath, identity, nil, checkConfigured)
 
 	// Check if already tracked. The prefix-keyed check catches the common
 	// case; the path scan additionally catches a case-only or Unicode
@@ -2855,22 +3316,42 @@ func (mi *MultiIndexer) trackRepoSourceCtx(
 	// prefix and would otherwise be minted as a bogus second instance —
 	// the very thing that flips the daemon into multi-repo mode, #270).
 	mi.mu.RLock()
-	if _, exists := mi.repos[prefix]; exists {
+	if tracked, err := mi.trackedLocked(prefix, absPath); tracked {
 		mi.mu.RUnlock()
-		return nil, nil // already tracked
-	}
-	for _, meta := range mi.repos {
-		if meta != nil && pathkey.SamePathIdentity(meta.RootPath, absPath) {
-			mi.mu.RUnlock()
-			return nil, nil // same directory, different path spelling
-		}
+		return nil, err // nil when this directory is already tracked
 	}
 	hook := mi.onRepoTracked
 	mi.mu.RUnlock()
+	if err := checkConfigured(prefix, absPath); err != nil {
+		return nil, err
+	}
 
 	if hook != nil {
 		hook(prefix, absPath)
 	}
+
+	return &preparedTrackRepo{
+		entry:           entry,
+		absPath:         absPath,
+		identity:        identity,
+		prefix:          prefix,
+		cfg:             cfg,
+		checkConfigured: checkConfigured,
+	}, nil
+}
+
+// trackPreparedRepoSourceCtx consumes a nonnil preparation for this attempt.
+// The coordinated second deduplication remains the authority to install it.
+func (mi *MultiIndexer) trackPreparedRepoSourceCtx(
+	ctx context.Context, prepared *preparedTrackRepo, content source.ContentSource,
+) (*IndexResult, error) {
+	entry := prepared.entry
+	absPath := prepared.absPath
+	identity := prepared.identity
+	prefix := prepared.prefix
+	cfg := prepared.cfg
+	checkConfigured := prepared.checkConfigured
+	var err error
 
 	// Every repo is prefixed, including the first one. There is no
 	// repo-count gate here any more: a lone repo is just the first tracked
@@ -2907,18 +3388,13 @@ func (mi *MultiIndexer) trackRepoSourceCtx(
 		// directory through a case/Unicode spelling that resolved to another
 		// prefix lane — may have completed while this caller waited.
 		mi.mu.RLock()
-		_, exists := mi.repos[prefix]
-		if !exists {
-			for _, meta := range mi.repos {
-				if meta != nil && pathkey.SamePathIdentity(meta.RootPath, absPath) {
-					exists = true
-					break
-				}
-			}
-		}
+		exists, collisionErr := mi.trackedLocked(prefix, absPath)
 		mi.mu.RUnlock()
 		if exists {
-			return nil
+			return collisionErr
+		}
+		if err := checkConfigured(prefix, absPath); err != nil {
+			return err
 		}
 		topologyChanged = true
 
@@ -2933,7 +3409,11 @@ func (mi *MultiIndexer) trackRepoSourceCtx(
 		result.RepoPrefix = prefix
 
 		fileMtimes := idx.publishFileMtimes()
+		// Restore the winner's config after any competing prefix resolution.
+		_, publish := mi.configMgr.PrepareWorkspaceConfig(prefix, absPath, nil)
+		isWorktree := ResolveWorktree(absPath).IsWorktree
 		mi.mu.Lock()
+		publish(prefix)
 		mi.repos[prefix] = &RepoMetadata{
 			RepoPrefix:    prefix,
 			RootPath:      absPath,
@@ -2945,11 +3425,15 @@ func (mi *MultiIndexer) trackRepoSourceCtx(
 			ParseErrors:   result.Errors,
 			FileMtimes:    fileMtimes,
 
-			IsWorktree: ResolveWorktree(absPath).IsWorktree,
+			IsWorktree: isWorktree,
 		}
 		mi.indexers[prefix] = idx
 		mi.mu.Unlock()
 		installed = true
+		// The exists check above holds the stable lane, so this is the
+		// repository's first registration, never a rewrite of an entry.
+		mi.markRepoRegistered(prefix, absPath)
+		mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))
 
 		// Add to global config.
 		entry.Path = absPath
@@ -2964,6 +3448,9 @@ func (mi *MultiIndexer) trackRepoSourceCtx(
 		// after the loop (RunGlobalResolve does this for daemon warmup).
 		if !batchMode.deferGlobalPasses {
 			mi.ReconcileContractEdges()
+			if err := mi.postPublishGoModules(ctx, idx, true); err != nil {
+				mi.logger.Warn("post-publish Go module follow-up", zap.Error(err))
+			}
 		}
 		return nil
 	})
@@ -2988,7 +3475,7 @@ func (mi *MultiIndexer) trackRepoSourceCtx(
 // reconcile against and a full index is the correct path.
 func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoEntry, priorMtimes map[string]int64) (*IndexResult, error) {
 	start := time.Now()
-	setupTiming := startReconcilePhase(mi.logger, entry.Name, "repository_setup",
+	setupTiming := mi.startReconcilePhase(mi.logger, entry.Name, "repository_setup",
 		zap.Int("prior_files", len(priorMtimes)))
 	defer setupTiming.abort()
 
@@ -3016,15 +3503,24 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	// TrackRepoCtx so a worktree instance keeps its derived prefix on the
 	// reconcile path too; config can change between sessions and warmup-
 	// time reconcile runs after a daemon restart.
-	prefix, cfg := mi.resolveTrackPrefix(&entry, absPath, identity)
+	checkConfigured := mi.configuredPrefixCheck()
+	prefix, cfg := mi.resolveTrackPrefix(&entry, absPath, identity, nil, checkConfigured)
 	setupTiming.complete(nil, zap.String("prefix", prefix))
 
 	// Already tracked — nothing to do.
 	mi.mu.RLock()
-	_, exists := mi.repos[prefix]
-
+	exists, collisionErr := mi.trackedLocked(prefix, absPath)
 	mi.mu.RUnlock()
 	if exists {
+		// Startup keeps the base outcome for a config entry whose prefix
+		// another repository owns: it is not indexed. Say why instead of
+		// failing warmup on every restart.
+		mi.logCollision(collisionErr)
+		return nil, nil
+	}
+
+	if collision := checkConfigured(prefix, absPath); collision != nil {
+		mi.logCollision(collision)
 		return nil, nil
 	}
 
@@ -3039,7 +3535,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	}
 
 	// Prefix unconditionally, as TrackRepoCtx does — see the note there.
-	restoreTiming := startReconcilePhase(mi.logger, prefix, "indexer_restore")
+	restoreTiming := mi.startReconcilePhase(mi.logger, prefix, "indexer_restore")
 	defer restoreTiming.abort()
 	idx := mi.newPerRepoIndexerForMutation(ctx, cfg.Index)
 	idx.SetRepoPrefix(prefix)
@@ -3052,11 +3548,11 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 
 	var result *IndexResult
 	installed := false
-	admissionTiming := startReconcilePhase(mi.logger, prefix, "topology_admission")
+	admissionTiming := mi.startReconcilePhase(mi.logger, prefix, "topology_admission")
 	defer admissionTiming.abort()
 	err = mi.coordinateRepositoryTopologyMutation(ctx, idx, func() error {
 		admissionTiming.complete(nil)
-		admittedSetupTiming := startReconcilePhase(mi.logger, prefix, "admitted_setup")
+		admittedSetupTiming := mi.startReconcilePhase(mi.logger, prefix, "admitted_setup")
 		defer admittedSetupTiming.abort()
 		// Construction can precede a queued batch transition. Once the stable
 		// lane and transition generation are held, reapply the authoritative mode.
@@ -3069,17 +3565,14 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		// the same directory through a case/Unicode spelling on another lane.
 		// Recheck both identities only after owning the stable lane.
 		mi.mu.RLock()
-		_, exists := mi.repos[prefix]
-		if !exists {
-			for _, meta := range mi.repos {
-				if meta != nil && pathkey.SamePathIdentity(meta.RootPath, absPath) {
-					exists = true
-					break
-				}
-			}
-		}
+		exists, collisionErr := mi.trackedLocked(prefix, absPath)
 		mi.mu.RUnlock()
 		if exists {
+			mi.logCollision(collisionErr)
+			return nil
+		}
+		if collision := checkConfigured(prefix, absPath); collision != nil {
+			mi.logCollision(collision)
 			return nil
 		}
 		topologyChanged = true
@@ -3092,9 +3585,10 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		// is reserved for cases where scoped replacement is not worth it: churn is
 		// a large fraction of the repo, or an operator forced it via
 		// GORTEX_WARMUP_FULL_RETRACK. A failed census falls back to the preserving
-		// full-root incremental path. A repo with zero changes returns directly
-		// from an authoritative non-Merkle census instead of repeating the same
-		// full-tree walk in the incremental pipeline.
+		// full-root incremental path. A repo with zero changes and a current
+		// extractor-version snapshot returns directly from an authoritative
+		// non-Merkle census instead of repeating the same full-tree walk in the
+		// incremental pipeline.
 		var (
 			receipt *graph.MutationReceipt
 			batch   *reparsePendingEnrichmentBatch
@@ -3124,7 +3618,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 				break
 			}
 		}
-		applyTiming := startReconcilePhase(mi.logger, prefix, "apply",
+		applyTiming := mi.startReconcilePhase(mi.logger, prefix, "apply",
 			zap.Int("changed_files", len(changed)), zap.Int("deleted_files", len(deleted)),
 			zap.Bool("force_full", forceFull), zap.Bool("census_failed", censusErr != nil))
 		defer applyTiming.abort()
@@ -3138,13 +3632,17 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		case forceFull:
 			route = "full_retrack"
 			result, err = fullRetrack()
-		case churn == 0 && !idx.merkleEnabled():
+		case churn == 0 && !idx.merkleEnabled() && len(idx.extractorVersionStaleLangSet()) == 0:
 			route = "census_noop"
 			result, err = idx.cleanCensusResult(ctx, detected, start)
 		case churn == 0:
 			// The mtime census cannot prove a Merkle-enabled repository clean:
 			// a missing baseline or extractor-salt change still requires the
-			// content-addressed full-tree incremental check.
+			// content-addressed full-tree incremental check. A non-Merkle
+			// repository lands here only when its persisted extractor
+			// versions (or post-extraction policy epoch) are behind the
+			// running binary: the full-tree pass restages the stale
+			// languages and re-stamps the snapshot, so it fires once per bump.
 			route = "incremental"
 			result, receipt, batch, err = idx.incrementalReindexPathsWithReceipt(absPath, nil, true)
 		case manifestOnly && idx.merkleEnabled():
@@ -3172,7 +3670,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		if result == nil {
 			return fmt.Errorf("reconciling %s returned a nil result", absPath)
 		}
-		publishTiming := startReconcilePhase(mi.logger, prefix, "publish_and_catchup", zap.String("route", route))
+		publishTiming := mi.startReconcilePhase(mi.logger, prefix, "publish_and_catchup", zap.String("route", route))
 		defer publishTiming.abort()
 		// A scoped snapshot reconcile cannot derive its total from the walked
 		// scope. Its post-mutation tracked count is the repository-wide baseline.
@@ -3182,7 +3680,11 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		result.RepoPrefix = prefix
 
 		fileMtimes := idx.publishFileMtimes()
+		// Restore the winner's config after any competing prefix resolution.
+		_, publish := mi.configMgr.PrepareWorkspaceConfig(prefix, absPath, nil)
+		isWorktree := ResolveWorktree(absPath).IsWorktree
 		mi.mu.Lock()
+		publish(prefix)
 		mi.repos[prefix] = &RepoMetadata{
 			RepoPrefix:    prefix,
 			RootPath:      absPath,
@@ -3194,11 +3696,12 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 			ParseErrors:   result.Errors,
 			FileMtimes:    fileMtimes,
 
-			IsWorktree: ResolveWorktree(absPath).IsWorktree,
+			IsWorktree: isWorktree,
 		}
 		mi.indexers[prefix] = idx
 		mi.mu.Unlock()
 		installed = true
+		mi.markRepoRegistered(prefix, absPath)
 
 		// Warm routes other than census_noop (which restores via
 		// cleanCensusResult) and full_retrack (which publishes via
@@ -3237,8 +3740,16 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 					prefix: result.DerivedInvalidation,
 				})
 			}
-		} else if result.FullRetrack && !batchMode.deferGlobalPasses {
-			mi.ReconcileContractEdges()
+		} else if result.FullRetrack {
+			if !batchMode.deferResolve {
+				mi.runCrossRepoResolveFiles(mi.npmConsumerFilesForRepo(prefix))
+			}
+			if !batchMode.deferGlobalPasses {
+				if err := mi.postPublishGoModules(ctx, idx, false); err != nil {
+					mi.logger.Warn("post-publish Go module follow-up", zap.Error(err))
+				}
+				mi.ReconcileContractEdges()
+			}
 		}
 
 		publishTiming.complete(nil)
@@ -4183,6 +4694,9 @@ func (mi *MultiIndexer) wrapperSourceReader() contracts.SourceReader {
 // via the `contracts check` tool and traversals stop at each service's
 // boundary.
 func (mi *MultiIndexer) ReconcileContractEdges() int {
+	if mi.contractCoreRuntime.Load() != nil {
+		return 0
+	}
 	// Serialise the whole pass: the evict-then-mint of EdgeMatches, topic
 	// edges, and the bridge subgraph spans many non-atomic store writes,
 	// and several goroutines call this concurrently (see reconcileMu).

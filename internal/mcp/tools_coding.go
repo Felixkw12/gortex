@@ -190,8 +190,8 @@ func (s *Server) registerCodingTools() {
 	s.addTool(
 		mcp.NewTool("mutation_status",
 			mcp.WithDescription("Reports what a file mutation actually did, after the fact. Use it when an edit_file / write_file / edit_symbol call was abandoned at its deadline (\"the work may still complete in the background\"): instead of retrying blindly, ask here. Returns disk_status (committed / not_applied / failed / in_flight) separately from graph_status (fresh / pending / stale / failed), because the bytes reaching disk and the graph catching up are different questions. Only graph_status=pending resolves on its own: graph_status_terminal and graph_note say whether the value can still change, so do not wait on a terminal one. disk_status=committed means the edit is already applied — re-applying it by any route would duplicate it. Select a record by receipt, by mutation_id, or by path; with no argument it lists the most recent mutations. Receipts are retained for 30 minutes."),
-			mcp.WithString("receipt", mcp.Description("Mutation receipt id from an edit response (`mutation_receipt`) or from the `mutation_commit=` block on an abandoned-call error.")),
-			mcp.WithString("mutation_id", mcp.Description("Caller-chosen idempotency key passed to the original edit.")),
+			mcp.WithString("receipt", mcp.Description("Mutation commit id (`commit-N`) from an edit response (`mutation_receipt`) or the `mutation_commit=` block on an abandoned-call error. Also accepts graph freshness receipt ids (`mutation-N`) printed by freshness refusals.")),
+			mcp.WithString("mutation_id", mcp.Description("Caller-chosen idempotency key passed to the original edit. Also accepts graph freshness receipt ids (`mutation-N`) when no caller key matches; prefer the receipt field for those ids.")),
 			mcp.WithString("path", mcp.Description("File path — returns the most recent mutation recorded for it. Use when the response was lost entirely and no receipt id was ever seen.")),
 		),
 		s.handleMutationStatus,
@@ -382,7 +382,7 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	// round-trips instead of the per-symbol GetCallers / GetCallChain
 	// loop. The fallback retains the previous engine-based shape so
 	// the in-memory backend is unaffected.
-	if fc, ok := s.readerFor(ctx).(graph.FileEditingContext); ok {
+	if fc, ok := fileEditingContextFor(s.readerFor(ctx)); ok {
 		bundle := fc.FileEditingContext(fp, []graph.NodeKind{graph.KindFunction, graph.KindMethod})
 		if bundle == nil || (bundle.FileNode == nil && len(bundle.Defines) == 0) {
 			return mcp.NewToolResultError("no symbols found for file: " + fp), nil
@@ -963,18 +963,20 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 		return mcp.NewToolResultError("symbol not found: " + id), nil
 	}
 	sess := s.sessionFor(ctx)
-	sess.recordSymbol(id)
-	sess.recordFile(node.FilePath)
-	// Credit this consume back to the most recent matching search_symbols,
-	// if any; no-op when the combo tracker isn't initialised or no search
-	// window is active.
-	if q := sess.attributedQuery(id); q != "" {
-		s.combo.Record(q, id)
-	}
-	// Unconditionally record the access for frecency — this is the "symbols
-	// the agent actually reads" signal, useful even when no prior search
-	// sourced it (agents also fetch symbols by ID from recent history).
-	s.frecency.Record(id)
+	afterFreshSymbolAcceptance(ctx, func() {
+		sess.recordSymbol(id)
+		sess.recordFile(node.FilePath)
+		// Credit this consume back to the most recent matching search_symbols,
+		// if any; no-op when the combo tracker isn't initialised or no search
+		// window is active.
+		if q := sess.attributedQuery(id); q != "" {
+			s.combo.Record(q, id)
+		}
+		// Unconditionally record the access for frecency — this is the "symbols
+		// the agent actually reads" signal, useful even when no prior search
+		// sourced it (agents also fetch symbols by ID from recent history).
+		s.frecency.Record(id)
+	})
 
 	if node.StartLine == 0 || node.EndLine == 0 {
 		return mcp.NewToolResultError("symbol has no line range: " + id), nil
@@ -1128,7 +1130,9 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 	if ifNoneMatch := req.GetString("if_none_match", ""); ifNoneMatch != "" && ifNoneMatch == etag {
 		return notModifiedResult(etag), nil
 	}
-	s.recordPendingSavings(ctx, pending)
+	afterFreshSymbolAcceptance(ctx, func() {
+		s.recordPendingSavings(ctx, pending)
+	})
 	result["etag"] = etag
 
 	if s.isGCX(ctx, req) {
@@ -1542,7 +1546,7 @@ func (s *Server) handleGetTestTargets(ctx context.Context, req mcp.CallToolReque
 
 		// Fallback for graphs that haven't been re-indexed since the
 		// EdgeTests pass shipped, or for indirect coverage (depth > 1).
-		callers := s.engineFor(ctx).GetCallers(id, query.QueryOptions{Depth: depth, Limit: 100, Detail: "brief"})
+		callers := s.engineFor(ctx).GetCallers(id, query.QueryOptions{Depth: depth, Limit: 100, Detail: "brief", Context: ctx})
 		for _, cn := range callers.Nodes {
 			if !isTestFile(cn.FilePath) {
 				continue
@@ -1993,7 +1997,20 @@ func (s *Server) handleGetEditPlan(ctx context.Context, req mcp.CallToolRequest)
 
 // extractPrefix returns the common prefix of a camelCase/PascalCase name.
 // e.g. "handleGetSymbol" -> "handle", "TestNewServer" -> "Test"
-func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest) (toolResult *mcp.CallToolResult, retErr error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	defer func() {
+		if err := ctx.Err(); err != nil {
+			toolResult = nil
+			retErr = err
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	task, err := req.RequireString("task")
 	if err != nil {
 		return mcp.NewToolResultError("task is required"), nil
@@ -2046,11 +2063,31 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	// 2. Search for relevant symbols using each keyword.
 	seen := make(map[string]bool)
 	var relevantSymbols []*graph.Node
+	// A one-word task is its own keyword: the retrieval note below reuses
+	// that ranking instead of running the identical search again.
+	var taskRanked []*rerank.Candidate
+	taskRankedKnown := false
 	for _, kw := range keywords {
 		if len(kw) < 3 {
 			continue
 		}
-		matches := s.scopedNodeSlice(ctx, s.engineFor(ctx).SearchSymbols(kw, 10))
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		ranked := s.engineFor(ctx).SearchSymbolsRankedContext(ctx, kw, 10, query.QueryOptions{}, nil)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if kw == task {
+			taskRanked, taskRankedKnown = ranked, true
+		}
+		matches := make([]*graph.Node, 0, len(ranked))
+		for _, candidate := range ranked {
+			if candidate != nil && candidate.Node != nil {
+				matches = append(matches, candidate.Node)
+			}
+		}
+		matches = s.scopedNodeSlice(ctx, matches)
 		for _, m := range matches {
 			if m.Kind == graph.KindFile || m.Kind == graph.KindImport {
 				continue
@@ -2429,7 +2466,7 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	// routing the agent to Gortex's richer escape hatches. Suppressed for
 	// single-symbol / distinctive-identifier lookups, so a confident exact
 	// query never draws a hedge.
-	if note := s.lowConfidenceRetrievalNote(ctx, task, relevantSymbols); note != nil {
+	if note := s.lowConfidenceRetrievalNote(ctx, task, relevantSymbols, taskRanked, taskRankedKnown); note != nil {
 		result["retrieval_note"] = note
 	}
 

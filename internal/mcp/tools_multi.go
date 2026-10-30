@@ -15,6 +15,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/viewmetrics"
 )
 
 // trackAcceptedHeadroom is how long before the MCP request deadline the
@@ -101,6 +102,9 @@ func (s *Server) handleTrackRepository(ctx context.Context, req mcp.CallToolRequ
 	if s.multiIndexer == nil {
 		return mcp.NewToolResultError("multi-repo indexing is not enabled"), nil
 	}
+	if answer, loading := s.configuredRepoStillLoading(ctx, req, path); loading {
+		return answer, nil
+	}
 
 	entry := config.RepoEntry{Path: path}
 	if name, ok := req.GetArguments()["name"].(string); ok && name != "" {
@@ -153,7 +157,14 @@ func (s *Server) handleTrackRepository(ctx context.Context, req mcp.CallToolRequ
 		err    error
 	}
 	done := make(chan trackOutcome, 1)
+	// The index below outlives this request by design, so it must not outlive
+	// the payload the request was reading: join the view's lease before the
+	// goroutine starts and release it when the goroutine actually exits,
+	// cancellation tail included. Nil when this request read the base corpus,
+	// which is the common case for a track call — nothing to pin.
+	pin := handoffRequestView(ctx, viewmetrics.HandoffRepositoryIndex)
 	go func() {
+		defer pin.release()
 		defer s.trackInFlight.Delete(absPath)
 		// WithoutCancel keeps the request's values (progress token, session)
 		// while dropping its cancellation, so the daemon's request lifetime
@@ -187,6 +198,17 @@ func (s *Server) handleTrackRepository(ctx context.Context, req mcp.CallToolRequ
 	select {
 	case out := <-done:
 		if out.err != nil {
+			var collision *indexer.PrefixCollisionError
+			if errors.As(out.err, &collision) {
+				if collision.OwnerMissing {
+					return mcp.NewToolResultError(fmt.Sprintf(
+						"repository prefix %q is already used by %s, which no longer exists; inspect untrack_repository for that path before tracking %s again",
+						collision.Prefix, collision.ExistingPath, collision.Path)), nil
+				}
+				return mcp.NewToolResultError(fmt.Sprintf(
+					"repository prefix %q is already used by %s; for a new path set the name parameter to a different prefix for %s; for an already configured path set name: in the global config and run `gortex daemon reload`",
+					collision.Prefix, collision.ExistingPath, collision.Path)), nil
+			}
 			return mcp.NewToolResultError(out.err.Error()), nil
 		}
 		// Already tracked — the corpus held the repo, so only its identity
@@ -529,7 +551,7 @@ func (s *Server) resolveRepoPrefixOrReconcile(ctx context.Context, pathOrPrefix 
 			config.ResolvePrefix(entry) != pathOrPrefix {
 			continue
 		}
-		if _, err := s.multiIndexer.TrackRepoCtx(ctx, entry); err != nil {
+		if _, err := s.multiIndexer.TrackRepoCtx(indexer.WithIndexOrigin(ctx, "mcp_auto_track"), entry); err != nil {
 			s.logger.Warn("auto-track from config failed",
 				zap.String("path", entry.Path), zap.Error(err))
 			return ""

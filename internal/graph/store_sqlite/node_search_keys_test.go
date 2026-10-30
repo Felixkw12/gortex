@@ -28,6 +28,7 @@ func openNodeSearchKeyTestStore(tb testing.TB) *Store {
 
 func TestScanNodeSearchKeysUsesBoundedOrderedPagesAndClosesRows(t *testing.T) {
 	store := openNodeSearchKeyTestStore(t)
+	stopStoreBackgroundReaders(store)
 	for _, node := range []*graph.Node{
 		{ID: "c.go::Gamma", Kind: graph.KindFunction, Name: "Gamma", FilePath: "c.go"},
 		{ID: "a.go::Alpha", Kind: graph.KindMethod, Name: "Alpha", FilePath: "a.go"},
@@ -64,9 +65,9 @@ func TestScanNodeSearchKeysUsesBoundedOrderedPagesAndClosesRows(t *testing.T) {
 		t.Fatalf("ScanNodeSearchKeys: %v", err)
 	}
 	want := []graph.NodeSearchKey{
-		{ID: "a.go::Alpha", Kind: graph.KindMethod, Name: "Alpha"},
-		{ID: "b.go::Beta", Kind: graph.KindFunction, Name: "Beta"},
-		{ID: "c.go::Gamma", Kind: graph.KindFunction, Name: "Gamma"},
+		{ID: "a.go::Alpha", Kind: graph.KindMethod, Name: "Alpha", FilePath: "a.go"},
+		{ID: "b.go::Beta", Kind: graph.KindFunction, Name: "Beta", FilePath: "b.go"},
+		{ID: "c.go::Gamma", Kind: graph.KindFunction, Name: "Gamma", FilePath: "c.go"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("keys = %#v, want %#v", got, want)

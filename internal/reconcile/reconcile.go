@@ -93,7 +93,10 @@ type CleanupHooks interface {
 	// grace expires, and again as a phase of forgetting it.
 	PurgeCheckoutLayers(ctx context.Context, checkoutID, incarnation string) error
 	// ReleaseGraph gives up whatever holds a dedicated graph open, so its
-	// catalog row can be deleted.
+	// catalog row can be deleted. Hooks that can defer a release, because a
+	// reader still holds the graph and they resume the saga once it drains,
+	// also implement CleanupDeferred(error) bool to tell that error apart from
+	// a failure.
 	ReleaseGraph(ctx context.Context, graphID string) error
 }
 
@@ -257,25 +260,10 @@ func (r *Reconciler) ReconcileFamily(ctx context.Context, familyID, probeDir str
 	}
 	viewmetrics.Observe(viewmetrics.FamilyInventorySeconds, elapsed, inventoryOutcome)
 
-	graphs, err := r.catalog.ListDedicatedGraphs(ctx, familyID)
-	if err != nil {
-		return FamilyReport{}, err
-	}
-	for _, graph := range graphs {
-		if graph.IsPrimaryBase {
-			pass.primaryGraphID = graph.GraphID
-			break
-		}
-	}
-
 	report := FamilyReport{
 		FamilyID:        familyID,
 		CommonDir:       family.CommonDirIdentity,
 		InventoryUsable: pass.inventoryErr == nil,
-		PrimaryGraphID:  pass.primaryGraphID,
-	}
-	if pass.primaryGraphID == "" {
-		report.Code = graphview.CodeNoPrimary
 	}
 
 	// A record with no administrative name cannot be keyed to an identity at
@@ -302,6 +290,17 @@ func (r *Reconciler) ReconcileFamily(ctx context.Context, familyID, probeDir str
 			return report, err
 		}
 		report.Checkouts = append(report.Checkouts, entry)
+	}
+
+	// Read after the known checkouts, since retiring one of them may have
+	// retired the primary.
+	pass.primaryGraphID, err = r.servingPrimary(ctx, familyID)
+	if err != nil {
+		return report, err
+	}
+	report.PrimaryGraphID = pass.primaryGraphID
+	if pass.primaryGraphID == "" {
+		report.Code = graphview.CodeNoPrimary
 	}
 
 	if pass.inventoryErr == nil {
@@ -428,6 +427,15 @@ func (r *Reconciler) reconcileKnown(
 // came back" means: the row was matched by (family, admin name) and its
 // incarnation never changed, so whatever the pass thought was removed is the
 // very thing that just answered.
+//
+// The head tree is the one observed fact this pass will not state unless it
+// actually learned it. Ref and commit come from the inventory that listed the
+// worktree, so the pass has them either way; the tree comes only from a live
+// `git` sample of the working copy. Since the committed-base publisher advances
+// the same column when it adopts, a pass that wrote "" for a sample it could
+// not take would be demolishing a published base identity rather than observing
+// one — so an unsampled pass leaves the recorded tree exactly as it found it
+// (observationFrom has already seeded it) and the next pass states it.
 func (r *Reconciler) applyPresent(
 	ctx context.Context,
 	pass *familyPass,
@@ -446,7 +454,11 @@ func (r *Reconciler) applyPresent(
 	req.GitDir = pass.gitDirFor(record)
 	req.Locked = record.Locked
 	req.Prunable = record.Prunable
-	req.HeadRef, req.HeadCommit, req.HeadTree = r.headFor(ctx, record)
+	ref, commit, tree, sampled := r.headFor(ctx, record)
+	req.HeadRef, req.HeadCommit = ref, commit
+	if sampled {
+		req.HeadTree = tree
+	}
 	req.LastError = ""
 
 	switch {
@@ -518,6 +530,13 @@ func (r *Reconciler) applyRemoved(
 // expired inaccessibility. The caller supplies a detached context after all
 // classification and identity guards have passed, so a request timeout cannot
 // strand a half-finished cleanup saga.
+//
+// A teardown the hooks deferred counts as done. Its saga has withdrawn the
+// checkout and journaled the phase it stopped at, and the hooks' owner resumes
+// it once whatever still holds the graph lets go; until then the saga owns the
+// rows, so the caller must not write to them either way. The attempt that
+// first deferred it is the one that reports it: a later one that drives the
+// same saga, to completion or to another deferral, reports guard_lost.
 func (r *Reconciler) retireCheckout(
 	ctx context.Context,
 	pass *familyPass,
@@ -527,22 +546,58 @@ func (r *Reconciler) retireCheckout(
 	if err != nil {
 		return "", false, err
 	}
+	action := ActionForgotten
+	target := sagaTarget{Kind: sagaForgetCheckout, CheckoutID: existing.CheckoutID, Incarnation: existing.Incarnation}
+	retire := func() error { return r.ForgetCheckout(ctx, existing.CheckoutID, existing.Incarnation) }
 	if owned != nil && owned.IsPrimaryBase {
-		if err := r.RetirePrimaryClosure(ctx, owned.GraphID, pass.family.PrimaryEpoch); err != nil {
-			if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
-				return ActionGuardLost, false, nil
-			}
-			return "", false, err
-		}
-		return ActionPrimaryClosureRetired, true, nil
+		action = ActionPrimaryClosureRetired
+		target = sagaTarget{Kind: sagaRetirePrimaryClosure, GraphID: owned.GraphID}
+		retire = func() error { return r.RetirePrimaryClosure(ctx, owned.GraphID, pass.family.PrimaryEpoch) }
 	}
-	if err := r.ForgetCheckout(ctx, existing.CheckoutID, existing.Incarnation); err != nil {
-		if errors.Is(err, store_sqlite.ErrCatalogStaleGuard) {
-			return ActionGuardLost, false, nil
-		}
+	prior, journaled, err := r.loadSagaTarget(ctx, target.cleanupID())
+	if err != nil {
 		return "", false, err
 	}
-	return ActionForgotten, true, nil
+	err = retire()
+	switch {
+	case errors.Is(err, store_sqlite.ErrCatalogStaleGuard):
+		return ActionGuardLost, false, nil
+	case err != nil && !r.cleanupDeferred(err):
+		return "", false, err
+	case journaled && prior.Deferred:
+		return ActionGuardLost, false, nil
+	}
+	return action, true, nil
+}
+
+// servingPrimary returns the family's primary dedicated graph, or "" when it
+// has none or its closure is journaled. A closure waiting on a reader has
+// already forgotten the checkouts that existed only because of the primary,
+// so nothing may be minted under it again.
+func (r *Reconciler) servingPrimary(ctx context.Context, familyID string) (string, error) {
+	graphs, err := r.catalog.ListDedicatedGraphs(ctx, familyID)
+	if err != nil {
+		return "", err
+	}
+	for _, graph := range graphs {
+		if !graph.IsPrimaryBase {
+			continue
+		}
+		closure := sagaTarget{Kind: sagaRetirePrimaryClosure, GraphID: graph.GraphID}
+		_, retiring, err := r.loadSagaTarget(ctx, closure.cleanupID())
+		if err != nil || retiring {
+			return "", err
+		}
+		return graph.GraphID, nil
+	}
+	return "", nil
+}
+
+// cleanupDeferred reports whether a teardown stopped only because the hooks
+// deferred it, rather than failed. Hooks that never defer need not say.
+func (r *Reconciler) cleanupDeferred(err error) bool {
+	hooks, ok := r.hooks.(interface{ CleanupDeferred(error) bool })
+	return ok && hooks.CleanupDeferred(err)
 }
 
 // observeNew decides what to do with a worktree no identity matched.
@@ -603,7 +658,7 @@ func (r *Reconciler) observeNew(
 		LastAccessible: pass.now.Unix(),
 		LastSeen:       pass.now.Unix(),
 	}
-	checkout.HeadRef, checkout.HeadCommit, checkout.HeadTree = r.headFor(ctx, record)
+	checkout.HeadRef, checkout.HeadCommit, checkout.HeadTree, _ = r.headFor(ctx, record)
 	if pass.beforeAllocate != nil {
 		if err := pass.beforeAllocate(); err != nil {
 			return entry, err
@@ -741,14 +796,24 @@ func (r *Reconciler) recordClassification(
 // inventory already reported. The inventory carries a ref and a commit but no
 // tree, so a successful sample is the only way the tree oid gets filled in;
 // a failed one is not worth failing the pass over.
-func (r *Reconciler) headFor(ctx context.Context, record *gitstate.WorktreeRecord) (ref, commit, tree string) {
+//
+// sampled separates the two ways the tree comes back empty. A working copy that
+// answered and has no tree is an unborn branch — a fact, and one worth writing.
+// A root that could not be reached, or a sample that failed, said nothing at
+// all, and the tree it did not report is not evidence that the checkout has
+// none. The caller needs the difference because the committed base publisher
+// now writes the same column (AdoptDedicatedBaseGeneration): a pass that
+// answered "" for want of a successful `git` call would otherwise erase a base
+// identity the publisher had just recorded, and every dependent worktree in the
+// family keys its layers on that column.
+func (r *Reconciler) headFor(ctx context.Context, record *gitstate.WorktreeRecord) (ref, commit, tree string, sampled bool) {
 	ref, commit = record.HEADRef, record.HEADOID
 	if !record.RootAccessible {
-		return ref, commit, ""
+		return ref, commit, "", false
 	}
 	state, err := r.sampleHEAD(ctx, record.Path)
 	if err != nil {
-		return ref, commit, ""
+		return ref, commit, "", false
 	}
 	if state.Ref != "" {
 		ref = state.Ref
@@ -756,7 +821,7 @@ func (r *Reconciler) headFor(ctx context.Context, record *gitstate.WorktreeRecor
 	if state.CommitOID != "" {
 		commit = state.CommitOID
 	}
-	return ref, commit, state.TreeOID
+	return ref, commit, state.TreeOID, true
 }
 
 // gitDirFor spells out a record's own git directory. The main worktree reads

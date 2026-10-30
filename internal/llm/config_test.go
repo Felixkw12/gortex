@@ -40,9 +40,7 @@ func TestConfig_IsEnabled(t *testing.T) {
 		{"deepseek with model", Config{Provider: "deepseek", DeepSeek: RemoteConfig{Model: "deepseek-chat"}}, true},
 		{"deepseek no model", Config{Provider: "deepseek"}, false},
 		{"requesty with model", Config{Provider: "requesty", Requesty: RemoteConfig{Model: "openai/gpt-4o-mini"}}, true},
-		{"requesty no model", Config{Provider: "requesty"}, false},
-		{"opper with model", Config{Provider: "opper", Opper: RemoteConfig{Model: "gpt-5.4-mini"}}, true},
-		{"opper no model", Config{Provider: "opper"}, false},
+		{"requesty preset default model", Config{Provider: "requesty"}, true},
 		{"codex no model", Config{Provider: "codex"}, true},
 		{"codex with model", Config{Provider: "codex", Codex: CodexConfig{Model: "gpt-5-codex"}}, true},
 		{"copilot no model", Config{Provider: "copilot"}, true},
@@ -102,11 +100,10 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 	if c.DeepSeek.Model != defaultDeepSeekModel || c.DeepSeek.APIKeyEnv != defaultDeepSeekKeyEnv || c.DeepSeek.BaseURL != defaultDeepSeekBaseURL {
 		t.Errorf("deepseek defaults wrong: %+v", c.DeepSeek)
 	}
-	if c.Requesty.Model != defaultRequestyModel || c.Requesty.APIKeyEnv != defaultRequestyKeyEnv || c.Requesty.BaseURL != defaultRequestyBaseURL {
-		t.Errorf("requesty defaults wrong: %+v", c.Requesty)
-	}
-	if c.Opper.Model != defaultOpperModel || c.Opper.APIKeyEnv != defaultOpperKeyEnv || c.Opper.BaseURL != defaultOpperBaseURL {
-		t.Errorf("opper defaults wrong: %+v", c.Opper)
+	// The legacy requesty block is no longer defaulted: the preset
+	// supplies the defaults, and a zero block leaves them in place.
+	if c.Requesty != (RemoteConfig{}) {
+		t.Errorf("legacy requesty block should stay empty: %+v", c.Requesty)
 	}
 }
 
@@ -145,25 +142,18 @@ func TestConfig_MergeEnv_RequestyModelAndEffort(t *testing.T) {
 	t.Setenv("GORTEX_LLM_PROVIDER", "requesty")
 	t.Setenv("GORTEX_LLM_MODEL", "anthropic/claude-sonnet-4-5")
 	t.Setenv("GORTEX_LLM_EFFORT", "high")
-	c := Config{}.MergeEnv()
-	if c.Requesty.Model != "anthropic/claude-sonnet-4-5" {
-		t.Errorf("requesty model=%q", c.Requesty.Model)
+	// The env model wins over the legacy block, as it did when requesty
+	// was a built-in.
+	c := Config{Requesty: RemoteConfig{Model: "openai/gpt-4o", Effort: "low"}}.MergeEnv()
+	cp, ok := c.ActiveCustom()
+	if !ok {
+		t.Fatal("requesty should resolve to its gateway preset")
 	}
-	if c.Requesty.Effort != "high" {
-		t.Errorf("requesty effort=%q want high", c.Requesty.Effort)
+	if cp.Model != "anthropic/claude-sonnet-4-5" || c.ActiveModel() != "anthropic/claude-sonnet-4-5" {
+		t.Errorf("requesty model=%q active=%q", cp.Model, c.ActiveModel())
 	}
-}
-
-func TestConfig_MergeEnv_OpperModelAndEffort(t *testing.T) {
-	t.Setenv("GORTEX_LLM_PROVIDER", "opper")
-	t.Setenv("GORTEX_LLM_MODEL", "claude-sonnet-4-6")
-	t.Setenv("GORTEX_LLM_EFFORT", "high")
-	c := Config{}.MergeEnv()
-	if c.Opper.Model != "claude-sonnet-4-6" {
-		t.Errorf("opper model=%q", c.Opper.Model)
-	}
-	if c.Opper.Effort != "high" {
-		t.Errorf("opper effort=%q want high", c.Opper.Effort)
+	if cp.ReasoningEffort != "high" {
+		t.Errorf("requesty effort=%q want high", cp.ReasoningEffort)
 	}
 }
 
@@ -274,7 +264,7 @@ func TestConfig_IsBuiltinProvider(t *testing.T) {
 			t.Errorf("IsBuiltinProvider(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"mygw", "groq", ""} {
+	for _, name := range []string{"mygw", "groq", "", "requesty"} {
 		if IsBuiltinProvider(name) {
 			t.Errorf("IsBuiltinProvider(%q) = true, want false", name)
 		}
@@ -366,7 +356,6 @@ func TestConfig_MergedWith_NewProviders(t *testing.T) {
 		Gemini:   RemoteConfig{APIKeyEnv: "GEMINI_API_KEY", Model: "gemini-2.5-pro"},
 		DeepSeek: RemoteConfig{APIKeyEnv: "DEEPSEEK_API_KEY"},
 		Requesty: RemoteConfig{APIKeyEnv: "REQUESTY_API_KEY"},
-		Opper:    RemoteConfig{APIKeyEnv: "OPPER_API_KEY"},
 	}
 	local := Config{Bedrock: BedrockConfig{Region: "eu-west-1"}}
 	got := local.MergedWith(global)
@@ -384,9 +373,6 @@ func TestConfig_MergedWith_NewProviders(t *testing.T) {
 	}
 	if got.Requesty.APIKeyEnv != "REQUESTY_API_KEY" {
 		t.Errorf("requesty api_key_env=%q, global should fill", got.Requesty.APIKeyEnv)
-	}
-	if got.Opper.APIKeyEnv != "OPPER_API_KEY" {
-		t.Errorf("opper api_key_env=%q, global should fill", got.Opper.APIKeyEnv)
 	}
 }
 
@@ -458,7 +444,6 @@ func TestConfig_ActiveModelAndWithModel(t *testing.T) {
 		{"bedrock", Config{Provider: "bedrock"}},
 		{"deepseek", Config{Provider: "deepseek"}},
 		{"requesty", Config{Provider: "requesty"}},
-		{"opper", Config{Provider: "opper"}},
 		{"local", Config{Provider: "local"}},
 	}
 	for _, c := range cases {
@@ -592,5 +577,43 @@ func TestConfig_MergedWith(t *testing.T) {
 	}
 	if got.MaxSteps != 16 {
 		t.Errorf("max_steps=%d — global should fill", got.MaxSteps)
+	}
+}
+
+// TestConfig_MergeEnv_CustomProviderModelAndEffort pins that
+// GORTEX_LLM_MODEL / GORTEX_LLM_EFFORT reach the active custom provider —
+// including one whose entry is merged in after MergeEnv runs (the
+// providers.json entries arrive via registry.Augment).
+func TestConfig_MergeEnv_CustomProviderModelAndEffort(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "mygw")
+	t.Setenv("GORTEX_LLM_MODEL", "env-model")
+	t.Setenv("GORTEX_LLM_EFFORT", "high")
+	entry := CustomProvider{BaseURL: "https://x/v1", Model: "file-model", ReasoningEffort: "low"}
+
+	inline := Config{Custom: map[string]CustomProvider{"mygw": entry}}.MergeEnv()
+	late := Config{}.MergeEnv()
+	late.Custom = map[string]CustomProvider{"mygw": entry}
+
+	for name, c := range map[string]Config{"inline": inline, "merged later": late} {
+		cp, ok := c.ActiveCustom()
+		if !ok {
+			t.Fatalf("%s: ActiveCustom not resolved", name)
+		}
+		if cp.Model != "env-model" || c.ActiveModel() != "env-model" {
+			t.Errorf("%s: model=%q active=%q want env-model", name, cp.Model, c.ActiveModel())
+		}
+		if cp.ReasoningEffort != "high" {
+			t.Errorf("%s: reasoning_effort=%q want high", name, cp.ReasoningEffort)
+		}
+		if c.Custom["mygw"].Model != "file-model" {
+			t.Errorf("%s: env override must not rewrite the Custom map", name)
+		}
+		if c.Local.Model != "" {
+			t.Errorf("%s: env model leaked into llm.local.model: %q", name, c.Local.Model)
+		}
+		// A routing pick still wins over the env model.
+		if got := c.WithModel("routed").ActiveModel(); got != "routed" {
+			t.Errorf("%s: WithModel after env override = %q want routed", name, got)
+		}
 	}
 }

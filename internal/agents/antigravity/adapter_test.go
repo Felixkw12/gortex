@@ -8,6 +8,7 @@ import (
 
 	"github.com/zzet/gortex/internal/agents"
 	"github.com/zzet/gortex/internal/agents/agentstest"
+	"github.com/zzet/gortex/internal/toolref"
 )
 
 // TestAntigravityRegistersMCPAndWritesKI is the acceptance test for
@@ -26,18 +27,20 @@ func TestAntigravityRegistersMCPAndWritesKI(t *testing.T) {
 		t.Fatal("expected Configured=true")
 	}
 
-	// 1. Native MCP stanza under ~/.gemini/antigravity/mcp_config.json.
-	mcpPath := filepath.Join(env.Home, ".gemini", "antigravity", "mcp_config.json")
-	if _, err := os.Stat(mcpPath); err != nil {
-		t.Fatalf("mcp_config.json missing: %v", err)
-	}
-	cfg := agentstest.ReadJSON(t, mcpPath)
-	servers, ok := cfg["mcpServers"].(map[string]any)
-	if !ok {
-		t.Fatalf("mcpServers missing: %v", cfg)
-	}
-	if _, ok := servers["gortex"]; !ok {
-		t.Fatalf("gortex server missing from mcpServers: %v", servers)
+	// 1. Native MCP stanzas under ~/.gemini/antigravity/mcp_config.json (IDE)
+	//    and ~/.gemini/config/mcp_config.json (agy CLI / Antigravity 2.0).
+	for _, mcpPath := range mcpConfigPaths(env.Home) {
+		if _, err := os.Stat(mcpPath); err != nil {
+			t.Fatalf("mcp_config.json missing at %s: %v", mcpPath, err)
+		}
+		cfg := agentstest.ReadJSON(t, mcpPath)
+		servers, ok := cfg["mcpServers"].(map[string]any)
+		if !ok {
+			t.Fatalf("mcpServers missing in %s: %v", mcpPath, cfg)
+		}
+		if _, ok := servers["gortex"]; !ok {
+			t.Fatalf("gortex server missing from mcpServers in %s: %v", mcpPath, servers)
+		}
 	}
 
 	// 2. Knowledge Item artifacts.
@@ -60,13 +63,14 @@ func TestAntigravityRegistersMCPAndWritesKI(t *testing.T) {
 		agents.InstructionsSentinel,
 		"Call `explore` first",
 		"change(operation:\"impact\")",
-		"Gortex MCP integration failure",
+		toolref.TransportClause(),
+		toolref.DegradedModeLine(),
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("Antigravity instructions missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{"./gortex query", "facade-v1", "tools_search", "gortex call", "daemon start"} {
+	for _, forbidden := range []string{"./gortex query", "facade-v1", "tools_search", "gortex call ", "daemon start"} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("Antigravity instructions contain obsolete agent vocabulary %q", forbidden)
 		}
