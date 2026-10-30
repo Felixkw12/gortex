@@ -217,15 +217,6 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 		return nil
 	}
 
-	// Build set of interface-required method names per type.
-	// If a type implements an interface, all methods that the interface
-	// requires are alive even if never called directly (they satisfy the
-	// contract).  We index: typeID → set of required method names.
-	// Backends that implement graph.IfaceImplementsScanner serve this
-	// from one join; the fallback walks NodesByKind + EdgesByKind
-	// just like before.
-	ifaceRequiredMethods := scopedIfaceRequiredMethods(g, opt.RepoPrefixes, opt.NodeScope)
-
 	// Pick the candidate-set source. When the backend implements
 	// DeadCodeCandidator, the "no incoming usage edge" filter runs
 	// inside the store and only the surviving ~hundreds of true
@@ -270,6 +261,10 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 			entryPointFiles[n.FilePath] = true
 		}
 	}
+	// Interface contracts matter only for zero-incoming method candidates.
+	// Expand their actual receiver identities through the selected reader;
+	// enumerating every scoped node/implementer dominates small-repo calls.
+	ifaceRequiredMethods, methodOutEdges := deadCodeMethodEvidence(g, candidates, incomingByID, opt)
 
 	var result []DeadCodeEntry
 	var resultNodes []*graph.Node
@@ -387,7 +382,7 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 		// an interface contract.  Look up the receiver type via member_of edges
 		// and check if any implemented interface requires this method name.
 		if n.Kind == graph.KindMethod {
-			outEdges := g.GetOutEdges(n.ID)
+			outEdges := methodOutEdges[n.ID]
 			for _, e := range outEdges {
 				if e.Kind == graph.EdgeMemberOf {
 					if required, ok := ifaceRequiredMethods[e.To]; ok {
@@ -586,61 +581,6 @@ func collectDeadCodeCandidates(g graph.Reader, opt FindDeadCodeOptions) (candida
 		nodeIDs = append(nodeIDs, n.ID)
 	}
 	return nodes, g.GetInEdgesByNodeIDs(nodeIDs)
-}
-
-// buildIfaceRequiredMethods returns a map from type ID → set of method names
-// that the type must implement to satisfy its interfaces.  This is computed by:
-//  1. Collecting all interfaces with their required method names (from Meta["methods"]).
-//  2. Collecting all EdgeImplements edges (type → interface).
-//  3. For each type that implements an interface, merging all required method names.
-//
-// On backends that implement graph.IfaceImplementsScanner this is a
-// single join; otherwise the fallback iterates
-// NodesByKind(KindInterface) + EdgesByKind(EdgeImplements). Both paths
-// produce the same map.
-func buildIfaceRequiredMethods(g graph.Reader) map[string]map[string]bool {
-	if scanner, ok := g.(graph.IfaceImplementsScanner); ok {
-		return buildIfaceRequiredMethodsFromRows(scanner.IfaceImplementsRows())
-	}
-
-	// Fallback: walk interfaces + EdgeImplements edges Go-side. Uses
-	// NodesByKind(KindInterface) so disk backends still issue one
-	// scan per kind instead of pulling AllNodes.
-	ifaceMethods := make(map[string]map[string]bool)
-	for n := range g.NodesByKind(graph.KindInterface) {
-		if n == nil || n.Meta == nil {
-			continue
-		}
-		raw, ok := n.Meta["methods"]
-		if !ok {
-			continue
-		}
-		methods := decodeMethodNames(raw)
-		if len(methods) > 0 {
-			ifaceMethods[n.ID] = methods
-		}
-	}
-
-	if len(ifaceMethods) == 0 {
-		return nil
-	}
-
-	result := make(map[string]map[string]bool)
-	for e := range g.EdgesByKind(graph.EdgeImplements) {
-		// EdgeImplements: From=type, To=interface
-		iface, ok := ifaceMethods[e.To]
-		if !ok {
-			continue
-		}
-		if result[e.From] == nil {
-			result[e.From] = make(map[string]bool)
-		}
-		for m := range iface {
-			result[e.From][m] = true
-		}
-	}
-
-	return result
 }
 
 // buildIfaceRequiredMethodsFromRows reduces the server-side

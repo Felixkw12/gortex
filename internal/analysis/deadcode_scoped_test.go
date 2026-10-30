@@ -16,7 +16,7 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 )
 
-type deadCodeReadCounts struct{ candidates, implements, files, queries, allNodes int }
+type deadCodeReadCounts struct{ candidates, implements, files, queries, allNodes, outgoing, lookups int }
 type countedDeadCodeReader struct {
 	graph.Reader
 	scoped graph.ScopedDeadCodeReader
@@ -26,6 +26,18 @@ type countedDeadCodeReader struct {
 func (r *countedDeadCodeReader) AllNodes() []*graph.Node {
 	r.counts.allNodes++
 	return r.Reader.AllNodes()
+}
+func (r *countedDeadCodeReader) GetOutEdgesByNodeIDs(ids []string) map[string][]*graph.Edge {
+	rows := r.Reader.GetOutEdgesByNodeIDs(ids)
+	for _, edges := range rows {
+		r.counts.outgoing += len(edges)
+	}
+	return rows
+}
+func (r *countedDeadCodeReader) GetNodesByIDs(ids []string) map[string]*graph.Node {
+	rows := r.Reader.GetNodesByIDs(ids)
+	r.counts.lookups += len(rows)
+	return rows
 }
 func (r *countedDeadCodeReader) BindReadContext(ctx context.Context) graph.Reader {
 	bound := graph.BindReadContext(r.Reader, ctx)
@@ -116,13 +128,15 @@ func TestDeadCodeScopedRowsIndependentOfOtherRepos(t *testing.T) {
 				reader := &countedDeadCodeReader{Reader: g, scoped: g.(graph.ScopedDeadCodeReader), counts: counts}
 				entries := FindDeadCode(graph.BindReadContext(reader, t.Context()), nil, nil, FindDeadCodeOptions{RepoPrefixes: []string{"a"}})
 				require.NotEmpty(t, entries)
-				require.Equal(t, 3, counts.queries, "request binding must retain every scoped read capability")
+				require.Equal(t, 2, counts.queries, "request binding retains scoped candidate/file reads; interfaces are demanded by receiver identities")
 				require.Zero(t, counts.allNodes)
 				return *counts
 			}
 			before := count()
 			require.Positive(t, before.candidates)
-			require.Positive(t, before.implements)
+			require.Zero(t, before.implements, "do not enumerate all scoped implementers")
+			require.Positive(t, before.outgoing)
+			require.Positive(t, before.lookups)
 			require.Positive(t, before.files)
 			addUnrelatedDeadCode(g, "unrelated", 1000)
 			require.Equal(t, before, count(), "a larger unrelated repo must not increase scoped rows (stronger than the 5% gate)")

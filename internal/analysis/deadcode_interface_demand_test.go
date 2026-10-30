@@ -62,3 +62,12 @@ func TestDeadCodeInterfaceEvidenceIsDemandedByMethodCandidates(t *testing.T) {
 		})
 	}
 }
+
+func TestDeadCodeWithoutMethodCandidatesDoesNotReadInterfaceEvidence(t *testing.T) {
+	g := graph.New()
+	g.AddBatch([]*graph.Node{{ID: "a/function", Kind: graph.KindFunction, Name: "unused", FilePath: "a/f.go", Language: "go", RepoPrefix: "a"}}, nil)
+	r := &demandIfaceReader{Graph: g}
+	require.Len(t, FindDeadCode(r, nil, nil), 1)
+	require.Zero(t, r.globalQueries)
+	require.Empty(t, r.outgoingIDs)
+}

@@ -25,27 +25,6 @@ func (r *contractCoreEdges) DeadCodeCandidatesInScope(kinds []graph.NodeKind, in
 	return nodes
 }
 
-func (r *contractCoreEdges) IfaceImplementsRowsInScope(prefixes []string, scope graph.NodeScope) []graph.IfaceImplementsRow {
-	if backend, ok := r.Reader.(graph.FilteredNodeScopedDeadCodeReader); ok {
-		rows, err := backend.IfaceImplementsRowsInScopeFiltered(prefixes, scope, r.deadCodeFilter())
-		recordContractCoreReadError(r.ctx, err)
-		return rows
-	}
-	rows := r.IfaceImplementsRowsInRepos(prefixes)
-	ids := make([]string, 0, len(rows))
-	for _, row := range rows {
-		ids = append(ids, row.TypeID)
-	}
-	nodes := r.GetNodesByIDs(ids)
-	var out []graph.IfaceImplementsRow
-	for _, row := range rows {
-		if n := nodes[row.TypeID]; n != nil && scope.Allows(n) {
-			out = append(out, row)
-		}
-	}
-	return out
-}
-
 func (r *contractCoreEdges) NodesByKindInScope(kind graph.NodeKind, prefixes []string, scope graph.NodeScope) iter.Seq[*graph.Node] {
 	if backend, ok := r.Reader.(graph.NodeScopedDeadCodeReader); ok {
 		return backend.NodesByKindInScope(kind, prefixes, scope)

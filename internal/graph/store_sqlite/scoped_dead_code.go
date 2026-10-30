@@ -32,11 +32,6 @@ func (s *Store) DeadCodeCandidatesInScope(kinds []graph.NodeKind, incoming map[g
 	return nodes
 }
 
-func (s *Store) IfaceImplementsRowsInScope(prefixes []string, scope graph.NodeScope) []graph.IfaceImplementsRow {
-	rows, _ := s.IfaceImplementsRowsInScopeFiltered(prefixes, scope, graph.OutlineEdgeFilter{})
-	return rows
-}
-
 func sortedDeadCodeRepos(prefixes []string) []string {
 	if prefixes == nil {
 		return nil
@@ -198,27 +193,15 @@ func (s *Store) IfaceImplementsRowsInReposFiltered(prefixes []string, filter gra
 }
 
 func (s *Store) ifaceImplementsRowsInReposFiltered(ctx context.Context, prefixes []string, filter graph.OutlineEdgeFilter) ([]graph.IfaceImplementsRow, error) {
-	return s.ifaceImplementsRowsInScopeFiltered(ctx, prefixes, nil, filter)
-}
-
-func (s *Store) IfaceImplementsRowsInScopeFiltered(prefixes []string, scope graph.NodeScope, filter graph.OutlineEdgeFilter) ([]graph.IfaceImplementsRow, error) {
-	return s.ifaceImplementsRowsInScopeFiltered(s.readContext(), prefixes, &scope, filter)
-}
-
-func (s *Store) ifaceImplementsRowsInScopeFiltered(ctx context.Context, prefixes []string, scope *graph.NodeScope, filter graph.OutlineEdgeFilter) ([]graph.IfaceImplementsRow, error) {
 	repos := sortedDeadCodeRepos(prefixes)
 	if prefixes == nil {
 		repos = []string{""}
-	}
-	workspaceBuckets := deadCodeWorkspaceBuckets(scope, prefixes)
-	if workspaceBuckets != nil {
-		repos = workspaceBuckets
 	}
 	var out []graph.IfaceImplementsRow
 	for _, prefix := range repos {
 		var q string
 		var args []any
-		if prefixes == nil && workspaceBuckets == nil {
+		if prefixes == nil {
 			// Preserve legacy dangling implementing-type tuples in the global view.
 			q = `SELECT e.from_id, n.id, n.meta FROM edges e
 LEFT JOIN nodes implementing ON implementing.id = e.from_id AND implementing.view_gen = e.view_gen
@@ -226,23 +209,14 @@ JOIN nodes n ON n.id = e.to_id AND n.view_gen = e.view_gen
 WHERE e.kind = ? AND n.kind = ? AND n.meta IS NOT NULL AND e.view_gen = ?`
 			args = []any{string(graph.EdgeImplements), string(graph.KindInterface), s.viewGen}
 		} else {
-			index, ownership := "nodes_by_repo", "implementing.repo_prefix"
-			if workspaceBuckets != nil {
-				index, ownership = "nodes_by_effective_workspace", `COALESCE(NULLIF(implementing.workspace_id, ''), implementing.repo_prefix)`
-			}
 			q = `SELECT e.from_id, n.id, n.meta
-FROM nodes AS implementing INDEXED BY ` + index + `
+FROM nodes AS implementing INDEXED BY nodes_by_repo
 CROSS JOIN edges e INDEXED BY edges_by_from ON e.from_id = implementing.id AND e.view_gen = implementing.view_gen AND e.kind = ?
 JOIN nodes n ON n.id = e.to_id AND n.view_gen = e.view_gen
-WHERE implementing.view_gen = ? AND ` + ownership + ` = ? AND n.kind = ? AND n.meta IS NOT NULL`
+WHERE implementing.view_gen = ? AND implementing.repo_prefix = ? AND n.kind = ? AND n.meta IS NOT NULL`
 			args = []any{string(graph.EdgeImplements), s.viewGen, prefix, string(graph.KindInterface)}
 		}
 		edgeSQL, edgeArgs := outlineEdgePredicate(filter, "implementing", "n")
-		if scope != nil {
-			predicate, scopeArgs := outlineScopePredicate(*scope, "implementing")
-			q += ` AND implementing.id IS NOT NULL AND ` + predicate
-			args = append(args, scopeArgs...)
-		}
 		viaSQL, viaArgs := outlineViaPredicate(filter.ExcludeVia)
 		args = append(args, edgeArgs...)
 		args = append(args, viaArgs...)

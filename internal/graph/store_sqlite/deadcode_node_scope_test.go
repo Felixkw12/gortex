@@ -47,10 +47,6 @@ func TestDeadCodeNodeScopePreservesMetadataAndGlobalUsage(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{"own", "unowned", "external", "legacy"}, ids)
 	require.Len(t, slices.Collect(s.NodesByKindInScope(graph.KindFile, nil, scope)), 1)
-	rows, err := s.IfaceImplementsRowsInScopeFiltered(nil, scope, graph.OutlineEdgeFilter{})
-	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	require.Equal(t, "iface", rows[0].IfaceID)
 }
 
 // This benchmark exposes residual node-scan growth separately from expensive
@@ -120,9 +116,6 @@ func TestDeadCodeNodeScopeSurvivesBulkIndexDropAndRecreate(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, nodes, 1)
 		require.Equal(t, "own", nodes[0].ID)
-		rows, err := s.IfaceImplementsRowsInScopeFiltered(nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{})
-		require.NoError(t, err)
-		require.Len(t, rows, 1)
 		require.Len(t, slices.Collect(s.NodesByKindInScope(graph.KindFile, nil, graph.NodeScope{WorkspaceID: "ws"})), 1)
 	}
 	require.False(t, indexNames(t, s.db)["nodes_by_effective_workspace"])

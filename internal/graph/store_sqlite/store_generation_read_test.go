@@ -1321,9 +1321,6 @@ func generationReadProbes() []genProbe {
 			for n := range s.NodesByKindInScope(graph.KindFile, nil, scope) {
 				out = append(out, nodeTokens([]*graph.Node{n})...)
 			}
-			for _, row := range s.IfaceImplementsRowsInScope(nil, scope) {
-				out = append(out, fmt.Sprintf("node scoped impl %s->%s methods=%v", row.TypeID, row.IfaceID, row.IfaceMeta["methods"]))
-			}
 			return out
 		}},
 		{name: "FilteredNodeScopedDeadCodeReads", run: func(t *testing.T, s *Store) []string {
@@ -1334,13 +1331,6 @@ func generationReadProbes() []genProbe {
 				t.Fatal(err)
 			}
 			out := nodeTokens(nodes)
-			rows, err := s.IfaceImplementsRowsInScopeFiltered(nil, scope, filter)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, row := range rows {
-				out = append(out, fmt.Sprintf("filtered node scoped impl %s->%s methods=%v", row.TypeID, row.IfaceID, row.IfaceMeta["methods"]))
-			}
 			return out
 		}},
 		{name: "ScopedOutlineNodes", run: func(t *testing.T, s *Store) []string {

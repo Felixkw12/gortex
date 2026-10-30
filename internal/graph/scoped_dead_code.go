@@ -6,7 +6,6 @@ import "iter"
 // repository ownership. Usage evidence remains global and reader-visible.
 type NodeScopedDeadCodeReader interface {
 	DeadCodeCandidatesInScope([]NodeKind, map[NodeKind][]EdgeKind, []string, NodeScope) []*Node
-	IfaceImplementsRowsInScope([]string, NodeScope) []IfaceImplementsRow
 	NodesByKindInScope(NodeKind, []string, NodeScope) iter.Seq[*Node]
 }
 
@@ -14,7 +13,6 @@ type NodeScopedDeadCodeReader interface {
 // without losing the exact workspace/project boundary before usage probes.
 type FilteredNodeScopedDeadCodeReader interface {
 	DeadCodeCandidatesInScopeFiltered([]NodeKind, map[NodeKind][]EdgeKind, []string, NodeScope, OutlineEdgeFilter) ([]*Node, error)
-	IfaceImplementsRowsInScopeFiltered([]string, NodeScope, OutlineEdgeFilter) ([]IfaceImplementsRow, error)
 }
 
 // ScopedDeadCodeReader restricts candidate ownership, never evidence of use:
