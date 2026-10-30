@@ -52,7 +52,7 @@ var gatewayPresets = map[string]CustomProvider{
 	// "provider/model" id such as "azure/gpt-5.5" pins one route.
 	"opper": {
 		BaseURL:       "https://api.opper.ai/v3/compat",
-		Model:         "gpt-5.4-mini",
+		Model:         "gpt-6.1-terra",
 		APIKeyEnv:     "OPPER_API_KEY",
 		SchemaMode:    "json_schema",
 		PromptProfile: "frontier",

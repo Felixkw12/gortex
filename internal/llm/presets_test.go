@@ -77,7 +77,7 @@ func TestConfig_ActiveCustom_PresetResolution(t *testing.T) {
 
 	opper := Config{Provider: "opper"}
 	cp, ok = opper.ActiveCustom()
-	if !ok || cp.BaseURL != "https://api.opper.ai/v3/compat" || cp.Model != "gpt-5.4-mini" || cp.APIKeyEnv != "OPPER_API_KEY" || cp.SchemaMode != "json_schema" || ProfileFor(opper) != ProfileFrontier {
+	if !ok || cp.BaseURL != "https://api.opper.ai/v3/compat" || cp.Model != "gpt-6.1-terra" || cp.APIKeyEnv != "OPPER_API_KEY" || cp.SchemaMode != "json_schema" || ProfileFor(opper) != ProfileFrontier {
 		t.Errorf("opper preset: %+v ok=%v profile=%v", cp, ok, ProfileFor(opper))
 	}
 
