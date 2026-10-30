@@ -105,3 +105,29 @@ func TestDeadCodeWorkspaceIndexSeeksAndUpgradePreservesGenerations(t *testing.T)
 	require.Contains(t, plan, "<expr>=? AND view_gen=? AND kind=? AND id>?")
 	require.NotContains(t, plan, "SCAN n")
 }
+
+func TestDeadCodeNodeScopeSurvivesBulkIndexDropAndRecreate(t *testing.T) {
+	s, _ := openTempStore(t)
+	require.True(t, s.BeginCoordinatedBulkLoad())
+	require.NoError(t, s.AddBatchChecked([]*graph.Node{
+		{ID: "own", Kind: graph.KindFunction, RepoPrefix: "a", WorkspaceID: "ws"},
+		{ID: "file", Kind: graph.KindFile, RepoPrefix: "a", WorkspaceID: "ws"},
+		{ID: "type", Kind: graph.KindType, RepoPrefix: "a", WorkspaceID: "ws"},
+		{ID: "iface", Kind: graph.KindInterface, RepoPrefix: "b", WorkspaceID: "other", Meta: map[string]any{"methods": []string{"Work"}}},
+	}, []*graph.Edge{{From: "type", To: "iface", Kind: graph.EdgeImplements}}))
+	check := func() {
+		nodes, err := s.DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, nil, nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{})
+		require.NoError(t, err)
+		require.Len(t, nodes, 1)
+		require.Equal(t, "own", nodes[0].ID)
+		rows, err := s.IfaceImplementsRowsInScopeFiltered(nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.Len(t, slices.Collect(s.NodesByKindInScope(graph.KindFile, nil, graph.NodeScope{WorkspaceID: "ws"})), 1)
+	}
+	require.False(t, indexNames(t, s.db)["nodes_by_effective_workspace"])
+	check()
+	require.NoError(t, s.EndCoordinatedBulkLoad())
+	require.True(t, indexNames(t, s.db)["nodes_by_effective_workspace"])
+	check()
+}
