@@ -35,7 +35,7 @@ import (
 // index changes in a way an old on-disk DB would not already have, and append a
 // matching schemaMigrations entry describing how to bring an older store
 // forward (in place, or by rebuild).
-const currentSchemaVersion = 41
+const currentSchemaVersion = 42
 
 // schemaMigration is one forward step. Exactly one strategy applies:
 //   - rebuild=true: the change introduces structure/data that can only come
@@ -142,6 +142,12 @@ var schemaMigrations = []schemaMigration{
 	{version: 39, name: "seek supplementary name candidates by name length", inPlace: seekNameCandidatesByLength},
 	{version: 40, name: "reconcile SQLite 3.54 name length keys", inPlace: reconcileNameCandidateLengths},
 	{version: 41, name: "seek exact effective workspace nodes", inPlace: createEffectiveWorkspaceIndex, preserveAnalysis: true},
+	{version: 42, name: "seek eligible workspace dead-code candidates", inPlace: createDeadCodeEligibleWorkspaceIndex, preserveAnalysis: true},
+}
+
+func createDeadCodeEligibleWorkspaceIndex(tx *sql.Tx) error {
+	_, err := tx.Exec(nodesDeadCodeEligibleWorkspaceDDL)
+	return err
 }
 
 func createEffectiveWorkspaceIndex(tx *sql.Tx) error {

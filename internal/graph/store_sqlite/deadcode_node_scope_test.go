@@ -112,15 +112,19 @@ func TestDeadCodeNodeScopeSurvivesBulkIndexDropAndRecreate(t *testing.T) {
 		{ID: "iface", Kind: graph.KindInterface, RepoPrefix: "b", WorkspaceID: "other", Meta: map[string]any{"methods": []string{"Work"}}},
 	}, []*graph.Edge{{From: "type", To: "iface", Kind: graph.EdgeImplements}}))
 	check := func() {
-		nodes, err := s.DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, nil, nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{}, graph.DeadCodeCandidateExclusions{})
-		require.NoError(t, err)
-		require.Len(t, nodes, 1)
-		require.Equal(t, "own", nodes[0].ID)
+		for _, exclude := range []graph.DeadCodeCandidateExclusions{{}, {External: true, Stubs: true}} {
+			nodes, err := s.DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, nil, nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{}, exclude)
+			require.NoError(t, err)
+			require.Len(t, nodes, 1)
+			require.Equal(t, "own", nodes[0].ID)
+		}
 		require.Len(t, slices.Collect(s.NodesByKindInScope(graph.KindFile, nil, graph.NodeScope{WorkspaceID: "ws"})), 1)
 	}
 	require.False(t, indexNames(t, s.db)["nodes_by_effective_workspace"])
+	require.False(t, indexNames(t, s.db)["nodes_deadcode_eligible_workspace"])
 	check()
 	require.NoError(t, s.EndCoordinatedBulkLoad())
 	require.True(t, indexNames(t, s.db)["nodes_by_effective_workspace"])
+	require.True(t, indexNames(t, s.db)["nodes_deadcode_eligible_workspace"])
 	check()
 }

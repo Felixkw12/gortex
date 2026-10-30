@@ -16,6 +16,7 @@ var _ graph.FilteredNodeScopedDeadCodeReader = (*Store)(nil)
 
 const effectiveWorkspaceSQL = `COALESCE(NULLIF(workspace_id, ''), repo_prefix)`
 const nodesByEffectiveWorkspaceDDL = `CREATE INDEX IF NOT EXISTS nodes_by_effective_workspace ON nodes(` + effectiveWorkspaceSQL + `, view_gen, kind, id)`
+const nodesDeadCodeEligibleWorkspaceDDL = `CREATE INDEX IF NOT EXISTS nodes_deadcode_eligible_workspace ON nodes(` + effectiveWorkspaceSQL + `, view_gen, kind, id) WHERE external IS NOT 1`
 
 // Ordinary workspace nodes and the unowned global-external exception occupy
 // disjoint effective-workspace buckets. The complete NodeScope predicate still
@@ -71,18 +72,24 @@ func deadCodeNodeScopeVerdictPageSQL(allowed int, scoped, workspaceSeek bool, sc
 	if scoped {
 		q += ` INDEXED BY nodes_by_repo WHERE n.view_gen = ? AND n.repo_prefix = ?`
 	} else if workspaceSeek {
-		q += ` INDEXED BY nodes_by_effective_workspace WHERE n.view_gen = ? AND ` + effectiveWorkspaceSQL + ` = ?`
+		index := "nodes_by_effective_workspace"
+		if len(exclusions) > 0 && exclusions[0].External {
+			// Only explicit eligible-candidate reads imply this partial key.
+			// Raw scope reads still include marked external declarations.
+			index = "nodes_deadcode_eligible_workspace"
+		}
+		q += ` INDEXED BY ` + index + ` WHERE n.view_gen = ? AND ` + effectiveWorkspaceSQL + ` = ?`
 	} else {
 		q += ` WHERE n.view_gen = ?`
 	}
 	args := append(edgeArgs, viaArgs...)
+	if len(exclusions) > 0 {
+		q += deadCodeCandidateExclusionSQL(exclusions[0])
+	}
 	if scope != nil {
 		predicate, scopeArgs := outlineScopePredicate(*scope, "n")
 		q += ` AND ` + predicate
 		args = append(args, scopeArgs...)
-	}
-	if len(exclusions) > 0 {
-		q += deadCodeCandidateExclusionSQL(exclusions[0])
 	}
 	q += ` AND n.id > ? AND n.kind = ? ORDER BY n.id LIMIT ?`
 	return q, args

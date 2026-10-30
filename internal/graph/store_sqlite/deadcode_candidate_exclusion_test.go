@@ -57,6 +57,32 @@ func TestDeadCodeCandidateExclusionsPreserveRawScopeAndLegacyEvidence(t *testing
 
 // Unlike the hydration control, this measures rejected ownership-bucket work
 // inside SQLite: adding globals must not hide behind an unchanged result count.
+func TestDeadCodeEligibleWorkspacePlanSkipsRejectedGlobalPopulation(t *testing.T) {
+	s, _ := openTempStore(t)
+	nodes := []*graph.Node{{ID: "own", Kind: graph.KindFunction, WorkspaceID: "ws"}}
+	for i := range 1000 {
+		nodes = append(nodes, &graph.Node{ID: fmt.Sprint("global-", i), Kind: graph.KindFunction, FilePath: "external::dependency", Meta: map[string]any{"external": true}})
+	}
+	require.NoError(t, s.AddBatchChecked(nodes, nil))
+	// Prove rejected globals are absent from the actual B-tree visited by
+	// candidate pages, rather than only absent from hydrated results.
+	var eligible int
+	require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM nodes INDEXED BY nodes_deadcode_eligible_workspace WHERE external IS NOT 1`).Scan(&eligible))
+	require.Equal(t, 1, eligible)
+	scope := graph.NodeScope{WorkspaceID: "ws"}
+	for _, exclude := range []graph.DeadCodeCandidateExclusions{{}, {External: true, Stubs: true}} {
+		q, args := deadCodeNodeScopeVerdictPageSQL(0, false, true, &scope, graph.OutlineEdgeFilter{}, exclude)
+		plan := generationLookupPlan(t, s.db, q, append([]any{int64(0), ""}, append(args, "", "function", 5)...)...)
+		if exclude.External {
+			require.Contains(t, plan, "nodes_deadcode_eligible_workspace")
+		} else {
+			require.Contains(t, plan, "nodes_by_effective_workspace")
+		}
+		require.Contains(t, plan, "<expr>=? AND view_gen=? AND kind=? AND id>?")
+		require.NotContains(t, plan, "SCAN n")
+	}
+}
+
 func BenchmarkDeadCodeRejectedGlobalScan(b *testing.B) {
 	for _, globals := range []int{0, 10000} {
 		b.Run(fmt.Sprint(globals), func(b *testing.B) {

@@ -2,6 +2,7 @@ package store_sqlite
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -21,8 +22,12 @@ func seedIndexMigrationAnalysis(t *testing.T, version int) (string, graph.Analys
 	require.True(t, found)
 	require.NoError(t, s.Close())
 	withRawDB(t, path, func(db *sql.DB) {
-		_, err := db.Exec(`DROP INDEX nodes_by_effective_workspace`)
+		_, err := db.Exec(`DROP INDEX nodes_deadcode_eligible_workspace`)
 		require.NoError(t, err)
+		if version < 41 {
+			_, err = db.Exec(`DROP INDEX nodes_by_effective_workspace`)
+			require.NoError(t, err)
+		}
 		require.NoError(t, setUserVersion(db, version))
 	})
 	return path, header
@@ -51,16 +56,21 @@ func requireKeptIndexMigrationAnalysis(t *testing.T, s *Store, want graph.Analys
 	require.Equal(t, "persisted", s.GetNode("kept-node").Meta["doc"])
 	version, err := readUserVersion(s.db)
 	require.NoError(t, err)
-	require.Equal(t, 41, version)
+	require.Equal(t, currentSchemaVersion, version)
 	require.True(t, indexNames(t, s.db)["nodes_by_effective_workspace"])
+	require.True(t, indexNames(t, s.db)["nodes_deadcode_eligible_workspace"])
 }
 
 func TestIndexOnlyMigrationPreservesActiveAnalysis(t *testing.T) {
-	path, header := seedIndexMigrationAnalysis(t, 40)
-	s, err := Open(path)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
-	requireKeptIndexMigrationAnalysis(t, s, header)
+	for _, version := range []int{40, 41} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			path, header := seedIndexMigrationAnalysis(t, version)
+			s, err := Open(path)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = s.Close() })
+			requireKeptIndexMigrationAnalysis(t, s, header)
+		})
+	}
 }
 
 func TestMixedIndexMigrationStillInvalidatesAnalysis(t *testing.T) {
