@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"iter"
 	"path/filepath"
+	"slices"
+
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -147,6 +149,40 @@ func TestDeadCodeScopedProcessesUseScopedEntryPoints(t *testing.T) {
 // Hides optional capabilities to retain the old whole-reader algorithm as an
 // independent oracle, and to exercise composed-reader fallbacks.
 type legacyDeadCodeReader struct{ graph.Reader }
+
+func TestDeadCodeFallbackUsesDeclaredCandidateKinds(t *testing.T) {
+	g := graph.New()
+	g.AddBatch([]*graph.Node{
+		{ID: "repo/dead", Name: "dead", Kind: graph.KindFunction, FilePath: "repo/f.go", RepoPrefix: "repo", StartLine: 1, Language: "go"},
+		{ID: "repo/live", Name: "live", Kind: graph.KindFunction, FilePath: "repo/f.go", RepoPrefix: "repo", StartLine: 2, Language: "go"},
+		{ID: "repo/Owner", Name: "Owner", Kind: graph.KindFunction, FilePath: "repo/f.go", RepoPrefix: "repo", StartLine: 3, Language: "go"},
+		{ID: "repo/Owner#local:out@+1", Name: "out", Kind: graph.KindLocal, FilePath: "repo/f.go", RepoPrefix: "repo", StartLine: 4, Language: "go"},
+		{ID: "repo/future", Name: "future", Kind: graph.NodeKind("future_structural_kind"), FilePath: "repo/f.go", RepoPrefix: "repo", StartLine: 5, Language: "go"},
+		{ID: "repo/variable", Name: "variable", Kind: graph.KindVariable, FilePath: "repo/f.go", RepoPrefix: "repo", StartLine: 6, Language: "go"},
+		{ID: "repo/field", Name: "field", Kind: graph.KindField, FilePath: "repo/f.go", RepoPrefix: "repo", StartLine: 7, Language: "go"},
+		{ID: "repo/constant", Name: "constant", Kind: graph.KindConstant, FilePath: "repo/f.go", RepoPrefix: "repo", StartLine: 8, Language: "go"},
+	}, []*graph.Edge{
+		{From: "repo/Owner", To: "repo/live", Kind: graph.EdgeCalls},
+		{From: "repo/Owner", To: "repo/Owner#local:out@+1", Kind: graph.EdgeReads},
+		{From: "repo/Owner", To: "repo/Owner#local:out@+1", Kind: graph.EdgeReturnsTo},
+	})
+	for _, opts := range []FindDeadCodeOptions{{}, {IncludeVariables: true}, {IncludeFields: true}, {IncludeConstants: true}} {
+		fast := FindDeadCode(g, nil, nil, opts)
+		slow := FindDeadCode(legacyDeadCodeReader{g}, nil, nil, opts)
+		require.Equal(t, fast, slow, "fallback must use the same declared kinds, including opt-ins")
+		ids := make([]string, 0, len(slow))
+		for _, entry := range slow {
+			ids = append(ids, entry.ID)
+		}
+		require.Contains(t, ids, "repo/dead")
+		require.NotContains(t, ids, "repo/live")
+		require.NotContains(t, ids, "repo/Owner#local:out@+1", "intra-function bindings are not declaration candidates")
+		require.NotContains(t, ids, "repo/future", "unreviewed future kinds cannot silently become candidates")
+		require.Equal(t, opts.IncludeVariables, slices.Contains(ids, "repo/variable"))
+		require.Equal(t, opts.IncludeFields, slices.Contains(ids, "repo/field"))
+		require.Equal(t, opts.IncludeConstants, slices.Contains(ids, "repo/constant"))
+	}
+}
 
 func TestDeadCodeScopedMatchesPostFiltered(t *testing.T) {
 	for _, sqlite := range []bool{false, true} {
