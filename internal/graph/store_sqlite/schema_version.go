@@ -50,6 +50,9 @@ type schemaMigration struct {
 	name    string
 	inPlace func(tx *sql.Tx) error
 	rebuild bool
+	// Explicit opt-in for a mechanically additive step that cannot change
+	// graph or derived-analysis meaning. Defaults remain conservative.
+	preserveAnalysis bool
 }
 
 // MigrationPhase identifies one observable boundary in an in-place schema
@@ -138,7 +141,7 @@ var schemaMigrations = []schemaMigration{
 	{version: 38, name: "cover exact node declaration reads", inPlace: coverNodeDeclarationIndex},
 	{version: 39, name: "seek supplementary name candidates by name length", inPlace: seekNameCandidatesByLength},
 	{version: 40, name: "reconcile SQLite 3.54 name length keys", inPlace: reconcileNameCandidateLengths},
-	{version: 41, name: "seek exact effective workspace nodes", inPlace: createEffectiveWorkspaceIndex},
+	{version: 41, name: "seek exact effective workspace nodes", inPlace: createEffectiveWorkspaceIndex, preserveAnalysis: true},
 }
 
 func createEffectiveWorkspaceIndex(tx *sql.Tx) error {
@@ -1236,6 +1239,21 @@ type schemaPlan struct {
 	err     error             // refuse unsupported versions without mutation
 }
 
+// preservesAnalysis requires a known, complete transition consisting solely
+// of explicitly neutral in-place steps. Fresh/pre-versioning stamps, missing
+// registry steps and rebuilds never prove compatibility of existing payloads.
+func (p schemaPlan) preservesAnalysis(stored, current int) bool {
+	if p.err != nil || p.wipe || !p.stamp || stored <= 0 || stored >= current || len(p.inPlace) != current-stored {
+		return false
+	}
+	for i, step := range p.inPlace {
+		if step.version != stored+i+1 || step.inPlace == nil || step.rebuild || !step.preserveAnalysis {
+			return false
+		}
+	}
+	return true
+}
+
 // planSchemaMigrationWith decides how to reconcile a store at the stored
 // PRAGMA user_version to current, given the migration registry. It mutates
 // nothing. Open passes (currentSchemaVersion, schemaMigrations); tests pass
@@ -1323,6 +1341,9 @@ func validateSchemaMigrations(current int, migs []schemaMigration) error {
 		}
 		if (m.inPlace != nil) == m.rebuild {
 			return fmt.Errorf("migration v%d (%s) must set exactly one of inPlace / rebuild", m.version, m.name)
+		}
+		if m.preserveAnalysis && m.rebuild {
+			return fmt.Errorf("migration v%d (%s) cannot preserve analysis across a rebuild", m.version, m.name)
 		}
 		prev = m.version
 	}
