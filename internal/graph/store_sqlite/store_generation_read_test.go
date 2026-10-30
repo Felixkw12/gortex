@@ -1315,6 +1315,34 @@ func generationReadProbes() []genProbe {
 			}
 			return out
 		}},
+		{name: "NodeScopedDeadCodeReads", run: func(t *testing.T, s *Store) []string {
+			scope := graph.NodeScope{WorkspaceID: genReadRepo}
+			out := nodeTokens(s.DeadCodeCandidatesInScope([]graph.NodeKind{graph.KindFunction}, map[graph.NodeKind][]graph.EdgeKind{graph.KindFunction: {graph.EdgeCalls}}, nil, scope))
+			for n := range s.NodesByKindInScope(graph.KindFile, nil, scope) {
+				out = append(out, nodeTokens([]*graph.Node{n})...)
+			}
+			for _, row := range s.IfaceImplementsRowsInScope(nil, scope) {
+				out = append(out, fmt.Sprintf("node scoped impl %s->%s methods=%v", row.TypeID, row.IfaceID, row.IfaceMeta["methods"]))
+			}
+			return out
+		}},
+		{name: "FilteredNodeScopedDeadCodeReads", run: func(t *testing.T, s *Store) []string {
+			scope := graph.NodeScope{WorkspaceID: genReadRepo}
+			filter := graph.OutlineEdgeFilter{ExcludeKinds: []graph.EdgeKind{graph.EdgeMatches}, ExcludeVia: "spring.Bean"}
+			nodes, err := s.DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, map[graph.NodeKind][]graph.EdgeKind{graph.KindFunction: {graph.EdgeCalls}}, nil, scope, filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := nodeTokens(nodes)
+			rows, err := s.IfaceImplementsRowsInScopeFiltered(nil, scope, filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range rows {
+				out = append(out, fmt.Sprintf("filtered node scoped impl %s->%s methods=%v", row.TypeID, row.IfaceID, row.IfaceMeta["methods"]))
+			}
+			return out
+		}},
 		{name: "ScopedOutlineNodes", run: func(t *testing.T, s *Store) []string {
 			scope := graph.NodeScope{RepoAllow: map[string]bool{genReadRepo: true}}
 			ids, err := s.OutlineNodeIDsInScope(scope, genReadProbeIDs())
@@ -2152,6 +2180,8 @@ func generationCapabilityChecklist() []capabilityCase {
 		{iface: (*graph.FileImportAggregator)(nil), probe: "FileImportCounts"},
 		{iface: (*graph.ScopedDeadCodeReader)(nil), probe: "ScopedDeadCodeReads"},
 		{iface: (*graph.FilteredScopedDeadCodeReader)(nil), probe: "FilteredScopedDeadCodeReads"},
+		{iface: (*graph.NodeScopedDeadCodeReader)(nil), probe: "NodeScopedDeadCodeReads"},
+		{iface: (*graph.FilteredNodeScopedDeadCodeReader)(nil), probe: "FilteredNodeScopedDeadCodeReads"},
 		{iface: (*graph.ScopedOutlineNodeReader)(nil), probe: "ScopedOutlineNodes"},
 		{iface: (*graph.ScopedOutlineAggregator)(nil), probe: "ScopedOutlineCounts"},
 		{iface: (*graph.FilteredScopedOutlineAggregator)(nil), probe: "ScopedOutlineCountsFiltered"},
