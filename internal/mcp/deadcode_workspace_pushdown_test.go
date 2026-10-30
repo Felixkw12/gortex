@@ -43,8 +43,8 @@ func TestDeadCodeWorkspaceFiltersBeforeCandidateAdjacency(t *testing.T) {
 	require.False(t, foreign, "foreign candidates must be excluded before the method adjacency pass, not only from final output")
 }
 
-func (r *workspaceDeadCodeSpy) DeadCodeCandidatesInScopeFiltered(k []graph.NodeKind, in map[graph.NodeKind][]graph.EdgeKind, repos []string, scope graph.NodeScope, filter graph.OutlineEdgeFilter) ([]*graph.Node, error) {
-	nodes, err := r.Store.DeadCodeCandidatesInScopeFiltered(k, in, repos, scope, filter)
+func (r *workspaceDeadCodeSpy) DeadCodeCandidatesInScopeFiltered(k []graph.NodeKind, in map[graph.NodeKind][]graph.EdgeKind, repos []string, scope graph.NodeScope, filter graph.OutlineEdgeFilter, exclude graph.DeadCodeCandidateExclusions) ([]*graph.Node, error) {
+	nodes, err := r.Store.DeadCodeCandidatesInScopeFiltered(k, in, repos, scope, filter, exclude)
 	for _, n := range nodes {
 		if n.WorkspaceID == "foreign" {
 			*r.foreign = true

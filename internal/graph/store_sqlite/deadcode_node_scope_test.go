@@ -29,7 +29,7 @@ func TestDeadCodeNodeScopePreservesMetadataAndGlobalUsage(t *testing.T) {
 	kinds := []graph.NodeKind{graph.KindFunction}
 	incoming := map[graph.NodeKind][]graph.EdgeKind{graph.KindFunction: {graph.EdgeCalls}}
 	for _, prefixes := range [][]string{nil, {"stale-owner", "", "ws"}, {}} {
-		got, err := s.DeadCodeCandidatesInScopeFiltered(kinds, incoming, prefixes, scope, graph.OutlineEdgeFilter{})
+		got, err := s.DeadCodeCandidatesInScopeFiltered(kinds, incoming, prefixes, scope, graph.OutlineEdgeFilter{}, graph.DeadCodeCandidateExclusions{})
 		require.NoError(t, err)
 		var want []*graph.Node
 		for _, n := range s.DeadCodeCandidatesInRepos(kinds, incoming, prefixes) {
@@ -39,7 +39,7 @@ func TestDeadCodeNodeScopePreservesMetadataAndGlobalUsage(t *testing.T) {
 		}
 		require.Equal(t, want, got)
 	}
-	got, err := s.DeadCodeCandidatesInScopeFiltered(kinds, incoming, nil, scope, graph.OutlineEdgeFilter{})
+	got, err := s.DeadCodeCandidatesInScopeFiltered(kinds, incoming, nil, scope, graph.OutlineEdgeFilter{}, graph.DeadCodeCandidateExclusions{})
 	require.NoError(t, err)
 	ids := make([]string, 0, len(got))
 	for _, n := range got {
@@ -64,7 +64,7 @@ func BenchmarkDeadCodeWorkspaceForeignGrowth(b *testing.B) {
 			require.NoError(b, s.AddBatchChecked(nodes, nil))
 			b.ResetTimer()
 			for range b.N {
-				got, err := s.DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction, graph.KindMethod}, nil, nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{})
+				got, err := s.DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction, graph.KindMethod}, nil, nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{}, graph.DeadCodeCandidateExclusions{})
 				if err != nil || len(got) != 1 {
 					b.Fatal(len(got), err)
 				}
@@ -89,13 +89,13 @@ func TestDeadCodeWorkspaceIndexSeeksAndUpgradePreservesGenerations(t *testing.T)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	for _, gen := range []int64{0, 4} {
-		got, err := s.AtGeneration(gen).DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, nil, nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{})
+		got, err := s.AtGeneration(gen).DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, nil, nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{}, graph.DeadCodeCandidateExclusions{})
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		require.Equal(t, fmt.Sprint(gen), got[0].Name)
 	}
 	scope := graph.NodeScope{WorkspaceID: "ws"}
-	q, args := deadCodeNodeScopeVerdictPageSQL(0, false, true, &scope, graph.OutlineEdgeFilter{})
+	q, args := deadCodeNodeScopeVerdictPageSQL(0, false, true, &scope, graph.OutlineEdgeFilter{}, graph.DeadCodeCandidateExclusions{})
 	plan := generationLookupPlan(t, s.db, q, append([]any{int64(0), "ws"}, append(args, "", "function", 5)...)...)
 	require.Contains(t, plan, "nodes_by_effective_workspace")
 	require.Contains(t, plan, "<expr>=? AND view_gen=? AND kind=? AND id>?")
@@ -112,7 +112,7 @@ func TestDeadCodeNodeScopeSurvivesBulkIndexDropAndRecreate(t *testing.T) {
 		{ID: "iface", Kind: graph.KindInterface, RepoPrefix: "b", WorkspaceID: "other", Meta: map[string]any{"methods": []string{"Work"}}},
 	}, []*graph.Edge{{From: "type", To: "iface", Kind: graph.EdgeImplements}}))
 	check := func() {
-		nodes, err := s.DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, nil, nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{})
+		nodes, err := s.DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, nil, nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{}, graph.DeadCodeCandidateExclusions{})
 		require.NoError(t, err)
 		require.Len(t, nodes, 1)
 		require.Equal(t, "own", nodes[0].ID)

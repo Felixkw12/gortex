@@ -1317,7 +1317,7 @@ func generationReadProbes() []genProbe {
 		}},
 		{name: "NodeScopedDeadCodeReads", run: func(t *testing.T, s *Store) []string {
 			scope := graph.NodeScope{WorkspaceID: genReadRepo}
-			out := nodeTokens(s.DeadCodeCandidatesInScope([]graph.NodeKind{graph.KindFunction}, map[graph.NodeKind][]graph.EdgeKind{graph.KindFunction: {graph.EdgeCalls}}, nil, scope))
+			out := nodeTokens(s.DeadCodeCandidatesInScope([]graph.NodeKind{graph.KindFunction}, map[graph.NodeKind][]graph.EdgeKind{graph.KindFunction: {graph.EdgeCalls}}, nil, scope, graph.DeadCodeCandidateExclusions{}))
 			for n := range s.NodesByKindInScope(graph.KindFile, nil, scope) {
 				out = append(out, nodeTokens([]*graph.Node{n})...)
 			}
@@ -1326,7 +1326,7 @@ func generationReadProbes() []genProbe {
 		{name: "FilteredNodeScopedDeadCodeReads", run: func(t *testing.T, s *Store) []string {
 			scope := graph.NodeScope{WorkspaceID: genReadRepo}
 			filter := graph.OutlineEdgeFilter{ExcludeKinds: []graph.EdgeKind{graph.EdgeMatches}, ExcludeVia: "spring.Bean"}
-			nodes, err := s.DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, map[graph.NodeKind][]graph.EdgeKind{graph.KindFunction: {graph.EdgeCalls}}, nil, scope, filter)
+			nodes, err := s.DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, map[graph.NodeKind][]graph.EdgeKind{graph.KindFunction: {graph.EdgeCalls}}, nil, scope, filter, graph.DeadCodeCandidateExclusions{})
 			if err != nil {
 				t.Fatal(err)
 			}

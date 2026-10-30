@@ -561,7 +561,7 @@ func collectDeadCodeCandidates(g graph.Reader, opt FindDeadCodeOptions) (candida
 	}
 	if opt.NodeScope != nil {
 		if scoped, ok := g.(graph.NodeScopedDeadCodeReader); ok {
-			return scoped.DeadCodeCandidatesInScope(kinds, allowed, opt.RepoPrefixes, *opt.NodeScope), nil
+			return scoped.DeadCodeCandidatesInScope(kinds, allowed, opt.RepoPrefixes, *opt.NodeScope, graph.DeadCodeCandidateExclusions{Stubs: true, External: true}), nil
 		}
 	}
 	if scoped, ok := g.(graph.ScopedDeadCodeReader); ok {

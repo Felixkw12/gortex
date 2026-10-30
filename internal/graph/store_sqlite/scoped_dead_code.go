@@ -27,8 +27,8 @@ func deadCodeWorkspaceBuckets(scope *graph.NodeScope, prefixes []string) []strin
 	return nil
 }
 
-func (s *Store) DeadCodeCandidatesInScope(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope graph.NodeScope) []*graph.Node {
-	nodes, _ := s.DeadCodeCandidatesInScopeFiltered(kinds, incoming, prefixes, scope, graph.OutlineEdgeFilter{})
+func (s *Store) DeadCodeCandidatesInScope(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope graph.NodeScope, exclude graph.DeadCodeCandidateExclusions) []*graph.Node {
+	nodes, _ := s.DeadCodeCandidatesInScopeFiltered(kinds, incoming, prefixes, scope, graph.OutlineEdgeFilter{}, exclude)
 	return nodes
 }
 
@@ -53,7 +53,7 @@ func deadCodeFilteredVerdictPageSQL(allowed int, scoped bool, filter graph.Outli
 	return deadCodeNodeScopeVerdictPageSQL(allowed, scoped, false, nil, filter)
 }
 
-func deadCodeNodeScopeVerdictPageSQL(allowed int, scoped, workspaceSeek bool, scope *graph.NodeScope, filter graph.OutlineEdgeFilter) (string, []any) {
+func deadCodeNodeScopeVerdictPageSQL(allowed int, scoped, workspaceSeek bool, scope *graph.NodeScope, filter graph.OutlineEdgeFilter, exclusions ...graph.DeadCodeCandidateExclusions) (string, []any) {
 	probe := `NOT EXISTS (SELECT 1 FROM edges e `
 	source := ""
 	if len(filter.ExcludeNodeKinds) > 0 {
@@ -81,8 +81,28 @@ func deadCodeNodeScopeVerdictPageSQL(allowed int, scoped, workspaceSeek bool, sc
 		q += ` AND ` + predicate
 		args = append(args, scopeArgs...)
 	}
+	if len(exclusions) > 0 {
+		q += deadCodeCandidateExclusionSQL(exclusions[0])
+	}
 	q += ` AND n.id > ? AND n.kind = ? ORDER BY n.id LIMIT ?`
 	return q, args
+}
+
+func deadCodeCandidateExclusionSQL(exclude graph.DeadCodeCandidateExclusions) string {
+	var q string
+	if exclude.External {
+		// NULL includes legacy blob-only metadata. Keep those rows for the
+		// decoded analyzer check instead of assuming absent promoted data is false.
+		q += ` AND n.external IS NOT 1`
+	}
+	if exclude.Stubs {
+		// Match graph.StubKind's first two segments, case sensitively. The
+		// generated is_stub column uses LIKE and cannot distinguish MODULE.
+		for _, kind := range []string{graph.StubKindStdlib, graph.StubKindBuiltin, graph.StubKindExternalCall, graph.StubKindModule} {
+			q += ` AND NOT (n.id GLOB '` + kind + `::*' OR (instr(n.id, '::') > 0 AND substr(n.id, instr(n.id, '::') + 2) GLOB '` + kind + `::*'))`
+		}
+	}
+	return q
 }
 
 const deadCodeScopedFilesPageSQL = `SELECT ` + lookupNodeCols + ` FROM nodes INDEXED BY nodes_by_repo
@@ -111,11 +131,11 @@ func (s *Store) deadCodeCandidatesInReposFiltered(ctx context.Context, kinds []g
 	return s.deadCodeCandidatesInScopeFiltered(ctx, kinds, incoming, prefixes, nil, filter)
 }
 
-func (s *Store) DeadCodeCandidatesInScopeFiltered(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope graph.NodeScope, filter graph.OutlineEdgeFilter) ([]*graph.Node, error) {
-	return s.deadCodeCandidatesInScopeFiltered(s.readContext(), kinds, incoming, prefixes, &scope, filter)
+func (s *Store) DeadCodeCandidatesInScopeFiltered(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope graph.NodeScope, filter graph.OutlineEdgeFilter, exclude graph.DeadCodeCandidateExclusions) ([]*graph.Node, error) {
+	return s.deadCodeCandidatesInScopeFiltered(s.readContext(), kinds, incoming, prefixes, &scope, filter, exclude)
 }
 
-func (s *Store) deadCodeCandidatesInScopeFiltered(ctx context.Context, kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope *graph.NodeScope, filter graph.OutlineEdgeFilter) ([]*graph.Node, error) {
+func (s *Store) deadCodeCandidatesInScopeFiltered(ctx context.Context, kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope *graph.NodeScope, filter graph.OutlineEdgeFilter, exclusions ...graph.DeadCodeCandidateExclusions) ([]*graph.Node, error) {
 	repos := sortedDeadCodeRepos(prefixes)
 	if prefixes == nil {
 		repos = []string{""} // One global pass; no ownership predicate or argument.
@@ -129,7 +149,7 @@ func (s *Store) deadCodeCandidatesInScopeFiltered(ctx context.Context, kinds []g
 	for _, kind := range kinds {
 		var candidates []*graph.Node
 		allowed := anaDedupeEdgeKinds(incoming[kind])
-		q, filterArgs := deadCodeNodeScopeVerdictPageSQL(len(allowed), prefixes != nil, workspaceBuckets != nil, scope, filter)
+		q, filterArgs := deadCodeNodeScopeVerdictPageSQL(len(allowed), prefixes != nil, workspaceBuckets != nil, scope, filter, exclusions...)
 		// SELECT-list edge exclusions precede WHERE generation/ownership;
 		// the exact node scope follows those WHERE arguments.
 		var scopeArgs []any

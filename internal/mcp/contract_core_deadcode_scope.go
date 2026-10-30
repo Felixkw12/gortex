@@ -8,9 +8,9 @@ import (
 
 var _ graph.NodeScopedDeadCodeReader = (*contractCoreEdges)(nil)
 
-func (r *contractCoreEdges) DeadCodeCandidatesInScope(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope graph.NodeScope) []*graph.Node {
+func (r *contractCoreEdges) DeadCodeCandidatesInScope(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope graph.NodeScope, exclude graph.DeadCodeCandidateExclusions) []*graph.Node {
 	if backend, ok := r.Reader.(graph.FilteredNodeScopedDeadCodeReader); ok {
-		nodes, err := backend.DeadCodeCandidatesInScopeFiltered(kinds, incoming, prefixes, scope, r.deadCodeFilter())
+		nodes, err := backend.DeadCodeCandidatesInScopeFiltered(kinds, incoming, prefixes, scope, r.deadCodeFilter(), exclude)
 		recordContractCoreReadError(r.ctx, err)
 		return nodes
 	}
@@ -18,7 +18,7 @@ func (r *contractCoreEdges) DeadCodeCandidatesInScope(kinds []graph.NodeKind, in
 	// without SQL support remains correct without tunnelling to its base store.
 	var nodes []*graph.Node
 	for _, n := range r.DeadCodeCandidatesInRepos(kinds, incoming, prefixes) {
-		if n != nil && scope.Allows(n) {
+		if n != nil && scope.Allows(n) && exclude.Allows(n) {
 			nodes = append(nodes, n)
 		}
 	}

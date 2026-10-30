@@ -2,17 +2,37 @@ package graph
 
 import "iter"
 
+// DeadCodeCandidateExclusions removes only declarations already ineligible for
+// dead-code reporting. This is a conservative accelerator: backends may retain
+// legacy metadata they cannot prove ineligible without hydration. Callers must
+// still check decoded nodes. It never restricts incoming usage evidence.
+type DeadCodeCandidateExclusions struct {
+	Stubs    bool
+	External bool
+}
+
+func (e DeadCodeCandidateExclusions) Allows(n *Node) bool {
+	if n == nil || (e.Stubs && IsStub(n.ID)) {
+		return false
+	}
+	if e.External {
+		external, _ := n.Meta["external"].(bool)
+		return !external
+	}
+	return true
+}
+
 // NodeScopedDeadCodeReader intersects exact node metadata scope with explicit
 // repository ownership. Usage evidence remains global and reader-visible.
 type NodeScopedDeadCodeReader interface {
-	DeadCodeCandidatesInScope([]NodeKind, map[NodeKind][]EdgeKind, []string, NodeScope) []*Node
+	DeadCodeCandidatesInScope([]NodeKind, map[NodeKind][]EdgeKind, []string, NodeScope, DeadCodeCandidateExclusions) []*Node
 	NodesByKindInScope(NodeKind, []string, NodeScope) iter.Seq[*Node]
 }
 
 // FilteredNodeScopedDeadCodeReader lets an adjacency wrapper supply its mask
 // without losing the exact workspace/project boundary before usage probes.
 type FilteredNodeScopedDeadCodeReader interface {
-	DeadCodeCandidatesInScopeFiltered([]NodeKind, map[NodeKind][]EdgeKind, []string, NodeScope, OutlineEdgeFilter) ([]*Node, error)
+	DeadCodeCandidatesInScopeFiltered([]NodeKind, map[NodeKind][]EdgeKind, []string, NodeScope, OutlineEdgeFilter, DeadCodeCandidateExclusions) ([]*Node, error)
 }
 
 // ScopedDeadCodeReader restricts candidate ownership, never evidence of use:

@@ -18,8 +18,8 @@ type eligibilityCandidateSpy struct {
 func (r *eligibilityCandidateSpy) BindReadContext(ctx context.Context) graph.Reader {
 	return &eligibilityCandidateSpy{Store: r.WithReadContext(ctx), rows: r.rows}
 }
-func (r *eligibilityCandidateSpy) DeadCodeCandidatesInScopeFiltered(k []graph.NodeKind, in map[graph.NodeKind][]graph.EdgeKind, repos []string, scope graph.NodeScope, filter graph.OutlineEdgeFilter) ([]*graph.Node, error) {
-	nodes, err := r.Store.DeadCodeCandidatesInScopeFiltered(k, in, repos, scope, filter)
+func (r *eligibilityCandidateSpy) DeadCodeCandidatesInScopeFiltered(k []graph.NodeKind, in map[graph.NodeKind][]graph.EdgeKind, repos []string, scope graph.NodeScope, filter graph.OutlineEdgeFilter, exclude graph.DeadCodeCandidateExclusions) ([]*graph.Node, error) {
+	nodes, err := r.Store.DeadCodeCandidatesInScopeFiltered(k, in, repos, scope, filter, exclude)
 	*r.rows += len(nodes)
 	return nodes, err
 }
@@ -56,4 +56,36 @@ func TestDeadCodeKnownIneligibleGlobalsDoNotGrowCandidateHydration(t *testing.T)
 	after, rowsAfter := run()
 	require.JSONEq(t, before, after)
 	require.Equal(t, rowsBefore, rowsAfter, "already rejected globals must not reach candidate hydration/usage work")
+}
+
+func TestDeadCodeCandidateExclusionsKeepSelectedReaderEvidence(t *testing.T) {
+	_, store := outlineFixture(t)
+	require.NoError(t, store.AddBatchChecked([]*graph.Node{
+		{ID: "own", Kind: graph.KindFunction, WorkspaceID: "ws"},
+		{ID: "foreign", Kind: graph.KindFunction, FilePath: "external::caller", Meta: map[string]any{"external": true}},
+		{ID: "repo::module::stub", Kind: graph.KindFunction, WorkspaceID: "ws"},
+	}, []*graph.Edge{{From: "foreign", To: "own", Kind: graph.EdgeCalls}}))
+	exclude := graph.DeadCodeCandidateExclusions{Stubs: true, External: true}
+	for _, masked := range []map[string]bool{nil, {"foreign": true}} {
+		ctx := withContractCoreReadErrors(t.Context())
+		fast := newContractCoreEdges(store, ctx, masked).(graph.NodeScopedDeadCodeReader)
+		fallback := newContractCoreEdges(legacyOutlineReader{store}, ctx, masked).(graph.NodeScopedDeadCodeReader)
+		kinds := []graph.NodeKind{graph.KindFunction}
+		incoming := map[graph.NodeKind][]graph.EdgeKind{graph.KindFunction: {graph.EdgeCalls}}
+		scope := graph.NodeScope{WorkspaceID: "ws"}
+		got := fast.DeadCodeCandidatesInScope(kinds, incoming, nil, scope, exclude)
+		require.Equal(t, fallback.DeadCodeCandidatesInScope(kinds, incoming, nil, scope, exclude), got)
+		var ids []string
+		for _, n := range got {
+			ids = append(ids, n.ID)
+		}
+		require.NotContains(t, ids, "foreign")
+		require.NotContains(t, ids, "repo::module::stub")
+		if masked != nil {
+			require.Contains(t, ids, "own")
+		} else {
+			require.NotContains(t, ids, "own")
+		}
+		require.NoError(t, contractCoreReadError(ctx))
+	}
 }
