@@ -108,42 +108,6 @@ type FindDeadCodeOptions struct {
 	SkipCrossRepoNodes bool
 }
 
-// neverDeadCodeKinds enumerates node kinds the dead-code analyzer must
-// never report — regardless of opt-in flags — because the question
-// "is this code dead?" has no meaningful answer for them. Includes
-// structural nodes (file/package/import), function-shape nodes
-// (param/closure/generic_param), extracted metadata (todo/team/
-// release/license), infra surface (table/column/migration/config_key/
-// flag/event/fixture/resource/kustomization/image), package metadata
-// (module), and value-extraction nodes (string/enum_member).
-// Surfacing any of these drowns real dead-function signal in noise.
-var neverDeadCodeKinds = map[graph.NodeKind]bool{
-	graph.KindFile:          true,
-	graph.KindPackage:       true,
-	graph.KindImport:        true,
-	graph.KindParam:         true,
-	graph.KindClosure:       true,
-	graph.KindGenericParam:  true,
-	graph.KindString:        true,
-	graph.KindEnumMember:    true,
-	graph.KindModule:        true,
-	graph.KindColumn:        true,
-	graph.KindTable:         true,
-	graph.KindConfigKey:     true,
-	graph.KindFlag:          true,
-	graph.KindEvent:         true,
-	graph.KindMigration:     true,
-	graph.KindFixture:       true,
-	graph.KindTodo:          true,
-	graph.KindTeam:          true,
-	graph.KindRelease:       true,
-	graph.KindLicense:       true,
-	graph.KindResource:      true,
-	graph.KindKustomization: true,
-	graph.KindImage:         true,
-	graph.KindContract:      true,
-}
-
 // incomingUsageKinds returns the set of incoming edge kinds that count
 // as "this symbol is used" for the given node kind. The per-kind list
 // matters because different shapes are exercised by different edges:
@@ -226,8 +190,8 @@ func isEntryPointNode(n *graph.Node) bool {
 // to flag (modulo the opt-in switches for fields / variables /
 // constants). Used both for the per-kind allowlist handed to the
 // DeadCodeCandidator capability and as the source of truth for the
-// Go-fallback loop. Kept in lockstep with neverDeadCodeKinds: a kind
-// MUST appear in exactly one of the two lists.
+// Go-fallback loop. Structural/metadata nodes, intra-function bindings and
+// unreviewed future kinds are not candidates, even on a legacy reader.
 var candidateNodeKinds = []graph.NodeKind{
 	graph.KindFunction,
 	graph.KindMethod,
@@ -307,13 +271,10 @@ func FindDeadCode(g graph.Reader, processes *ProcessResult, excludePatterns []st
 	var result []DeadCodeEntry
 	var resultNodes []*graph.Node
 	for _, n := range candidates {
-		// Skip kinds the analyzer never reports — structural,
-		// extracted metadata, infra, function-shape, and value-only
-		// nodes. See neverDeadCodeKinds for the full list and why.
-		// (The server-side candidator only ships nodes whose kind is
-		// in candidateNodeKinds, but the Go fallback path scans
-		// AllNodes so we keep the explicit gate.)
-		if neverDeadCodeKinds[n.Kind] {
+		// Keep indexed and legacy readers on the same positive eligibility
+		// contract. A negative list silently admitted new local/structural
+		// kinds from AllNodes that an indexed candidator never returned.
+		if !slices.Contains(candidateNodeKinds, n.Kind) {
 			continue
 		}
 
