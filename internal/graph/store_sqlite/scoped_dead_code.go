@@ -14,6 +14,19 @@ var _ graph.FilteredScopedDeadCodeReader = (*Store)(nil)
 var _ graph.NodeScopedDeadCodeReader = (*Store)(nil)
 var _ graph.FilteredNodeScopedDeadCodeReader = (*Store)(nil)
 
+const effectiveWorkspaceSQL = `COALESCE(NULLIF(workspace_id, ''), repo_prefix)`
+const nodesByEffectiveWorkspaceDDL = `CREATE INDEX IF NOT EXISTS nodes_by_effective_workspace ON nodes(` + effectiveWorkspaceSQL + `, view_gen, kind, id)`
+
+// Ordinary workspace nodes and the unowned global-external exception occupy
+// disjoint effective-workspace buckets. The complete NodeScope predicate still
+// checks every row, including project/repo policy and the external path proof.
+func deadCodeWorkspaceBuckets(scope *graph.NodeScope, prefixes []string) []string {
+	if prefixes == nil && scope != nil && scope.WorkspaceID != "" {
+		return []string{scope.WorkspaceID, ""}
+	}
+	return nil
+}
+
 func (s *Store) DeadCodeCandidatesInScope(kinds []graph.NodeKind, incoming map[graph.NodeKind][]graph.EdgeKind, prefixes []string, scope graph.NodeScope) []*graph.Node {
 	nodes, _ := s.DeadCodeCandidatesInScopeFiltered(kinds, incoming, prefixes, scope, graph.OutlineEdgeFilter{})
 	return nodes
@@ -42,10 +55,10 @@ func deadCodeScopedVerdictPageSQL(allowed int) string {
 }
 
 func deadCodeFilteredVerdictPageSQL(allowed int, scoped bool, filter graph.OutlineEdgeFilter) (string, []any) {
-	return deadCodeNodeScopeVerdictPageSQL(allowed, scoped, nil, filter)
+	return deadCodeNodeScopeVerdictPageSQL(allowed, scoped, false, nil, filter)
 }
 
-func deadCodeNodeScopeVerdictPageSQL(allowed int, scoped bool, scope *graph.NodeScope, filter graph.OutlineEdgeFilter) (string, []any) {
+func deadCodeNodeScopeVerdictPageSQL(allowed int, scoped, workspaceSeek bool, scope *graph.NodeScope, filter graph.OutlineEdgeFilter) (string, []any) {
 	probe := `NOT EXISTS (SELECT 1 FROM edges e `
 	source := ""
 	if len(filter.ExcludeNodeKinds) > 0 {
@@ -62,6 +75,8 @@ func deadCodeNodeScopeVerdictPageSQL(allowed int, scoped bool, scope *graph.Node
 	q := `SELECT n.id, ` + probe + ` FROM nodes AS n`
 	if scoped {
 		q += ` INDEXED BY nodes_by_repo WHERE n.view_gen = ? AND n.repo_prefix = ?`
+	} else if workspaceSeek {
+		q += ` INDEXED BY nodes_by_effective_workspace WHERE n.view_gen = ? AND ` + effectiveWorkspaceSQL + ` = ?`
 	} else {
 		q += ` WHERE n.view_gen = ?`
 	}
@@ -110,12 +125,16 @@ func (s *Store) deadCodeCandidatesInScopeFiltered(ctx context.Context, kinds []g
 	if prefixes == nil {
 		repos = []string{""} // One global pass; no ownership predicate or argument.
 	}
+	workspaceBuckets := deadCodeWorkspaceBuckets(scope, prefixes)
+	if workspaceBuckets != nil {
+		repos = workspaceBuckets
+	}
 
 	var out []*graph.Node
 	for _, kind := range kinds {
 		var candidates []*graph.Node
 		allowed := anaDedupeEdgeKinds(incoming[kind])
-		q, filterArgs := deadCodeNodeScopeVerdictPageSQL(len(allowed), prefixes != nil, scope, filter)
+		q, filterArgs := deadCodeNodeScopeVerdictPageSQL(len(allowed), prefixes != nil, workspaceBuckets != nil, scope, filter)
 		// SELECT-list edge exclusions precede WHERE generation/ownership;
 		// the exact node scope follows those WHERE arguments.
 		var scopeArgs []any
@@ -135,7 +154,7 @@ func (s *Store) deadCodeCandidatesInScopeFiltered(ctx context.Context, kinds []g
 				}
 				args = append(args, filterArgs...)
 				args = append(args, s.viewGen)
-				if prefixes != nil {
+				if prefixes != nil || workspaceBuckets != nil {
 					args = append(args, prefix)
 				}
 				args = append(args, scopeArgs...)
@@ -191,11 +210,15 @@ func (s *Store) ifaceImplementsRowsInScopeFiltered(ctx context.Context, prefixes
 	if prefixes == nil {
 		repos = []string{""}
 	}
+	workspaceBuckets := deadCodeWorkspaceBuckets(scope, prefixes)
+	if workspaceBuckets != nil {
+		repos = workspaceBuckets
+	}
 	var out []graph.IfaceImplementsRow
 	for _, prefix := range repos {
 		var q string
 		var args []any
-		if prefixes == nil {
+		if prefixes == nil && workspaceBuckets == nil {
 			// Preserve legacy dangling implementing-type tuples in the global view.
 			q = `SELECT e.from_id, n.id, n.meta FROM edges e
 LEFT JOIN nodes implementing ON implementing.id = e.from_id AND implementing.view_gen = e.view_gen
@@ -203,11 +226,15 @@ JOIN nodes n ON n.id = e.to_id AND n.view_gen = e.view_gen
 WHERE e.kind = ? AND n.kind = ? AND n.meta IS NOT NULL AND e.view_gen = ?`
 			args = []any{string(graph.EdgeImplements), string(graph.KindInterface), s.viewGen}
 		} else {
+			index, ownership := "nodes_by_repo", "implementing.repo_prefix"
+			if workspaceBuckets != nil {
+				index, ownership = "nodes_by_effective_workspace", `COALESCE(NULLIF(implementing.workspace_id, ''), implementing.repo_prefix)`
+			}
 			q = `SELECT e.from_id, n.id, n.meta
-FROM nodes AS implementing INDEXED BY nodes_by_repo
+FROM nodes AS implementing INDEXED BY ` + index + `
 CROSS JOIN edges e INDEXED BY edges_by_from ON e.from_id = implementing.id AND e.view_gen = implementing.view_gen AND e.kind = ?
 JOIN nodes n ON n.id = e.to_id AND n.view_gen = e.view_gen
-WHERE implementing.view_gen = ? AND implementing.repo_prefix = ? AND n.kind = ? AND n.meta IS NOT NULL`
+WHERE implementing.view_gen = ? AND ` + ownership + ` = ? AND n.kind = ? AND n.meta IS NOT NULL`
 			args = []any{string(graph.EdgeImplements), s.viewGen, prefix, string(graph.KindInterface)}
 		}
 		edgeSQL, edgeArgs := outlineEdgePredicate(filter, "implementing", "n")
@@ -237,34 +264,50 @@ func (s *Store) NodesByKindInScope(kind graph.NodeKind, prefixes []string, scope
 		// File metadata is needed for framework-entrypoint exclusions. Filter
 		// in SQL before decoding it, retaining the exact selected generation.
 		predicate, scopeArgs := outlineScopePredicate(scope, "n")
-		q := `SELECT ` + lookupNodeCols + ` FROM nodes n WHERE n.view_gen = ? AND ` + predicate
+		buckets := deadCodeWorkspaceBuckets(&scope, prefixes)
+		q := `SELECT ` + lookupNodeCols + ` FROM nodes n`
+		if buckets != nil {
+			q += ` INDEXED BY nodes_by_effective_workspace`
+		}
 		if prefixes != nil {
 			if len(prefixes) == 0 {
 				return
 			}
-			q += ` AND n.repo_prefix IN (` + inPlaceholders(len(prefixes)) + `)`
+			buckets = sortedDeadCodeRepos(prefixes)
+			q += ` INDEXED BY nodes_by_repo`
+		}
+		q += ` WHERE n.view_gen = ? AND ` + predicate
+		if prefixes != nil {
+			q += ` AND n.repo_prefix = ?`
+		} else if buckets != nil {
+			q += ` AND ` + effectiveWorkspaceSQL + ` = ?`
 		}
 		q += ` AND n.id > ? AND n.kind = ? ORDER BY n.id LIMIT ?`
-		after := ""
-		for {
-			args := append([]any{s.viewGen}, scopeArgs...)
-			for _, prefix := range prefixes {
-				args = append(args, prefix)
-			}
-			args = append(args, after, string(kind), deadCodePageSize)
-			page, scanned, lastID, err := s.scanNodePage(s.readContext(), q, args...)
-			if err != nil {
-				return
-			}
-			for _, node := range page {
-				if !yield(node) {
+		if buckets == nil {
+			buckets = []string{""}
+		}
+		for _, bucket := range buckets {
+			after := ""
+			for {
+				args := append([]any{s.viewGen}, scopeArgs...)
+				if prefixes != nil || scope.WorkspaceID != "" {
+					args = append(args, bucket)
+				}
+				args = append(args, after, string(kind), deadCodePageSize)
+				page, scanned, lastID, err := s.scanNodePage(s.readContext(), q, args...)
+				if err != nil {
 					return
 				}
+				for _, node := range page {
+					if !yield(node) {
+						return
+					}
+				}
+				if scanned < deadCodePageSize {
+					break
+				}
+				after = lastID
 			}
-			if scanned < deadCodePageSize {
-				return
-			}
-			after = lastID
 		}
 	}
 }

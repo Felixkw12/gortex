@@ -1,6 +1,7 @@
 package store_sqlite
 
 import (
+	"database/sql"
 	"fmt"
 	"slices"
 	"testing"
@@ -74,4 +75,33 @@ func BenchmarkDeadCodeWorkspaceForeignGrowth(b *testing.B) {
 			}
 		})
 	}
+}
+
+func TestDeadCodeWorkspaceIndexSeeksAndUpgradePreservesGenerations(t *testing.T) {
+	path := t.TempDir() + "/upgrade.db"
+	s, err := Open(path)
+	require.NoError(t, err)
+	for _, gen := range []int64{0, 4} {
+		require.NoError(t, s.AtGeneration(gen).AddBatchChecked([]*graph.Node{{ID: "own", Kind: graph.KindFunction, WorkspaceID: "ws", Name: fmt.Sprint(gen)}}, nil))
+	}
+	require.NoError(t, s.Close())
+	withRawDB(t, path, func(db *sql.DB) {
+		_, err := db.Exec(`DROP INDEX nodes_by_effective_workspace; PRAGMA user_version = 40`)
+		require.NoError(t, err)
+	})
+	s, err = Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	for _, gen := range []int64{0, 4} {
+		got, err := s.AtGeneration(gen).DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, nil, nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{})
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		require.Equal(t, fmt.Sprint(gen), got[0].Name)
+	}
+	scope := graph.NodeScope{WorkspaceID: "ws"}
+	q, args := deadCodeNodeScopeVerdictPageSQL(0, false, true, &scope, graph.OutlineEdgeFilter{})
+	plan := generationLookupPlan(t, s.db, q, append([]any{int64(0), "ws"}, append(args, "", "function", 5)...)...)
+	require.Contains(t, plan, "nodes_by_effective_workspace")
+	require.Contains(t, plan, "<expr>=? AND view_gen=? AND kind=? AND id>?")
+	require.NotContains(t, plan, "SCAN n")
 }
