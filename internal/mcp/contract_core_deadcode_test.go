@@ -130,7 +130,7 @@ func TestContractCoreExactWorkspaceDeadCodeKeepsMasksAndFallback(t *testing.T) {
 		if prefixes == nil {
 			require.ElementsMatch(t, []string{"own/dead", "own/masked"}, ids)
 		}
-		if prefixes != nil && len(prefixes) == 1 {
+		if len(prefixes) == 1 {
 			require.Equal(t, []string{"own/masked"}, ids)
 		}
 		if prefixes != nil && len(prefixes) == 0 {

@@ -15,7 +15,7 @@ type workspaceDeadCodeSpy struct {
 }
 
 func (r *workspaceDeadCodeSpy) BindReadContext(ctx context.Context) graph.Reader {
-	return &workspaceDeadCodeSpy{Store: r.Store.WithReadContext(ctx), foreign: r.foreign}
+	return &workspaceDeadCodeSpy{Store: r.WithReadContext(ctx), foreign: r.foreign}
 }
 func (r *workspaceDeadCodeSpy) DeadCodeCandidatesInReposFiltered(k []graph.NodeKind, in map[graph.NodeKind][]graph.EdgeKind, repos []string, filter graph.OutlineEdgeFilter) ([]*graph.Node, error) {
 	nodes, err := r.Store.DeadCodeCandidatesInReposFiltered(k, in, repos, filter)
