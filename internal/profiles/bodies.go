@@ -27,13 +27,13 @@ func sectionHeader(lean bool) string {
 
 A machine-wide §gortex§ MCP server indexes this code. You MUST prefer graph queries over file reads. Hook posture is configurable; follow every Gortex hook instruction even when raw file tools remain callable.
 
-`)
+`) + toolref.ToolSurfacePolicyText + "\n\n"
 	}
 	return bt(`## MANDATORY: Use Gortex MCP tools instead of Read/Grep/Glob
 
 A Gortex daemon is configured machine-wide via the §gortex§ MCP server. On indexed source (any repo it tracks — check §gortex daemon status§), you MUST prefer graph queries over file reads. Hook posture is configurable; follow every Gortex hook instruction even when raw file tools remain callable.
 
-`)
+`) + toolref.ToolSurfacePolicyText + "\n\n"
 }
 
 // sectionFullRuleTable is the classic nine-row instead-of table used
