@@ -25,7 +25,7 @@ func sectionHeader(lean bool) string {
 	if lean {
 		return bt(`## MANDATORY: Use Gortex MCP tools instead of Read/Grep/Glob
 
-A machine-wide §gortex§ MCP server indexes this code. You MUST prefer graph queries over file reads. Hook posture is configurable; follow every Gortex hook instruction even when raw file tools remain callable.
+Use §gortex§ MCP. You MUST prefer graph queries over file reads. Hook posture is configurable; obey its hooks even when native tools remain callable.
 
 `) + toolref.ToolSurfacePolicyText + "\n\n"
 	}
@@ -149,7 +149,7 @@ The graph remembers code; these tools remember **why you made a call**. They are
 // next-session caveat, dropping only the roster prose.
 func switchBullet(active string, lean bool) string {
 	if lean {
-		return bt(fmt.Sprintf(`- **Profiles:** active §%s§. Broader guidance: §gortex instructions switch core§ (or §full§; §list§ shows all) — NEW sessions only.
+		return bt(fmt.Sprintf(`- **Profiles:** active §%s§. §gortex instructions switch core§ (or §full§; §list§ shows all) — NEW sessions only.
 `, active))
 	}
 	return bt(fmt.Sprintf(`- **Instruction profiles** — this block is the active §%s§ profile. §gortex instructions list§ shows the others (§core§ balanced · §localization§ lean · §full§ maximum); switch with §gortex instructions switch <name>§ — applies to NEW sessions only (instructions, tools/list and skills all load at session start).
