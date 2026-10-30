@@ -1,6 +1,7 @@
 package store_sqlite
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -52,4 +53,28 @@ func TestDeadCodeCandidateExclusionsPreserveRawScopeAndLegacyEvidence(t *testing
 	// incoming evidence. An explicit adjacency mask can remove that evidence.
 	masked, _ := query(exclude, graph.OutlineEdgeFilter{ExcludeNodeIDs: map[string]bool{"promoted": true}})
 	require.Contains(t, masked, "live")
+}
+
+// Unlike the hydration control, this measures rejected ownership-bucket work
+// inside SQLite: adding globals must not hide behind an unchanged result count.
+func BenchmarkDeadCodeRejectedGlobalScan(b *testing.B) {
+	for _, globals := range []int{0, 10000} {
+		b.Run(fmt.Sprint(globals), func(b *testing.B) {
+			s, err := Open(b.TempDir() + "/scope.db")
+			require.NoError(b, err)
+			b.Cleanup(func() { _ = s.Close() })
+			nodes := []*graph.Node{{ID: "own", Kind: graph.KindFunction, WorkspaceID: "ws"}}
+			for i := range globals {
+				nodes = append(nodes, &graph.Node{ID: fmt.Sprintf("global-%05d", i), Kind: graph.KindFunction, FilePath: "external::dependency", Meta: map[string]any{"external": true}})
+			}
+			require.NoError(b, s.AddBatchChecked(nodes, nil))
+			b.ResetTimer()
+			for b.Loop() {
+				got, err := s.DeadCodeCandidatesInScopeFiltered([]graph.NodeKind{graph.KindFunction}, nil, nil, graph.NodeScope{WorkspaceID: "ws"}, graph.OutlineEdgeFilter{}, graph.DeadCodeCandidateExclusions{External: true, Stubs: true})
+				if err != nil || len(got) != 1 || got[0].ID != "own" {
+					b.Fatal(len(got), err)
+				}
+			}
+		})
+	}
 }
